@@ -25,7 +25,7 @@ class EventSubManager:
         session_factory: async_sessionmaker,
         registry: InterestRegistry,
         event_hub: LocalEventHub,
-        upstream_transport: Literal["websocket", "webhook"] = "websocket",
+        webhook_event_types: set[str] | None = None,
         webhook_callback_url: str | None = None,
         webhook_secret: str | None = None,
     ) -> None:
@@ -34,7 +34,7 @@ class EventSubManager:
         self.session_factory = session_factory
         self.registry = registry
         self.event_hub = event_hub
-        self.upstream_transport = upstream_transport
+        self.webhook_event_types = {event.strip() for event in (webhook_event_types or set()) if event.strip()}
         self.webhook_callback_url = webhook_callback_url
         self.webhook_secret = webhook_secret
         self._task: asyncio.Task | None = None
@@ -43,10 +43,14 @@ class EventSubManager:
 
     async def start(self) -> None:
         await self._load_interests()
-        if self.upstream_transport == "websocket":
-            self._task = asyncio.create_task(self._run(), name="eventsub-manager")
-            return
         await self._sync_from_twitch_and_reconcile()
+        await self._ensure_webhook_subscriptions()
+        self._task = asyncio.create_task(self._run(), name="eventsub-manager")
+        
+    def _transport_for_event(self, event_type: str) -> Literal["websocket", "webhook"]:
+        if event_type in self.webhook_event_types:
+            return "webhook"
+        return "websocket"
         await self._ensure_all_subscriptions()
 
     async def stop(self) -> None:
@@ -128,9 +132,12 @@ class EventSubManager:
                 event_type = sub.get("type")
                 broadcaster_user_id = condition.get("broadcaster_user_id")
                 method = sub.get("transport", {}).get("method")
-                if method and method != self.upstream_transport:
+                if method not in {"websocket", "webhook"}:
                     continue
                 if not event_type or not broadcaster_user_id:
+                    continue
+                expected_method = self._transport_for_event(event_type)
+                if method != expected_method:
                     continue
                 bot = await session.scalar(
                     select(BotAccount).where(BotAccount.twitch_user_id == broadcaster_user_id)
@@ -153,8 +160,14 @@ class EventSubManager:
         for key in await self.registry.keys():
             await self._ensure_subscription(key)
 
+    async def _ensure_webhook_subscriptions(self) -> None:
+        for key in await self.registry.keys():
+            if self._transport_for_event(key.event_type) == "webhook":
+                await self._ensure_subscription(key)
+
     async def _ensure_subscription(self, key: InterestKey) -> None:
-        if self.upstream_transport == "websocket" and not self._session_id:
+        upstream_transport = self._transport_for_event(key.event_type)
+        if upstream_transport == "websocket" and not self._session_id:
             return
         async with self.session_factory() as session:
             db_sub = await session.scalar(
@@ -164,18 +177,21 @@ class EventSubManager:
                     TwitchSubscription.broadcaster_user_id == key.broadcaster_user_id,
                 )
             )
-            if db_sub and db_sub.status.startswith("enabled") and db_sub.session_id == self._session_id:
-                return
+            if db_sub and db_sub.status.startswith("enabled"):
+                if upstream_transport == "webhook" and not db_sub.session_id:
+                    return
+                if upstream_transport == "websocket" and db_sub.session_id == self._session_id:
+                    return
             if db_sub and db_sub.twitch_subscription_id:
                 with suppress(TwitchApiError):
                     await self.twitch.delete_eventsub_subscription(db_sub.twitch_subscription_id)
                 await session.delete(db_sub)
                 await session.flush()
             transport: dict[str, str]
-            if self.upstream_transport == "webhook":
+            if upstream_transport == "webhook":
                 if not self.webhook_callback_url or not self.webhook_secret:
                     raise RuntimeError(
-                        "TWITCH_EVENTSUB_WEBHOOK_CALLBACK_URL and TWITCH_EVENTSUB_WEBHOOK_SECRET are required for webhook transport"
+                        "TWITCH_EVENTSUB_WEBHOOK_CALLBACK_URL and TWITCH_EVENTSUB_WEBHOOK_SECRET are required for webhook events"
                     )
                 transport = {
                     "method": "webhook",

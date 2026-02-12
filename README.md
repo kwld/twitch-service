@@ -113,14 +113,25 @@ Notes:
 - Set `NGROK_AUTHTOKEN` in `.env` to enable ngrok tunnel.
 - Full setup guide: `docs/DEV_SETUP.md`.
 
-## Upstream EventSub Mode
-Choose Twitch transport in `.env`:
-- `TWITCH_EVENTSUB_TRANSPORT=websocket` uses `TWITCH_EVENTSUB_WS_URL`.
-- `TWITCH_EVENTSUB_TRANSPORT=webhook` uses:
-  - `TWITCH_EVENTSUB_WEBHOOK_CALLBACK_URL` (must be public HTTPS),
-  - `TWITCH_EVENTSUB_WEBHOOK_SECRET` (10-100 ASCII chars).
+## Upstream EventSub Routing (Both Transports)
+The service can use websocket and webhook upstream at the same time.
 
-For webhook mode, Twitch calls:
+Configure in `.env`:
+- `TWITCH_EVENTSUB_WS_URL`: websocket endpoint.
+- `TWITCH_EVENTSUB_WEBHOOK_CALLBACK_URL`: public HTTPS callback.
+- `TWITCH_EVENTSUB_WEBHOOK_SECRET`: webhook secret (10-100 ASCII chars).
+- `TWITCH_EVENTSUB_WEBHOOK_EVENT_TYPES`: comma-separated event types that should use webhook.
+
+Routing rule:
+- If event type is in `TWITCH_EVENTSUB_WEBHOOK_EVENT_TYPES`, subscription uses Twitch webhook.
+- Otherwise, subscription uses Twitch websocket.
+
+Example:
+- `TWITCH_EVENTSUB_WEBHOOK_EVENT_TYPES=channel.online,channel.offline`
+- `channel.online` and `channel.offline` go through webhook.
+- `channel.chat.message` goes through websocket.
+
+Twitch webhook callback:
 - `POST /webhooks/twitch/eventsub`
 
 Handler behavior:

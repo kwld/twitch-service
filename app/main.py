@@ -52,7 +52,11 @@ eventsub_manager = EventSubManager(
     session_factory,
     interest_registry,
     event_hub,
-    upstream_transport=settings.twitch_eventsub_transport,
+    webhook_event_types={
+        x.strip()
+        for x in settings.twitch_eventsub_webhook_event_types.split(",")
+        if x.strip()
+    },
     webhook_callback_url=settings.twitch_eventsub_webhook_callback_url,
     webhook_secret=settings.twitch_eventsub_webhook_secret,
 )

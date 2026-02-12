@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -32,10 +32,6 @@ class Settings(BaseSettings):
         default="wss://eventsub.wss.twitch.tv/ws",
         alias="TWITCH_EVENTSUB_WS_URL",
     )
-    twitch_eventsub_transport: Literal["websocket", "webhook"] = Field(
-        default="websocket",
-        alias="TWITCH_EVENTSUB_TRANSPORT",
-    )
     twitch_eventsub_webhook_callback_url: Optional[str] = Field(
         default=None,
         alias="TWITCH_EVENTSUB_WEBHOOK_CALLBACK_URL",
@@ -46,6 +42,10 @@ class Settings(BaseSettings):
         alias="TWITCH_EVENTSUB_WEBHOOK_SECRET",
     )
     twitch_redirect_uri: str = Field(alias="TWITCH_REDIRECT_URI")
+    twitch_eventsub_webhook_event_types: str = Field(
+        default="channel.online,channel.offline",
+        alias="TWITCH_EVENTSUB_WEBHOOK_EVENT_TYPES",
+    )
     twitch_scopes: str = Field(
         default=(
             "channel:bot chat:read chat:edit "

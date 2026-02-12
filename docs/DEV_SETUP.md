@@ -34,10 +34,13 @@ This starts:
 ## 4) Get the public ngrok URL
 Open `http://localhost:4040` and copy the HTTPS forwarding URL.
 
-For webhook mode, set in `.env`:
-- `TWITCH_EVENTSUB_TRANSPORT=webhook`
+For mixed upstream transport, set in `.env`:
 - `TWITCH_EVENTSUB_WEBHOOK_CALLBACK_URL=<ngrok-https-url>/webhooks/twitch/eventsub`
 - `TWITCH_EVENTSUB_WEBHOOK_SECRET=<10-100 chars>`
+- `TWITCH_EVENTSUB_WEBHOOK_EVENT_TYPES=channel.online,channel.offline`
+
+Events listed in `TWITCH_EVENTSUB_WEBHOOK_EVENT_TYPES` use webhook.
+All other events use websocket.
 
 Restart containers after `.env` changes:
 ```powershell
