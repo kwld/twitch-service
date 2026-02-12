@@ -116,3 +116,30 @@ class TwitchSubscription(Base):
     )
 
     bot_account: Mapped["BotAccount"] = relationship(back_populates="twitch_subscriptions")
+
+
+class ChannelState(Base):
+    __tablename__ = "channel_states"
+    __table_args__ = (
+        UniqueConstraint("bot_account_id", "broadcaster_user_id", name="uq_channel_state_per_bot_channel"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    bot_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("bot_accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    broadcaster_user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    is_live: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    game_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_checked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )

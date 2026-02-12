@@ -24,11 +24,12 @@ from fastapi.responses import PlainTextResponse, Response
 from sqlalchemy import select
 
 from app.auth import authenticate_service, generate_client_id, generate_client_secret, hash_secret
+from app.bot_auth import ensure_bot_access_token
 from app.config import RuntimeState, load_settings
 from app.db import create_engine_and_session
 from app.event_router import InterestRegistry, LocalEventHub
 from app.eventsub_manager import EventSubManager
-from app.models import Base, BotAccount, ServiceAccount, ServiceInterest
+from app.models import Base, BotAccount, ChannelState, ServiceAccount, ServiceInterest
 from app.schemas import CreateInterestRequest, InterestResponse
 from app.twitch import TwitchClient
 
@@ -61,6 +62,7 @@ eventsub_manager = EventSubManager(
     webhook_secret=settings.twitch_eventsub_webhook_secret,
 )
 runtime_state = RuntimeState(settings=settings)
+DEFAULT_CHANNEL_EVENTS = ("channel.online", "channel.offline")
 
 
 async def _require_admin(x_admin_key: str = Header(default="")) -> None:
@@ -74,6 +76,46 @@ async def _service_auth(
 ) -> ServiceAccount:
     async with session_factory() as session:
         return await authenticate_service(session, x_client_id, x_client_secret)
+
+
+def _split_csv(values: str | None) -> list[str]:
+    if not values:
+        return []
+    return [v.strip() for v in values.split(",") if v.strip()]
+
+
+async def _ensure_default_stream_interests(
+    service: ServiceAccount,
+    bot_account_id: uuid.UUID,
+    broadcaster_user_id: str,
+) -> list[ServiceInterest]:
+    created: list[ServiceInterest] = []
+    async with session_factory() as session:
+        for event_type in DEFAULT_CHANNEL_EVENTS:
+            existing = await session.scalar(
+                select(ServiceInterest).where(
+                    ServiceInterest.service_account_id == service.id,
+                    ServiceInterest.bot_account_id == bot_account_id,
+                    ServiceInterest.event_type == event_type,
+                    ServiceInterest.broadcaster_user_id == broadcaster_user_id,
+                )
+            )
+            if existing:
+                continue
+            interest = ServiceInterest(
+                service_account_id=service.id,
+                bot_account_id=bot_account_id,
+                event_type=event_type,
+                broadcaster_user_id=broadcaster_user_id,
+                transport="websocket",
+                webhook_url=None,
+            )
+            session.add(interest)
+            created.append(interest)
+        await session.commit()
+        for interest in created:
+            await session.refresh(interest)
+    return created
 
 
 @asynccontextmanager
@@ -250,6 +292,13 @@ async def create_interest(
         await session.refresh(interest)
     key = await interest_registry.add(interest)
     await eventsub_manager.on_interest_added(key)
+    for default_interest in await _ensure_default_stream_interests(
+        service=service,
+        bot_account_id=req.bot_account_id,
+        broadcaster_user_id=req.broadcaster_user_id,
+    ):
+        default_key = await interest_registry.add(default_interest)
+        await eventsub_manager.on_interest_added(default_key)
     return interest
 
 
@@ -264,6 +313,172 @@ async def delete_interest(interest_id: uuid.UUID, service: ServiceAccount = Depe
     key, still_used = await interest_registry.remove(interest)
     await eventsub_manager.on_interest_removed(key, still_used)
     return {"deleted": True}
+
+
+@app.post("/v1/interests/{interest_id}/heartbeat")
+async def heartbeat_interest(interest_id: uuid.UUID, service: ServiceAccount = Depends(_service_auth)):
+    async with session_factory() as session:
+        interest = await session.get(ServiceInterest, interest_id)
+        if not interest or interest.service_account_id != service.id:
+            raise HTTPException(status_code=404, detail="Interest not found")
+        touch_targets = list(
+            (
+                await session.scalars(
+                    select(ServiceInterest).where(
+                        ServiceInterest.service_account_id == service.id,
+                        ServiceInterest.bot_account_id == interest.bot_account_id,
+                        ServiceInterest.broadcaster_user_id == interest.broadcaster_user_id,
+                    )
+                )
+            ).all()
+        )
+        now = datetime.now(UTC)
+        for target in touch_targets:
+            target.updated_at = now
+        await session.commit()
+    return {"ok": True, "touched": len(touch_targets)}
+
+
+@app.get("/v1/twitch/profiles")
+async def twitch_profiles(
+    bot_account_id: uuid.UUID,
+    user_ids: str | None = None,
+    logins: str | None = None,
+    _: ServiceAccount = Depends(_service_auth),
+):
+    ids = _split_csv(user_ids)
+    login_values = _split_csv(logins)
+    if not ids and not login_values:
+        raise HTTPException(status_code=422, detail="Provide user_ids and/or logins")
+    if len(ids) + len(login_values) > 100:
+        raise HTTPException(status_code=422, detail="At most 100 ids/logins per request")
+
+    async with session_factory() as session:
+        bot = await session.get(BotAccount, bot_account_id)
+        if not bot:
+            raise HTTPException(status_code=404, detail="Bot not found")
+        if not bot.enabled:
+            raise HTTPException(status_code=409, detail="Bot is disabled")
+        token = await ensure_bot_access_token(session, twitch_client, bot)
+        users = await twitch_client.get_users_by_query(token, user_ids=ids, logins=login_values)
+    return {"data": users}
+
+
+@app.get("/v1/twitch/streams/status")
+async def twitch_stream_status(
+    bot_account_id: uuid.UUID,
+    broadcaster_user_ids: str,
+    _: ServiceAccount = Depends(_service_auth),
+):
+    ids = _split_csv(broadcaster_user_ids)
+    if not ids:
+        raise HTTPException(status_code=422, detail="Provide broadcaster_user_ids")
+    if len(ids) > 100:
+        raise HTTPException(status_code=422, detail="At most 100 broadcaster ids per request")
+
+    async with session_factory() as session:
+        bot = await session.get(BotAccount, bot_account_id)
+        if not bot:
+            raise HTTPException(status_code=404, detail="Bot not found")
+        if not bot.enabled:
+            raise HTTPException(status_code=409, detail="Bot is disabled")
+        token = await ensure_bot_access_token(session, twitch_client, bot)
+        streams = await twitch_client.get_streams_by_user_ids(token, ids)
+        live_by_id = {stream.get("user_id"): stream for stream in streams}
+
+        out = []
+        now = datetime.now(UTC)
+        for uid in ids:
+            stream = live_by_id.get(uid)
+            state = await session.scalar(
+                select(ChannelState).where(
+                    ChannelState.bot_account_id == bot_account_id,
+                    ChannelState.broadcaster_user_id == uid,
+                )
+            )
+            if not state:
+                state = ChannelState(
+                    bot_account_id=bot_account_id,
+                    broadcaster_user_id=uid,
+                    is_live=False,
+                )
+                session.add(state)
+            if stream:
+                state.is_live = True
+                state.title = stream.get("title")
+                state.game_name = stream.get("game_name")
+                raw_started = stream.get("started_at")
+                if raw_started:
+                    try:
+                        state.started_at = datetime.fromisoformat(raw_started.replace("Z", "+00:00"))
+                    except ValueError:
+                        state.started_at = None
+                else:
+                    state.started_at = None
+            else:
+                state.is_live = False
+                state.title = None
+                state.game_name = None
+                state.started_at = None
+            state.last_checked_at = now
+            out.append(
+                {
+                    "broadcaster_user_id": uid,
+                    "is_live": state.is_live,
+                    "title": state.title,
+                    "game_name": state.game_name,
+                    "started_at": state.started_at.isoformat() if state.started_at else None,
+                    "last_checked_at": state.last_checked_at.isoformat(),
+                }
+            )
+        await session.commit()
+    return {"data": out}
+
+
+@app.get("/v1/twitch/streams/status/interested")
+async def interested_stream_status(service: ServiceAccount = Depends(_service_auth)):
+    async with session_factory() as session:
+        interests = list(
+            (
+                await session.scalars(
+                    select(ServiceInterest).where(ServiceInterest.service_account_id == service.id)
+                )
+            ).all()
+        )
+        pairs = {(i.bot_account_id, i.broadcaster_user_id) for i in interests}
+        rows = []
+        for bot_id, broadcaster_user_id in pairs:
+            state = await session.scalar(
+                select(ChannelState).where(
+                    ChannelState.bot_account_id == bot_id,
+                    ChannelState.broadcaster_user_id == broadcaster_user_id,
+                )
+            )
+            if not state:
+                rows.append(
+                    {
+                        "bot_account_id": str(bot_id),
+                        "broadcaster_user_id": broadcaster_user_id,
+                        "is_live": None,
+                        "title": None,
+                        "game_name": None,
+                        "started_at": None,
+                        "last_checked_at": None,
+                    }
+                )
+                continue
+            rows.append(
+                {
+                    "bot_account_id": str(state.bot_account_id),
+                    "broadcaster_user_id": state.broadcaster_user_id,
+                    "is_live": state.is_live,
+                    "title": state.title,
+                    "game_name": state.game_name,
+                    "started_at": state.started_at.isoformat() if state.started_at else None,
+                    "last_checked_at": state.last_checked_at.isoformat(),
+                }
+            )
+    return {"data": rows}
 
 
 @app.websocket("/ws/events")

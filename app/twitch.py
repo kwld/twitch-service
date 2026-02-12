@@ -99,6 +99,39 @@ class TwitchClient:
             raise TwitchApiError(f"Failed users lookup: {resp.text}")
         return resp.json().get("data", [])
 
+    async def get_users_by_query(
+        self,
+        access_token: str,
+        user_ids: list[str] | None = None,
+        logins: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        user_ids = user_ids or []
+        logins = logins or []
+        if not user_ids and not logins:
+            return []
+        headers = {"Authorization": f"Bearer {access_token}", "Client-Id": self.client_id}
+        params: list[tuple[str, str]] = []
+        for uid in user_ids:
+            params.append(("id", uid))
+        for login in logins:
+            params.append(("login", login))
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(f"{HELIX_BASE}/users", headers=headers, params=params)
+        if resp.status_code >= 300:
+            raise TwitchApiError(f"Failed users lookup by query: {resp.text}")
+        return resp.json().get("data", [])
+
+    async def get_streams_by_user_ids(self, access_token: str, user_ids: list[str]) -> list[dict[str, Any]]:
+        if not user_ids:
+            return []
+        headers = {"Authorization": f"Bearer {access_token}", "Client-Id": self.client_id}
+        params = [("user_id", uid) for uid in user_ids]
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(f"{HELIX_BASE}/streams", headers=headers, params=params)
+        if resp.status_code >= 300:
+            raise TwitchApiError(f"Failed streams lookup: {resp.text}")
+        return resp.json().get("data", [])
+
     async def get_user_by_login_app(self, login: str) -> dict[str, Any] | None:
         token = await self.app_access_token()
         headers = {

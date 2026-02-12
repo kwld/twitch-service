@@ -42,6 +42,20 @@ Rules:
 ### Delete interest
 - `DELETE /v1/interests/{interest_id}`
 
+### Heartbeat interest
+- `POST /v1/interests/{interest_id}/heartbeat`
+- Use periodically to keep interest alive.
+- If no heartbeat is received for 1 hour, interest/state is auto-removed.
+
+### Fetch Twitch profiles via bot account
+- `GET /v1/twitch/profiles?bot_account_id=<uuid>&user_ids=1,2&logins=foo,bar`
+
+### Fetch stream status via bot account
+- `GET /v1/twitch/streams/status?bot_account_id=<uuid>&broadcaster_user_ids=111,222`
+
+### Fetch cached stream status for your interested channels
+- `GET /v1/twitch/streams/status/interested`
+
 ## 4) Receiving events
 ### Option A: websocket (recommended default)
 Connect:
@@ -70,6 +84,7 @@ Your callback receives the same envelope JSON.
 3. Store returned interest IDs.
 4. On shutdown or unsubscribe, call `DELETE /v1/interests/{interest_id}`.
 5. On reconnect, reopen websocket and keep existing interests.
+6. Send periodic heartbeat for active interests.
 
 ## 6) Error handling
 - `401`: invalid service credentials.

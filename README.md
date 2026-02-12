@@ -13,14 +13,17 @@ Minimal API service that:
   - create service accounts (`client_id`, `client_secret`),
   - regenerate service account secret.
 - API for local services to register interest subscriptions.
+- API for local services to fetch Twitch user profiles and stream status via bot accounts.
 - In-memory + database interest registry.
 - Startup reconciliation:
   - load interests from DB,
   - fetch existing Twitch subscriptions,
   - reuse existing ones when possible,
   - create only missing subscriptions.
+- On startup, initializes stream state for interested channels.
 - Reconnect support for Twitch EventSub WebSocket.
 - Twitch webhook callback verification + HMAC signature validation.
+- Auto-prunes stale interests: if not heartbeated for 1 hour, interest/state is removed.
 
 ## Quickstart
 1. Copy `.env.example` to `.env` and configure values.
@@ -59,6 +62,10 @@ If `.env` is missing, app/cli exits with an explicit error.
 - `GET /v1/interests` (service)
 - `POST /v1/interests` (service)
 - `DELETE /v1/interests/{interest_id}` (service)
+- `POST /v1/interests/{interest_id}/heartbeat` (service)
+- `GET /v1/twitch/profiles?bot_account_id=...&user_ids=...&logins=...` (service)
+- `GET /v1/twitch/streams/status?bot_account_id=...&broadcaster_user_ids=...` (service)
+- `GET /v1/twitch/streams/status/interested` (service)
 - `WS /ws/events?client_id=...&client_secret=...` (service)
 
 ### Create Interest Payload
@@ -73,6 +80,10 @@ If `.env` is missing, app/cli exits with an explicit error.
 ```
 
 For `transport=webhook`, `webhook_url` is required.
+
+Interests should be heartbeated periodically by client services:
+- call `POST /v1/interests/{interest_id}/heartbeat`
+- if no heartbeat for 1 hour, service auto-removes stale interests and channel state.
 
 ## Dev Script
 Run everything for local dev (DB + ngrok + reload):
@@ -159,6 +170,8 @@ Example:
 
 Twitch webhook callback:
 - `POST /webhooks/twitch/eventsub`
+
+`user.authorization.revoke` is always managed as webhook subscription and disables matching bot account when received.
 
 Handler behavior:
 - verifies `Twitch-Eventsub-Message-Signature` using HMAC-SHA256 over:

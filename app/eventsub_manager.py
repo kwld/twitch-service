@@ -4,15 +4,16 @@ import asyncio
 import json
 import logging
 from contextlib import suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 import websockets
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.bot_auth import ensure_bot_access_token
 from app.event_router import InterestKey, InterestRegistry, LocalEventHub
-from app.models import BotAccount, ServiceInterest, TwitchSubscription
+from app.models import BotAccount, ChannelState, ServiceInterest, TwitchSubscription
 from app.twitch import TwitchApiError, TwitchClient
 
 logger = logging.getLogger(__name__)
@@ -38,20 +39,27 @@ class EventSubManager:
         self.webhook_callback_url = webhook_callback_url
         self.webhook_secret = webhook_secret
         self._task: asyncio.Task | None = None
+        self._cleanup_task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._session_id: str | None = None
+
+    def _transport_for_event(self, event_type: str) -> Literal["websocket", "webhook"]:
+        if event_type == "user.authorization.revoke":
+            return "webhook"
+        if event_type in self.webhook_event_types:
+            return "webhook"
+        return "websocket"
 
     async def start(self) -> None:
         await self._load_interests()
         await self._sync_from_twitch_and_reconcile()
+        await self._ensure_authorization_revoke_subscription()
         await self._ensure_webhook_subscriptions()
+        await self._refresh_stream_states_for_interested_channels()
         self._task = asyncio.create_task(self._run(), name="eventsub-manager")
-        
-    def _transport_for_event(self, event_type: str) -> Literal["websocket", "webhook"]:
-        if event_type in self.webhook_event_types:
-            return "webhook"
-        return "websocket"
-        await self._ensure_all_subscriptions()
+        self._cleanup_task = asyncio.create_task(
+            self._cleanup_stale_interests_loop(), name="eventsub-interest-cleanup"
+        )
 
     async def stop(self) -> None:
         self._stop.set()
@@ -59,6 +67,10 @@ class EventSubManager:
             self._task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._task
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._cleanup_task
 
     async def on_interest_added(self, key: InterestKey) -> None:
         await self._ensure_subscription(key)
@@ -79,6 +91,43 @@ class EventSubManager:
                     await self.twitch.delete_eventsub_subscription(db_sub.twitch_subscription_id)
                 await session.delete(db_sub)
                 await session.commit()
+            state = await session.scalar(
+                select(ChannelState).where(
+                    ChannelState.bot_account_id == key.bot_account_id,
+                    ChannelState.broadcaster_user_id == key.broadcaster_user_id,
+                )
+            )
+            if state:
+                await session.delete(state)
+                await session.commit()
+
+    async def prune_stale_interests(self, max_age: timedelta) -> int:
+        threshold = datetime.now(UTC) - max_age
+        removed = 0
+        async with self.session_factory() as session:
+            stale = list(
+                (
+                    await session.scalars(
+                        select(ServiceInterest).where(ServiceInterest.updated_at < threshold)
+                    )
+                ).all()
+            )
+            for interest in stale:
+                await session.delete(interest)
+            await session.commit()
+        for interest in stale:
+            key, still_used = await self.registry.remove(interest)
+            await self.on_interest_removed(key, still_used)
+            removed += 1
+        return removed
+
+    async def _cleanup_stale_interests_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                await self.prune_stale_interests(max_age=timedelta(hours=1))
+            except Exception as exc:
+                logger.warning("Failed stale interest cleanup: %s", exc)
+            await asyncio.sleep(300)
 
     async def _load_interests(self) -> None:
         async with self.session_factory() as session:
@@ -108,6 +157,7 @@ class EventSubManager:
                     self._session_id = payload["session"]["id"]
                     await self._sync_from_twitch_and_reconcile()
                     await self._ensure_all_subscriptions()
+                    await self._refresh_stream_states_for_interested_channels()
                     continue
                 if msg_type == "session_reconnect":
                     reconnect = payload.get("session", {}).get("reconnect_url")
@@ -156,6 +206,30 @@ class EventSubManager:
                 session.add(db_sub)
             await session.commit()
 
+    async def _ensure_authorization_revoke_subscription(self) -> None:
+        if not self.webhook_callback_url or not self.webhook_secret:
+            logger.warning(
+                "Skipping user.authorization.revoke subscription: webhook callback/secret not configured"
+            )
+            return
+        with suppress(TwitchApiError):
+            existing = await self.twitch.list_eventsub_subscriptions()
+            for sub in existing:
+                if sub.get("type") == "user.authorization.revoke":
+                    transport = sub.get("transport", {})
+                    if transport.get("method") == "webhook":
+                        return
+            await self.twitch.create_eventsub_subscription(
+                event_type="user.authorization.revoke",
+                version="1",
+                condition={"client_id": self.twitch.client_id},
+                transport={
+                    "method": "webhook",
+                    "callback": self.webhook_callback_url,
+                    "secret": self.webhook_secret,
+                },
+            )
+
     async def _ensure_all_subscriptions(self) -> None:
         for key in await self.registry.keys():
             await self._ensure_subscription(key)
@@ -187,13 +261,12 @@ class EventSubManager:
                     await self.twitch.delete_eventsub_subscription(db_sub.twitch_subscription_id)
                 await session.delete(db_sub)
                 await session.flush()
-            transport: dict[str, str]
             if upstream_transport == "webhook":
                 if not self.webhook_callback_url or not self.webhook_secret:
                     raise RuntimeError(
                         "TWITCH_EVENTSUB_WEBHOOK_CALLBACK_URL and TWITCH_EVENTSUB_WEBHOOK_SECRET are required for webhook events"
                     )
-                transport = {
+                transport: dict[str, str] = {
                     "method": "webhook",
                     "callback": self.webhook_callback_url,
                     "secret": self.webhook_secret,
@@ -233,6 +306,10 @@ class EventSubManager:
         subscription = payload.get("subscription", {})
         event = payload.get("event", {})
         event_type = subscription.get("type")
+        if event_type == "user.authorization.revoke":
+            await self._handle_user_authorization_revoke(event)
+            return
+
         broadcaster_user_id = event.get("broadcaster_user_id") or subscription.get("condition", {}).get(
             "broadcaster_user_id"
         )
@@ -255,6 +332,7 @@ class EventSubManager:
             event_type=event_type,
             event=event,
         )
+        await self._update_channel_state_from_event(bot.id, event_type, broadcaster_user_id, event)
         for interest in interests:
             if interest.transport == "webhook" and interest.webhook_url:
                 with suppress(Exception):
@@ -274,3 +352,106 @@ class EventSubManager:
             if db_sub:
                 db_sub.status = "revoked"
                 await session.commit()
+
+    async def _handle_user_authorization_revoke(self, event: dict) -> None:
+        revoked_user_id = event.get("user_id")
+        if not revoked_user_id:
+            return
+        async with self.session_factory() as session:
+            bot = await session.scalar(select(BotAccount).where(BotAccount.twitch_user_id == revoked_user_id))
+            if not bot:
+                return
+            bot.enabled = False
+            bot.access_token = ""
+            bot.refresh_token = ""
+            await session.commit()
+        logger.warning("Disabled bot %s due to user.authorization.revoke", revoked_user_id)
+
+    async def _update_channel_state_from_event(
+        self, bot_account_id, event_type: str, broadcaster_user_id: str, event: dict
+    ) -> None:
+        if event_type not in {"channel.online", "channel.offline"}:
+            return
+        async with self.session_factory() as session:
+            state = await session.scalar(
+                select(ChannelState).where(
+                    ChannelState.bot_account_id == bot_account_id,
+                    ChannelState.broadcaster_user_id == broadcaster_user_id,
+                )
+            )
+            if not state:
+                state = ChannelState(
+                    bot_account_id=bot_account_id,
+                    broadcaster_user_id=broadcaster_user_id,
+                    is_live=False,
+                )
+                session.add(state)
+            if event_type == "channel.online":
+                state.is_live = True
+                state.started_at = self._parse_datetime(event.get("started_at"))
+            else:
+                state.is_live = False
+                state.started_at = None
+            state.last_event_at = datetime.now(UTC)
+            state.last_checked_at = datetime.now(UTC)
+            await session.commit()
+
+    def _parse_datetime(self, raw: str | None):
+        if not raw:
+            return None
+        with suppress(ValueError):
+            return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return None
+
+    async def _refresh_stream_states_for_interested_channels(self) -> None:
+        keys = await self.registry.keys()
+        per_bot: dict = {}
+        for key in keys:
+            if key.event_type == "user.authorization.revoke":
+                continue
+            per_bot.setdefault(key.bot_account_id, set()).add(key.broadcaster_user_id)
+        if not per_bot:
+            return
+        async with self.session_factory() as session:
+            for bot_id, broadcaster_ids in per_bot.items():
+                bot = await session.get(BotAccount, bot_id)
+                if not bot or not bot.enabled:
+                    continue
+                try:
+                    bot_token = await ensure_bot_access_token(session, self.twitch, bot)
+                    live_streams = []
+                    broadcaster_list = list(broadcaster_ids)
+                    for idx in range(0, len(broadcaster_list), 100):
+                        chunk = broadcaster_list[idx : idx + 100]
+                        live_streams.extend(await self.twitch.get_streams_by_user_ids(bot_token, chunk))
+                except Exception as exc:
+                    logger.warning("Failed refreshing stream states for bot %s: %s", bot_id, exc)
+                    continue
+                live_by_user = {s.get("user_id"): s for s in live_streams}
+                for broadcaster_id in broadcaster_ids:
+                    stream = live_by_user.get(broadcaster_id)
+                    state = await session.scalar(
+                        select(ChannelState).where(
+                            ChannelState.bot_account_id == bot_id,
+                            ChannelState.broadcaster_user_id == broadcaster_id,
+                        )
+                    )
+                    if not state:
+                        state = ChannelState(
+                            bot_account_id=bot_id,
+                            broadcaster_user_id=broadcaster_id,
+                            is_live=False,
+                        )
+                        session.add(state)
+                    if stream:
+                        state.is_live = True
+                        state.title = stream.get("title")
+                        state.game_name = stream.get("game_name")
+                        state.started_at = self._parse_datetime(stream.get("started_at"))
+                    else:
+                        state.is_live = False
+                        state.title = None
+                        state.game_name = None
+                        state.started_at = None
+                    state.last_checked_at = datetime.now(UTC)
+            await session.commit()
