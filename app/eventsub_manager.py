@@ -336,7 +336,11 @@ class EventSubManager:
         for interest in interests:
             if interest.transport == "webhook" and interest.webhook_url:
                 with suppress(Exception):
-                    await self.event_hub.publish_webhook(interest.webhook_url, envelope)
+                    await self.event_hub.publish_webhook(
+                        interest.service_account_id,
+                        interest.webhook_url,
+                        envelope,
+                    )
             else:
                 await self.event_hub.publish_to_service(interest.service_account_id, envelope)
 

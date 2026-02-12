@@ -8,14 +8,23 @@ from contextlib import suppress
 from urllib.parse import parse_qs, urlparse
 
 from prompt_toolkit import PromptSession
-from sqlalchemy import select
+from sqlalchemy import func, select
 import websockets
 
 from app.auth import generate_client_id, generate_client_secret, hash_secret
 from app.bot_auth import ensure_bot_access_token
 from app.config import load_settings
 from app.db import create_engine_and_session
-from app.models import Base, BotAccount, OAuthCallback, ServiceAccount, TwitchSubscription
+from app.models import (
+    Base,
+    BotAccount,
+    BroadcasterAuthorization,
+    OAuthCallback,
+    ServiceAccount,
+    ServiceInterest,
+    ServiceRuntimeStats,
+    TwitchSubscription,
+)
 from app.twitch import TwitchApiError, TwitchClient
 
 
@@ -526,6 +535,161 @@ async def chat_connect_other_channel_menu(session: PromptSession, session_factor
     )
 
 
+async def remove_bot_menu(session: PromptSession, session_factory, twitch: TwitchClient) -> None:
+    async with session_factory() as db:
+        bots = list((await db.scalars(select(BotAccount))).all())
+    if not bots:
+        print("No bots configured.")
+        return
+    print("\nBots:")
+    for idx, bot in enumerate(bots, start=1):
+        print(f"{idx}) {bot.name} ({bot.twitch_login}/{bot.twitch_user_id}) enabled={bot.enabled}")
+    raw = (await session.prompt_async("Select bot number to remove: ")).strip()
+    try:
+        selected = int(raw)
+    except ValueError:
+        print("Invalid selection.")
+        return
+    if selected < 1 or selected > len(bots):
+        print("Invalid selection.")
+        return
+    bot = bots[selected - 1]
+    confirm = (await session.prompt_async(f"Type '{bot.name}' to confirm removal: ")).strip()
+    if confirm != bot.name:
+        print("Confirmation mismatch; canceled.")
+        return
+
+    async with session_factory() as db:
+        target = await db.get(BotAccount, bot.id)
+        if not target:
+            print("Bot already removed.")
+            return
+        subs = list(
+            (
+                await db.scalars(
+                    select(TwitchSubscription).where(TwitchSubscription.bot_account_id == target.id)
+                )
+            ).all()
+        )
+        for sub in subs:
+            with suppress(Exception):
+                await twitch.delete_eventsub_subscription(sub.twitch_subscription_id)
+        await db.delete(target)
+        await db.commit()
+    print(f"Removed bot: {bot.name}")
+
+
+async def manage_webhook_subscriptions_menu(session: PromptSession, twitch: TwitchClient) -> None:
+    while True:
+        try:
+            subs = await twitch.list_eventsub_subscriptions()
+        except Exception as exc:
+            print(f"Failed listing subscriptions: {exc}")
+            return
+        webhook_subs = [s for s in subs if s.get("transport", {}).get("method") == "webhook"]
+        print("\nWebhook subscriptions:")
+        if not webhook_subs:
+            print("No active webhook subscriptions.")
+        else:
+            for idx, sub in enumerate(webhook_subs, start=1):
+                cond = sub.get("condition", {})
+                transport = sub.get("transport", {})
+                print(
+                    f"{idx}) id={sub.get('id')} type={sub.get('type')} status={sub.get('status')} "
+                    f"broadcaster={cond.get('broadcaster_user_id')} callback={transport.get('callback')}"
+                )
+        print("\nWebhook Subscription Menu")
+        print("1) Refresh")
+        print("2) Delete by number")
+        print("3) Back")
+        choice = (await session.prompt_async("Select option: ")).strip()
+        if choice == "1":
+            continue
+        if choice == "2":
+            if not webhook_subs:
+                print("No webhook subscriptions to delete.")
+                continue
+            raw = (await session.prompt_async("Subscription number: ")).strip()
+            try:
+                idx = int(raw)
+            except ValueError:
+                print("Invalid number.")
+                continue
+            if idx < 1 or idx > len(webhook_subs):
+                print("Invalid number.")
+                continue
+            sub = webhook_subs[idx - 1]
+            try:
+                await twitch.delete_eventsub_subscription(sub["id"])
+                print(f"Deleted subscription {sub['id']}")
+            except Exception as exc:
+                print(f"Failed deleting subscription: {exc}")
+            continue
+        if choice == "3":
+            return
+        print("Invalid option.")
+
+
+async def list_service_status_menu(session_factory) -> None:
+    async with session_factory() as db:
+        services = list((await db.scalars(select(ServiceAccount))).all())
+        if not services:
+            print("No service accounts.")
+            return
+        runtime_by_id = {
+            s.service_account_id: s for s in list((await db.scalars(select(ServiceRuntimeStats))).all())
+        }
+        counts = (
+            await db.execute(
+                select(
+                    ServiceInterest.service_account_id,
+                    func.count(ServiceInterest.id),
+                ).group_by(ServiceInterest.service_account_id)
+            )
+        ).all()
+        interest_count_by_id = {sid: cnt for sid, cnt in counts}
+
+    print("\nService Status and Usage:")
+    for svc in services:
+        stats = runtime_by_id.get(svc.id)
+        interest_count = interest_count_by_id.get(svc.id, 0)
+        if not stats:
+            print(
+                f"- {svc.name} client_id={svc.client_id} enabled={svc.enabled} "
+                f"connected=False active_ws=0 interests={interest_count} api_requests=0 ws_events=0 webhook_events=0"
+            )
+            continue
+        print(
+            f"- {svc.name} client_id={svc.client_id} enabled={svc.enabled} "
+            f"connected={stats.is_connected} active_ws={stats.active_ws_connections} "
+            f"interests={interest_count} api_requests={stats.total_api_requests} "
+            f"ws_events={stats.total_events_sent_ws} webhook_events={stats.total_events_sent_webhook} "
+            f"last_connected={stats.last_connected_at} last_disconnected={stats.last_disconnected_at} "
+            f"last_api={stats.last_api_request_at} last_event={stats.last_event_sent_at}"
+        )
+
+
+async def list_broadcaster_authorizations_menu(session_factory) -> None:
+    async with session_factory() as db:
+        auths = list((await db.scalars(select(BroadcasterAuthorization))).all())
+        if not auths:
+            print("No broadcaster authorizations recorded.")
+            return
+        services = list((await db.scalars(select(ServiceAccount))).all())
+        bots = list((await db.scalars(select(BotAccount))).all())
+    service_name_by_id = {s.id: s.name for s in services}
+    bot_name_by_id = {b.id: b.name for b in bots}
+    print("\nBroadcaster Authorizations:")
+    for auth in auths:
+        scopes = [x for x in auth.scopes_csv.split(",") if x]
+        print(
+            f"- service={service_name_by_id.get(auth.service_account_id, str(auth.service_account_id))} "
+            f"bot={bot_name_by_id.get(auth.bot_account_id, str(auth.bot_account_id))} "
+            f"broadcaster={auth.broadcaster_login}/{auth.broadcaster_user_id} "
+            f"authorized_at={auth.authorized_at} scopes={','.join(scopes)}"
+        )
+
+
 async def menu_loop() -> None:
     settings, engine, session_factory = await init_db()
     twitch = TwitchClient(
@@ -549,7 +713,11 @@ async def menu_loop() -> None:
             "7) List service accounts\n"
             "8) Live chat (own channel)\n"
             "9) Live chat (other channel)\n"
-            "10) Exit\n"
+            "10) Remove bot account\n"
+            "11) Manage webhook EventSub subscriptions\n"
+            "12) View service status and usage\n"
+            "13) View broadcaster authorizations\n"
+            "14) Exit\n"
         )
         choice = (await session.prompt_async("Select option: ")).strip()
 
@@ -668,6 +836,18 @@ async def menu_loop() -> None:
             await chat_connect_other_channel_menu(session, session_factory, twitch)
 
         elif choice == "10":
+            await remove_bot_menu(session, session_factory, twitch)
+
+        elif choice == "11":
+            await manage_webhook_subscriptions_menu(session, twitch)
+
+        elif choice == "12":
+            await list_service_status_menu(session_factory)
+
+        elif choice == "13":
+            await list_broadcaster_authorizations_menu(session_factory)
+
+        elif choice == "14":
             break
 
         else:

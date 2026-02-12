@@ -46,6 +46,8 @@ from app.models import (
     OAuthCallback,
     ServiceAccount,
     ServiceInterest,
+    ServiceRuntimeStats,
+    TwitchSubscription,
 )
 from app.schemas import (
     BroadcasterAuthorizationResponse,
@@ -103,13 +105,81 @@ async def _service_auth(
     x_client_secret: str = Header(default=""),
 ) -> ServiceAccount:
     async with session_factory() as session:
-        return await authenticate_service(session, x_client_id, x_client_secret)
+        service = await authenticate_service(session, x_client_id, x_client_secret)
+        stats = await session.get(ServiceRuntimeStats, service.id)
+        now = datetime.now(UTC)
+        if not stats:
+            stats = ServiceRuntimeStats(service_account_id=service.id)
+            session.add(stats)
+        stats.total_api_requests += 1
+        stats.last_api_request_at = now
+        await session.commit()
+        return service
+
+
+async def _update_runtime_stats(service_account_id: uuid.UUID, mutator) -> None:
+    async with session_factory() as session:
+        stats = await session.get(ServiceRuntimeStats, service_account_id)
+        if not stats:
+            stats = ServiceRuntimeStats(service_account_id=service_account_id)
+            session.add(stats)
+        mutator(stats)
+        await session.commit()
+
+
+async def _on_service_connect(service_account_id: uuid.UUID) -> None:
+    now = datetime.now(UTC)
+
+    def _mutator(stats: ServiceRuntimeStats) -> None:
+        stats.active_ws_connections += 1
+        stats.total_ws_connects += 1
+        stats.is_connected = stats.active_ws_connections > 0
+        stats.last_connected_at = now
+
+    await _update_runtime_stats(service_account_id, _mutator)
+
+
+async def _on_service_disconnect(service_account_id: uuid.UUID) -> None:
+    now = datetime.now(UTC)
+
+    def _mutator(stats: ServiceRuntimeStats) -> None:
+        stats.active_ws_connections = max(0, stats.active_ws_connections - 1)
+        stats.is_connected = stats.active_ws_connections > 0
+        stats.last_disconnected_at = now
+
+    await _update_runtime_stats(service_account_id, _mutator)
+
+
+async def _on_service_ws_event(service_account_id: uuid.UUID) -> None:
+    now = datetime.now(UTC)
+
+    def _mutator(stats: ServiceRuntimeStats) -> None:
+        stats.total_events_sent_ws += 1
+        stats.last_event_sent_at = now
+
+    await _update_runtime_stats(service_account_id, _mutator)
+
+
+async def _on_service_webhook_event(service_account_id: uuid.UUID) -> None:
+    now = datetime.now(UTC)
+
+    def _mutator(stats: ServiceRuntimeStats) -> None:
+        stats.total_events_sent_webhook += 1
+        stats.last_event_sent_at = now
+
+    await _update_runtime_stats(service_account_id, _mutator)
 
 
 def _split_csv(values: str | None) -> list[str]:
     if not values:
         return []
     return [v.strip() for v in values.split(",") if v.strip()]
+
+
+event_hub.on_service_connect = _on_service_connect
+event_hub.on_service_disconnect = _on_service_disconnect
+event_hub.on_service_ws_event = _on_service_ws_event
+event_hub.on_service_webhook_event = _on_service_webhook_event
 
 
 async def _ensure_default_stream_interests(

@@ -85,11 +85,17 @@ class LocalEventHub:
     def __init__(self) -> None:
         self._clients: dict[uuid.UUID, set[WebSocket]] = defaultdict(set)
         self._lock = asyncio.Lock()
+        self.on_service_connect = None
+        self.on_service_disconnect = None
+        self.on_service_ws_event = None
+        self.on_service_webhook_event = None
 
     async def connect(self, service_account_id: uuid.UUID, websocket: WebSocket) -> None:
         await websocket.accept()
         async with self._lock:
             self._clients[service_account_id].add(websocket)
+        if self.on_service_connect:
+            await self.on_service_connect(service_account_id)
 
     async def disconnect(self, service_account_id: uuid.UUID, websocket: WebSocket) -> None:
         async with self._lock:
@@ -97,6 +103,8 @@ class LocalEventHub:
                 self._clients[service_account_id].discard(websocket)
                 if not self._clients[service_account_id]:
                     self._clients.pop(service_account_id, None)
+        if self.on_service_disconnect:
+            await self.on_service_disconnect(service_account_id)
 
     async def publish_to_service(self, service_account_id: uuid.UUID, payload: dict) -> None:
         async with self._lock:
@@ -114,10 +122,20 @@ class LocalEventHub:
             async with self._lock:
                 for ws in dead:
                     self._clients[service_account_id].discard(ws)
+        if self.on_service_ws_event and sockets:
+            await self.on_service_ws_event(service_account_id)
 
-    async def publish_webhook(self, url: str, payload: dict, timeout: int = 10) -> None:
+    async def publish_webhook(
+        self,
+        service_account_id: uuid.UUID,
+        url: str,
+        payload: dict,
+        timeout: int = 10,
+    ) -> None:
         async with httpx.AsyncClient(timeout=timeout) as client:
             await client.post(url, json=payload)
+        if self.on_service_webhook_event:
+            await self.on_service_webhook_event(service_account_id)
 
     def envelope(self, message_id: str, event_type: str, event: dict) -> dict:
         return {

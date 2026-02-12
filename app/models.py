@@ -62,6 +62,7 @@ class ServiceAccount(Base):
     broadcaster_auth_requests: Mapped[list["BroadcasterAuthorizationRequest"]] = relationship(
         back_populates="service_account"
     )
+    runtime_stats: Mapped["ServiceRuntimeStats | None"] = relationship(back_populates="service_account")
 
 
 class ServiceInterest(Base):
@@ -224,3 +225,28 @@ class BroadcasterAuthorizationRequest(Base):
 
     service_account: Mapped["ServiceAccount"] = relationship(back_populates="broadcaster_auth_requests")
     bot_account: Mapped["BotAccount"] = relationship(back_populates="broadcaster_auth_requests")
+
+
+class ServiceRuntimeStats(Base):
+    __tablename__ = "service_runtime_stats"
+
+    service_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("service_accounts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    is_connected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    active_ws_connections: Mapped[int] = mapped_column(nullable=False, default=0)
+    total_ws_connects: Mapped[int] = mapped_column(nullable=False, default=0)
+    total_api_requests: Mapped[int] = mapped_column(nullable=False, default=0)
+    total_events_sent_ws: Mapped[int] = mapped_column(nullable=False, default=0)
+    total_events_sent_webhook: Mapped[int] = mapped_column(nullable=False, default=0)
+    last_connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_disconnected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_api_request_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_event_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    service_account: Mapped["ServiceAccount"] = relationship(back_populates="runtime_stats")
