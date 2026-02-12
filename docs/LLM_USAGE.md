@@ -135,7 +135,8 @@ LLM rule:
 Request:
 ```json
 {
-  "bot_account_id": "uuid"
+  "bot_account_id": "uuid",
+  "redirect_url": "https://your-service.example.com/oauth/done"
 }
 ```
 Returns:
@@ -147,6 +148,20 @@ Returns:
   "expires_in_seconds": 600
 }
 ```
+
+`redirect_url` behavior:
+- Optional; if present, callback completion redirects (HTTP `302`) to this URL.
+- Redirect query fields on success:
+  - `ok=true`
+  - `message=Broadcaster authorization completed.`
+  - `service_connected=true`
+  - `broadcaster_user_id`
+  - `broadcaster_login`
+  - `scopes` (comma-separated)
+- Redirect query fields on failure:
+  - `ok=false`
+  - `error`
+  - `message`
 
 ### `GET /v1/broadcaster-authorizations`
 Returns broadcaster grants for this service:
@@ -216,7 +231,8 @@ For broadcaster auth requests:
 - validates granted scopes include `channel:bot`,
 - resolves broadcaster identity from token validation,
 - upserts `broadcaster_authorizations`,
-- marks request completed/failed.
+- marks request completed/failed,
+- if request includes `redirect_url`, returns HTTP `302` to that URL with result query params.
 
 ## 7) Event Delivery Semantics
 

@@ -222,6 +222,7 @@ class BroadcasterAuthorizationRequest(Base):
         UUID(as_uuid=True), ForeignKey("bot_accounts.id", ondelete="CASCADE"), nullable=False
     )
     requested_scopes_csv: Mapped[str] = mapped_column(Text, nullable=False)
+    redirect_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
     broadcaster_user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)

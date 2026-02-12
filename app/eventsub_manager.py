@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 import websockets
+from websockets.exceptions import ConnectionClosedError
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -79,6 +80,12 @@ class EventSubManager:
         if still_used:
             return
         async with self.session_factory() as session:
+            delete_access_token: str | None = None
+            if key.event_type.startswith("channel.chat."):
+                bot = await session.get(BotAccount, key.bot_account_id)
+                if bot and bot.enabled:
+                    with suppress(Exception):
+                        delete_access_token = await ensure_bot_access_token(session, self.twitch, bot)
             db_sub = await session.scalar(
                 select(TwitchSubscription).where(
                     TwitchSubscription.bot_account_id == key.bot_account_id,
@@ -88,7 +95,9 @@ class EventSubManager:
             )
             if db_sub:
                 with suppress(TwitchApiError):
-                    await self.twitch.delete_eventsub_subscription(db_sub.twitch_subscription_id)
+                    await self.twitch.delete_eventsub_subscription(
+                        db_sub.twitch_subscription_id, access_token=delete_access_token
+                    )
                 await session.delete(db_sub)
                 await session.commit()
             state = await session.scalar(
@@ -137,12 +146,30 @@ class EventSubManager:
     async def _run(self) -> None:
         while not self._stop.is_set():
             try:
+                # Twitch closes idle EventSub websocket sessions with 4003 ("connection unused").
+                # Avoid opening/keeping a websocket when there are no websocket-routed interests.
+                if not await self._has_websocket_interest():
+                    self._session_id = None
+                    await asyncio.sleep(5)
+                    continue
                 await self._run_single_connection(None)
+            except ConnectionClosedError as exc:
+                if exc.code == 4003:
+                    logger.info("EventSub websocket closed as unused (4003); waiting for websocket interests")
+                    self._session_id = None
+                    await asyncio.sleep(5)
+                    continue
+                logger.exception("EventSub websocket closed unexpectedly: %s", exc)
+                await asyncio.sleep(3)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.exception("EventSub manager crashed: %s", exc)
                 await asyncio.sleep(3)
+
+    async def _has_websocket_interest(self) -> bool:
+        keys = await self.registry.keys()
+        return any(self._transport_for_event(key.event_type) == "websocket" for key in keys)
 
     async def _run_single_connection(self, reconnect_url: str | None) -> None:
         target_url = reconnect_url or self.ws_url
@@ -181,6 +208,7 @@ class EventSubManager:
                 condition = sub.get("condition", {})
                 event_type = sub.get("type")
                 broadcaster_user_id = condition.get("broadcaster_user_id")
+                bot_user_id = condition.get("user_id")
                 method = sub.get("transport", {}).get("method")
                 if method not in {"websocket", "webhook"}:
                     continue
@@ -189,9 +217,16 @@ class EventSubManager:
                 expected_method = self._transport_for_event(event_type)
                 if method != expected_method:
                     continue
-                bot = await session.scalar(
-                    select(BotAccount).where(BotAccount.twitch_user_id == broadcaster_user_id)
-                )
+                if event_type.startswith("channel.chat."):
+                    if not bot_user_id:
+                        continue
+                    bot = await session.scalar(
+                        select(BotAccount).where(BotAccount.twitch_user_id == bot_user_id)
+                    )
+                else:
+                    bot = await session.scalar(
+                        select(BotAccount).where(BotAccount.twitch_user_id == broadcaster_user_id)
+                    )
                 if not bot:
                     continue
                 db_sub = TwitchSubscription(
@@ -258,7 +293,15 @@ class EventSubManager:
                     return
             if db_sub and db_sub.twitch_subscription_id:
                 with suppress(TwitchApiError):
-                    await self.twitch.delete_eventsub_subscription(db_sub.twitch_subscription_id)
+                    delete_access_token: str | None = None
+                    if key.event_type.startswith("channel.chat."):
+                        bot = await session.get(BotAccount, key.bot_account_id)
+                        if bot and bot.enabled:
+                            with suppress(Exception):
+                                delete_access_token = await ensure_bot_access_token(session, self.twitch, bot)
+                    await self.twitch.delete_eventsub_subscription(
+                        db_sub.twitch_subscription_id, access_token=delete_access_token
+                    )
                 await session.delete(db_sub)
                 await session.flush()
             if upstream_transport == "webhook":
@@ -273,11 +316,22 @@ class EventSubManager:
                 }
             else:
                 transport = {"method": "websocket", "session_id": self._session_id or ""}
+            condition: dict[str, str] = {"broadcaster_user_id": key.broadcaster_user_id}
+            create_access_token: str | None = None
+            if key.event_type.startswith("channel.chat."):
+                bot = await session.get(BotAccount, key.bot_account_id)
+                if not bot:
+                    raise RuntimeError(f"Bot account missing for chat subscription: {key.bot_account_id}")
+                if not bot.enabled:
+                    raise RuntimeError(f"Bot account disabled for chat subscription: {key.bot_account_id}")
+                create_access_token = await ensure_bot_access_token(session, self.twitch, bot)
+                condition["user_id"] = bot.twitch_user_id
             created = await self.twitch.create_eventsub_subscription(
                 event_type=key.event_type,
                 version="1",
-                condition={"broadcaster_user_id": key.broadcaster_user_id},
+                condition=condition,
                 transport=transport,
+                access_token=create_access_token,
             )
             new_sub = TwitchSubscription(
                 bot_account_id=key.bot_account_id,
@@ -315,9 +369,15 @@ class EventSubManager:
         )
         if not event_type or not broadcaster_user_id:
             return
+        condition = subscription.get("condition", {})
+        bot_lookup_user_id = (
+            condition.get("user_id")
+            if str(event_type).startswith("channel.chat.")
+            else broadcaster_user_id
+        )
         async with self.session_factory() as session:
             bot = await session.scalar(
-                select(BotAccount).where(BotAccount.twitch_user_id == broadcaster_user_id)
+                select(BotAccount).where(BotAccount.twitch_user_id == str(bot_lookup_user_id))
             )
             if not bot:
                 return

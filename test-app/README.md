@@ -4,6 +4,7 @@ This is a simple browser UI for testing the Twitch service end-to-end with servi
 
 What it can test:
 - list accessible bots (`GET /v1/bots/accessible`),
+- resolve broadcaster ID from username,
 - start broadcaster grant flow (`POST /v1/broadcaster-authorizations/start`),
 - view broadcaster grants,
 - create/list/heartbeat/delete interests,
@@ -38,11 +39,14 @@ Open:
 ## 3) Typical Flow in UI
 1. Refresh status and bots.
 2. Select bot and fill broadcaster user id.
-3. Click `Start Broadcaster Grant`, complete Twitch consent in browser.
-4. Connect service websocket.
-5. Create interest `channel.chat.message` with `websocket`.
-6. Send chat message.
-7. Watch incoming chat/events in the live log.
+3. Optional: fill broadcaster username and click `Resolve Username To ID`.
+4. Click `Start Broadcaster Grant`, complete Twitch consent in browser.
+   - the app sends `redirect_url` and receives callback result back to the same UI.
+   - on success, broadcaster id/login fields are auto-filled from callback query params.
+5. Connect service websocket.
+6. Create interest `channel.chat.message` with `websocket`.
+7. Send chat message.
+8. Watch incoming chat/events in the live log.
 
 For webhook transport tests:
 1. Set `TEST_WEBHOOK_PUBLIC_URL` in `.env`.

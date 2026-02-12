@@ -77,6 +77,7 @@ class SendChatMessageResponse(BaseModel):
 
 class StartBroadcasterAuthorizationRequest(BaseModel):
     bot_account_id: uuid.UUID
+    redirect_url: HttpUrl | None = None
 
 
 class StartBroadcasterAuthorizationResponse(BaseModel):

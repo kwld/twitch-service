@@ -187,6 +187,34 @@ app.get("/api/catalog", async (_req, res) => {
   }
 });
 
+app.get("/api/users/resolve", async (req, res) => {
+  try {
+    const login = String(req.query.login ?? "").trim().toLowerCase();
+    const botAccountId = String(req.query.bot_account_id ?? "").trim();
+    if (!login) {
+      return res.status(400).json({ error: "validation_error", detail: "login is required" });
+    }
+    if (!botAccountId) {
+      return res.status(400).json({ error: "validation_error", detail: "bot_account_id is required" });
+    }
+    const search = new URLSearchParams();
+    search.set("bot_account_id", botAccountId);
+    search.set("logins", login);
+    const data = await serviceFetch(`/v1/twitch/profiles?${search.toString()}`);
+    const user = (data?.data ?? [])[0];
+    if (!user) {
+      return res.status(404).json({ error: "not_found", detail: "Twitch user not found" });
+    }
+    return res.json({
+      user_id: String(user.id),
+      login: String(user.login),
+      display_name: String(user.display_name ?? user.login ?? ""),
+    });
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
 app.get("/api/interests", async (_req, res) => {
   try {
     const data = await serviceFetch("/v1/interests");

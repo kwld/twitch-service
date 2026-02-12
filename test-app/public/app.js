@@ -1,6 +1,7 @@
 const statusLine = document.getElementById("statusLine");
 const botSelect = document.getElementById("botSelect");
 const broadcasterInput = document.getElementById("broadcasterInput");
+const broadcasterLoginInput = document.getElementById("broadcasterLoginInput");
 const grantUrl = document.getElementById("grantUrl");
 const eventTypeSelect = document.getElementById("eventTypeSelect");
 const transportSelect = document.getElementById("transportSelect");
@@ -116,12 +117,34 @@ async function startGrant() {
   if (!botId) {
     throw new Error("Select a bot first.");
   }
+  const redirectBase = `${window.location.origin}${window.location.pathname}`;
   const payload = await api("/api/broadcaster-authorizations/start", {
     method: "POST",
-    body: { bot_account_id: botId },
+    body: {
+      bot_account_id: botId,
+      redirect_url: redirectBase,
+    },
   });
   grantUrl.innerHTML = `Authorize streamer here: <a href="${payload.authorize_url}" target="_blank" rel="noopener">${payload.authorize_url}</a>`;
   window.open(payload.authorize_url, "_blank", "noopener");
+}
+
+async function resolveBroadcaster() {
+  const botId = selectedBotId();
+  if (!botId) {
+    throw new Error("Select a bot first.");
+  }
+  const login = broadcasterLoginInput.value.trim().toLowerCase();
+  if (!login) {
+    throw new Error("Broadcaster username is required.");
+  }
+  const search = new URLSearchParams();
+  search.set("login", login);
+  search.set("bot_account_id", botId);
+  const payload = await api(`/api/users/resolve?${search.toString()}`);
+  broadcasterInput.value = payload.user_id;
+  broadcasterLoginInput.value = payload.login;
+  appendLog(`resolved @${payload.login} -> ${payload.user_id}`);
 }
 
 async function refreshGrants() {
@@ -209,6 +232,7 @@ async function disconnectEvents() {
 function wireButtons() {
   document.getElementById("refreshStatusBtn").onclick = () => withError(refreshStatus);
   document.getElementById("refreshBotsBtn").onclick = () => withError(refreshBots);
+  document.getElementById("resolveBroadcasterBtn").onclick = () => withError(resolveBroadcaster);
   document.getElementById("startGrantBtn").onclick = () => withError(startGrant);
   document.getElementById("refreshGrantsBtn").onclick = () => withError(refreshGrants);
   document.getElementById("createInterestBtn").onclick = () => withError(createInterest);
@@ -230,6 +254,23 @@ async function withError(fn) {
 }
 
 async function main() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("ok") === "true") {
+    const broadcasterId = params.get("broadcaster_user_id");
+    const broadcasterLogin = params.get("broadcaster_login");
+    if (broadcasterId) {
+      broadcasterInput.value = broadcasterId;
+    }
+    if (broadcasterLogin) {
+      broadcasterLoginInput.value = broadcasterLogin;
+    }
+    appendLog(`grant callback success for ${broadcasterLogin ?? "unknown"} (${broadcasterId ?? "n/a"})`);
+    history.replaceState({}, "", window.location.pathname);
+  } else if (params.get("ok") === "false") {
+    appendLog(`grant callback failed: ${params.get("error") ?? "unknown"} ${params.get("message") ?? ""}`);
+    history.replaceState({}, "", window.location.pathname);
+  }
+
   wireButtons();
   startSse();
   await withError(refreshStatus);

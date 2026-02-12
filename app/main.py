@@ -8,6 +8,7 @@ import secrets
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import uvicorn
 from fastapi import (
@@ -21,8 +22,8 @@ from fastapi import (
     WebSocketDisconnect,
     status,
 )
-from fastapi.responses import PlainTextResponse, Response
-from sqlalchemy import select
+from fastapi.responses import PlainTextResponse, RedirectResponse, Response
+from sqlalchemy import select, text
 
 from app.auth import authenticate_service, generate_client_id, generate_client_secret, hash_secret
 from app.bot_auth import ensure_bot_access_token
@@ -181,6 +182,15 @@ def _split_csv(values: str | None) -> list[str]:
     return [v.strip() for v in values.split(",") if v.strip()]
 
 
+def _append_query(url: str, params: dict[str, str]) -> str:
+    split = urlsplit(url)
+    query = dict(parse_qsl(split.query, keep_blank_values=True))
+    query.update(params)
+    return urlunsplit(
+        (split.scheme, split.netloc, split.path, urlencode(query), split.fragment)
+    )
+
+
 async def _service_allowed_bot_ids(session, service_account_id: uuid.UUID) -> set[uuid.UUID]:
     rows = list(
         (
@@ -251,6 +261,15 @@ async def _ensure_default_stream_interests(
 async def lifespan(_: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        try:
+            await conn.execute(
+                text(
+                    "ALTER TABLE broadcaster_authorization_requests "
+                    "ADD COLUMN IF NOT EXISTS redirect_url TEXT"
+                )
+            )
+        except Exception as exc:
+            logger.warning("Skipping redirect_url compatibility migration: %s", exc)
     await eventsub_manager.start()
     try:
         yield
@@ -297,12 +316,25 @@ async def oauth_callback(code: str | None = None, state: str | None = None, erro
         async with session_factory() as session:
             auth_request = await session.get(BroadcasterAuthorizationRequest, state)
             if auth_request:
+                redirect_url = auth_request.redirect_url
                 now = datetime.now(UTC)
                 if error:
                     auth_request.status = "failed"
                     auth_request.error = error
                     auth_request.completed_at = now
                     await session.commit()
+                    if redirect_url:
+                        return RedirectResponse(
+                            url=_append_query(
+                                redirect_url,
+                                {
+                                    "ok": "false",
+                                    "error": error,
+                                    "message": "Broadcaster authorization failed.",
+                                },
+                            ),
+                            status_code=302,
+                        )
                     return {
                         "ok": False,
                         "error": error,
@@ -313,6 +345,18 @@ async def oauth_callback(code: str | None = None, state: str | None = None, erro
                     auth_request.error = "missing_code"
                     auth_request.completed_at = now
                     await session.commit()
+                    if redirect_url:
+                        return RedirectResponse(
+                            url=_append_query(
+                                redirect_url,
+                                {
+                                    "ok": "false",
+                                    "error": "missing_code",
+                                    "message": "Missing OAuth code",
+                                },
+                            ),
+                            status_code=302,
+                        )
                     raise HTTPException(status_code=400, detail="Missing OAuth code")
 
                 try:
@@ -323,23 +367,48 @@ async def oauth_callback(code: str | None = None, state: str | None = None, erro
                     auth_request.error = str(exc)
                     auth_request.completed_at = now
                     await session.commit()
+                    if redirect_url:
+                        return RedirectResponse(
+                            url=_append_query(
+                                redirect_url,
+                                {
+                                    "ok": "false",
+                                    "error": "oauth_exchange_failed",
+                                    "message": f"OAuth exchange failed: {exc}",
+                                },
+                            ),
+                            status_code=302,
+                        )
                     raise HTTPException(status_code=502, detail=f"OAuth exchange failed: {exc}") from exc
 
                 granted_scopes = sorted(set(token_info.get("scopes", [])))
                 required = set(BROADCASTER_AUTH_SCOPES)
                 if not required.issubset(set(granted_scopes)):
+                    missing_required = ",".join(sorted(required - set(granted_scopes)))
                     auth_request.status = "failed"
-                    auth_request.error = (
-                        "missing_required_scopes:"
-                        + ",".join(sorted(required - set(granted_scopes)))
-                    )
+                    auth_request.error = "missing_required_scopes:" + missing_required
                     auth_request.completed_at = now
                     await session.commit()
+                    if redirect_url:
+                        return RedirectResponse(
+                            url=_append_query(
+                                redirect_url,
+                                {
+                                    "ok": "false",
+                                    "error": "missing_required_scopes",
+                                    "message": (
+                                        "Broadcaster authorization succeeded but required scopes are missing: "
+                                        + missing_required
+                                    ),
+                                },
+                            ),
+                            status_code=302,
+                        )
                     raise HTTPException(
                         status_code=400,
                         detail=(
                             "Broadcaster authorization succeeded but required scopes are missing: "
-                            + ", ".join(sorted(required - set(granted_scopes)))
+                            + missing_required
                         ),
                     )
 
@@ -350,6 +419,18 @@ async def oauth_callback(code: str | None = None, state: str | None = None, erro
                     auth_request.error = "missing_broadcaster_identity"
                     auth_request.completed_at = now
                     await session.commit()
+                    if redirect_url:
+                        return RedirectResponse(
+                            url=_append_query(
+                                redirect_url,
+                                {
+                                    "ok": "false",
+                                    "error": "missing_broadcaster_identity",
+                                    "message": "Could not resolve broadcaster identity",
+                                },
+                            ),
+                            status_code=302,
+                        )
                     raise HTTPException(status_code=400, detail="Could not resolve broadcaster identity")
 
                 existing_auth = await session.scalar(
@@ -380,6 +461,21 @@ async def oauth_callback(code: str | None = None, state: str | None = None, erro
                 auth_request.error = None
                 auth_request.completed_at = now
                 await session.commit()
+                if redirect_url:
+                    return RedirectResponse(
+                        url=_append_query(
+                            redirect_url,
+                            {
+                                "ok": "true",
+                                "message": "Broadcaster authorization completed.",
+                                "service_connected": "true",
+                                "broadcaster_user_id": broadcaster_user_id,
+                                "broadcaster_login": broadcaster_login,
+                                "scopes": ",".join(granted_scopes),
+                            },
+                        ),
+                        status_code=302,
+                    )
                 return {
                     "ok": True,
                     "message": "Broadcaster authorization completed.",
@@ -576,6 +672,7 @@ async def start_broadcaster_authorization(
                 service_account_id=service.id,
                 bot_account_id=req.bot_account_id,
                 requested_scopes_csv=scopes_csv,
+                redirect_url=str(req.redirect_url) if req.redirect_url else None,
                 status="pending",
             )
         )
