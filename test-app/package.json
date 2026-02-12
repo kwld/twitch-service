@@ -2,16 +2,17 @@
   "name": "twitch-eventsub-test-app",
   "version": "1.0.0",
   "private": true,
-  "description": "Full-coverage Node.js test client for twitch-service API",
+  "description": "Simple frontend test app for twitch-service API",
   "type": "module",
   "scripts": {
-    "full": "node index.js full"
+    "start": "node index.js"
   },
   "engines": {
     "node": ">=20.0.0"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
+    "express": "^4.21.2",
     "ws": "^8.18.0"
   }
 }

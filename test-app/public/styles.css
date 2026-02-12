@@ -1,0 +1,113 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", Tahoma, sans-serif;
+  background: linear-gradient(180deg, #f4f7fb 0%, #e8edf5 100%);
+  color: #152238;
+}
+
+.container {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 20px;
+  display: grid;
+  gap: 14px;
+}
+
+h1 {
+  margin: 0 0 8px;
+}
+
+.card {
+  background: #ffffff;
+  border: 1px solid #d7dfec;
+  border-radius: 10px;
+  padding: 14px;
+}
+
+.card h2 {
+  margin: 0 0 10px;
+  font-size: 1.1rem;
+}
+
+label {
+  display: block;
+  margin: 8px 0;
+  font-size: 0.9rem;
+}
+
+input,
+select,
+textarea,
+button {
+  width: 100%;
+  margin-top: 4px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #c7d2e6;
+  background: #fff;
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+  background: #0d67d0;
+  color: #fff;
+  border: none;
+}
+
+button:hover {
+  background: #0b58b2;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.grid2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+#interestList {
+  list-style: none;
+  padding: 0;
+  margin: 10px 0 0;
+  display: grid;
+  gap: 8px;
+}
+
+#interestList li {
+  border: 1px solid #d7dfec;
+  border-radius: 8px;
+  padding: 8px;
+  display: grid;
+  gap: 6px;
+}
+
+#eventsLog,
+#sendResult {
+  margin: 10px 0 0;
+  border: 1px solid #d7dfec;
+  border-radius: 8px;
+  background: #0f1724;
+  color: #b9d7ff;
+  padding: 10px;
+  min-height: 120px;
+  max-height: 280px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+@media (max-width: 700px) {
+  .grid2 {
+    grid-template-columns: 1fr;
+  }
+}

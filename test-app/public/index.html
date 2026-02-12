@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Twitch Service Test App</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <h1>Twitch Service Test App</h1>
+
+      <section class="card">
+        <h2>Status</h2>
+        <p id="statusLine">Loading...</p>
+        <button id="refreshStatusBtn" type="button">Refresh Status</button>
+      </section>
+
+      <section class="card">
+        <h2>Bot and Broadcaster</h2>
+        <label>Accessible bot
+          <select id="botSelect"></select>
+        </label>
+        <label>Broadcaster user id
+          <input id="broadcasterInput" type="text" placeholder="123456789" />
+        </label>
+        <div class="row">
+          <button id="refreshBotsBtn" type="button">Refresh Bots</button>
+          <button id="startGrantBtn" type="button">Start Broadcaster Grant</button>
+          <button id="refreshGrantsBtn" type="button">Refresh Grants</button>
+        </div>
+        <p id="grantUrl"></p>
+      </section>
+
+      <section class="card">
+        <h2>Interests</h2>
+        <div class="grid2">
+          <label>Event type
+            <select id="eventTypeSelect">
+              <option value="channel.chat.message">channel.chat.message</option>
+              <option value="channel.online">channel.online</option>
+              <option value="channel.offline">channel.offline</option>
+            </select>
+          </label>
+          <label>Transport
+            <select id="transportSelect">
+              <option value="websocket">websocket</option>
+              <option value="webhook">webhook</option>
+            </select>
+          </label>
+        </div>
+        <label>Webhook URL (required for webhook transport)
+          <input id="webhookUrlInput" type="text" placeholder="https://example.ngrok-free.app/service-webhook" />
+        </label>
+        <div class="row">
+          <button id="createInterestBtn" type="button">Create Interest</button>
+          <button id="reloadInterestsBtn" type="button">Reload Interests</button>
+        </div>
+        <ul id="interestList"></ul>
+      </section>
+
+      <section class="card">
+        <h2>Live Events</h2>
+        <div class="row">
+          <button id="connectEventsBtn" type="button">Connect Service WS</button>
+          <button id="disconnectEventsBtn" type="button">Disconnect Service WS</button>
+          <button id="clearEventsBtn" type="button">Clear Log</button>
+        </div>
+        <pre id="eventsLog"></pre>
+      </section>
+
+      <section class="card">
+        <h2>Send Chat Message</h2>
+        <label>Auth mode
+          <select id="authModeSelect">
+            <option value="auto">auto</option>
+            <option value="app">app</option>
+            <option value="user">user</option>
+          </select>
+        </label>
+        <label>Message
+          <textarea id="messageInput" rows="3">[frontend test] hello from bot</textarea>
+        </label>
+        <button id="sendMessageBtn" type="button">Send Message</button>
+        <pre id="sendResult"></pre>
+      </section>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
