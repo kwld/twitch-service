@@ -43,14 +43,20 @@ function appendLog(line) {
 }
 
 function formatEventPayload(payload) {
+  const MAX_LOG_CHARS = 4000;
   if (payload == null) {
     return "null";
   }
   if (typeof payload === "string") {
-    return payload;
+    return payload.length > MAX_LOG_CHARS
+      ? `${payload.slice(0, MAX_LOG_CHARS)} ... [truncated]`
+      : payload;
   }
   try {
-    return JSON.stringify(payload);
+    const formatted = JSON.stringify(payload, null, 2);
+    return formatted.length > MAX_LOG_CHARS
+      ? `${formatted.slice(0, MAX_LOG_CHARS)} ... [truncated]`
+      : formatted;
   } catch {
     return String(payload);
   }
