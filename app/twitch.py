@@ -41,13 +41,16 @@ class TwitchClient:
         self._app_token_expiry: datetime | None = None
 
     def build_authorize_url(self, state: str) -> str:
+        return self.build_authorize_url_with_scopes(state=state, scopes=self.scopes)
+
+    def build_authorize_url_with_scopes(self, state: str, scopes: str, force_verify: bool = True) -> str:
         params = {
             "client_id": self.client_id,
             "redirect_uri": self.redirect_uri,
             "response_type": "code",
-            "scope": self.scopes,
+            "scope": scopes,
             "state": state,
-            "force_verify": "true",
+            "force_verify": "true" if force_verify else "false",
         }
         return f"https://id.twitch.tv/oauth2/authorize?{urlencode(params)}"
 
@@ -238,3 +241,32 @@ class TwitchClient:
             )
         if resp.status_code >= 300:
             raise TwitchApiError(f"Failed deleting subscription: {resp.text}")
+
+    async def send_chat_message(
+        self,
+        access_token: str,
+        broadcaster_id: str,
+        sender_id: str,
+        message: str,
+        reply_parent_message_id: str | None = None,
+    ) -> dict[str, Any]:
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Client-Id": self.client_id,
+            "Content-Type": "application/json",
+        }
+        body: dict[str, Any] = {
+            "broadcaster_id": broadcaster_id,
+            "sender_id": sender_id,
+            "message": message,
+        }
+        if reply_parent_message_id:
+            body["reply_parent_message_id"] = reply_parent_message_id
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(f"{HELIX_BASE}/chat/messages", headers=headers, json=body)
+        if resp.status_code >= 300:
+            raise TwitchApiError(f"Failed sending chat message: {resp.text}")
+        data = resp.json().get("data", [])
+        if not data:
+            raise TwitchApiError("Empty send chat message response")
+        return data[0]

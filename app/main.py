@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import hmac
 import logging
+import secrets
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -27,10 +28,36 @@ from app.auth import authenticate_service, generate_client_id, generate_client_s
 from app.bot_auth import ensure_bot_access_token
 from app.config import RuntimeState, load_settings
 from app.db import create_engine_and_session
+from app.eventsub_catalog import (
+    EVENTSUB_CATALOG,
+    KNOWN_EVENT_TYPES,
+    SOURCE_SNAPSHOT_DATE,
+    SOURCE_URL,
+    best_transport_for_service,
+)
 from app.event_router import InterestRegistry, LocalEventHub
 from app.eventsub_manager import EventSubManager
-from app.models import Base, BotAccount, ChannelState, OAuthCallback, ServiceAccount, ServiceInterest
-from app.schemas import CreateInterestRequest, InterestResponse
+from app.models import (
+    Base,
+    BotAccount,
+    BroadcasterAuthorization,
+    BroadcasterAuthorizationRequest,
+    ChannelState,
+    OAuthCallback,
+    ServiceAccount,
+    ServiceInterest,
+)
+from app.schemas import (
+    BroadcasterAuthorizationResponse,
+    CreateInterestRequest,
+    EventSubCatalogItem,
+    EventSubCatalogResponse,
+    InterestResponse,
+    SendChatMessageRequest,
+    SendChatMessageResponse,
+    StartBroadcasterAuthorizationRequest,
+    StartBroadcasterAuthorizationResponse,
+)
 from app.twitch import TwitchClient
 
 logging.basicConfig(level=logging.INFO)
@@ -63,6 +90,7 @@ eventsub_manager = EventSubManager(
 )
 runtime_state = RuntimeState(settings=settings)
 DEFAULT_CHANNEL_EVENTS = ("channel.online", "channel.offline")
+BROADCASTER_AUTH_SCOPES = ("channel:bot",)
 
 
 async def _require_admin(x_admin_key: str = Header(default="")) -> None:
@@ -164,6 +192,102 @@ async def health():
 
 @app.get("/oauth/callback")
 async def oauth_callback(code: str | None = None, state: str | None = None, error: str | None = None):
+    if state:
+        async with session_factory() as session:
+            auth_request = await session.get(BroadcasterAuthorizationRequest, state)
+            if auth_request:
+                now = datetime.now(UTC)
+                if error:
+                    auth_request.status = "failed"
+                    auth_request.error = error
+                    auth_request.completed_at = now
+                    await session.commit()
+                    return {
+                        "ok": False,
+                        "error": error,
+                        "message": "Broadcaster authorization failed.",
+                    }
+                if not code:
+                    auth_request.status = "failed"
+                    auth_request.error = "missing_code"
+                    auth_request.completed_at = now
+                    await session.commit()
+                    raise HTTPException(status_code=400, detail="Missing OAuth code")
+
+                try:
+                    token = await twitch_client.exchange_code(code)
+                    token_info = await twitch_client.validate_user_token(token.access_token)
+                except Exception as exc:
+                    auth_request.status = "failed"
+                    auth_request.error = str(exc)
+                    auth_request.completed_at = now
+                    await session.commit()
+                    raise HTTPException(status_code=502, detail=f"OAuth exchange failed: {exc}") from exc
+
+                granted_scopes = sorted(set(token_info.get("scopes", [])))
+                required = set(BROADCASTER_AUTH_SCOPES)
+                if not required.issubset(set(granted_scopes)):
+                    auth_request.status = "failed"
+                    auth_request.error = (
+                        "missing_required_scopes:"
+                        + ",".join(sorted(required - set(granted_scopes)))
+                    )
+                    auth_request.completed_at = now
+                    await session.commit()
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "Broadcaster authorization succeeded but required scopes are missing: "
+                            + ", ".join(sorted(required - set(granted_scopes)))
+                        ),
+                    )
+
+                broadcaster_user_id = str(token_info.get("user_id", ""))
+                broadcaster_login = str(token_info.get("login", ""))
+                if not broadcaster_user_id or not broadcaster_login:
+                    auth_request.status = "failed"
+                    auth_request.error = "missing_broadcaster_identity"
+                    auth_request.completed_at = now
+                    await session.commit()
+                    raise HTTPException(status_code=400, detail="Could not resolve broadcaster identity")
+
+                existing_auth = await session.scalar(
+                    select(BroadcasterAuthorization).where(
+                        BroadcasterAuthorization.service_account_id == auth_request.service_account_id,
+                        BroadcasterAuthorization.bot_account_id == auth_request.bot_account_id,
+                        BroadcasterAuthorization.broadcaster_user_id == broadcaster_user_id,
+                    )
+                )
+                scopes_csv = ",".join(granted_scopes)
+                if existing_auth:
+                    existing_auth.broadcaster_login = broadcaster_login
+                    existing_auth.scopes_csv = scopes_csv
+                    existing_auth.authorized_at = now
+                else:
+                    session.add(
+                        BroadcasterAuthorization(
+                            service_account_id=auth_request.service_account_id,
+                            bot_account_id=auth_request.bot_account_id,
+                            broadcaster_user_id=broadcaster_user_id,
+                            broadcaster_login=broadcaster_login,
+                            scopes_csv=scopes_csv,
+                            authorized_at=now,
+                        )
+                    )
+                auth_request.status = "completed"
+                auth_request.broadcaster_user_id = broadcaster_user_id
+                auth_request.error = None
+                auth_request.completed_at = now
+                await session.commit()
+                return {
+                    "ok": True,
+                    "message": "Broadcaster authorization completed.",
+                    "service_connected": True,
+                    "broadcaster_user_id": broadcaster_user_id,
+                    "broadcaster_login": broadcaster_login,
+                    "scopes": granted_scopes,
+                }
+
     if state:
         async with session_factory() as session:
             callback = await session.get(OAuthCallback, state)
@@ -293,37 +417,173 @@ async def list_interests(service: ServiceAccount = Depends(_service_auth)):
     return interests
 
 
+@app.post(
+    "/v1/broadcaster-authorizations/start",
+    response_model=StartBroadcasterAuthorizationResponse,
+)
+async def start_broadcaster_authorization(
+    req: StartBroadcasterAuthorizationRequest,
+    service: ServiceAccount = Depends(_service_auth),
+):
+    async with session_factory() as session:
+        bot = await session.get(BotAccount, req.bot_account_id)
+        if not bot:
+            raise HTTPException(status_code=404, detail="Bot not found")
+        if not bot.enabled:
+            raise HTTPException(status_code=409, detail="Bot is disabled")
+
+        state = secrets.token_urlsafe(24)
+        scopes_csv = ",".join(BROADCASTER_AUTH_SCOPES)
+        session.add(
+            BroadcasterAuthorizationRequest(
+                state=state,
+                service_account_id=service.id,
+                bot_account_id=req.bot_account_id,
+                requested_scopes_csv=scopes_csv,
+                status="pending",
+            )
+        )
+        await session.commit()
+
+    scopes_str = " ".join(BROADCASTER_AUTH_SCOPES)
+    authorize_url = twitch_client.build_authorize_url_with_scopes(
+        state=state,
+        scopes=scopes_str,
+        force_verify=True,
+    )
+    return StartBroadcasterAuthorizationResponse(
+        state=state,
+        authorize_url=authorize_url,
+        requested_scopes=list(BROADCASTER_AUTH_SCOPES),
+        expires_in_seconds=600,
+    )
+
+
+@app.get(
+    "/v1/broadcaster-authorizations",
+    response_model=list[BroadcasterAuthorizationResponse],
+)
+async def list_broadcaster_authorizations(service: ServiceAccount = Depends(_service_auth)):
+    async with session_factory() as session:
+        items = list(
+            (
+                await session.scalars(
+                    select(BroadcasterAuthorization).where(
+                        BroadcasterAuthorization.service_account_id == service.id
+                    )
+                )
+            ).all()
+        )
+    return [
+        BroadcasterAuthorizationResponse(
+            id=item.id,
+            service_account_id=item.service_account_id,
+            bot_account_id=item.bot_account_id,
+            broadcaster_user_id=item.broadcaster_user_id,
+            broadcaster_login=item.broadcaster_login,
+            scopes=_split_csv(item.scopes_csv),
+            authorized_at=item.authorized_at,
+            updated_at=item.updated_at,
+        )
+        for item in items
+    ]
+
+
+@app.get("/v1/eventsub/subscription-types", response_model=EventSubCatalogResponse)
+async def list_eventsub_subscription_types(_: ServiceAccount = Depends(_service_auth)):
+    webhook_preferred: list[EventSubCatalogItem] = []
+    websocket_preferred: list[EventSubCatalogItem] = []
+    all_items: list[EventSubCatalogItem] = []
+
+    for entry in EVENTSUB_CATALOG:
+        best_transport, reason = best_transport_for_service(
+            event_type=entry.event_type,
+            webhook_event_types=eventsub_manager.webhook_event_types,
+        )
+        item = EventSubCatalogItem(
+            title=entry.title,
+            event_type=entry.event_type,
+            version=entry.version,
+            description=entry.description,
+            status=entry.status,
+            twitch_transports=["webhook", "websocket"],
+            best_transport=best_transport,
+            best_transport_reason=reason,
+        )
+        all_items.append(item)
+        if best_transport == "webhook":
+            webhook_preferred.append(item)
+        else:
+            websocket_preferred.append(item)
+
+    return EventSubCatalogResponse(
+        source_url=SOURCE_URL,
+        source_snapshot_date=SOURCE_SNAPSHOT_DATE,
+        total_items=len(all_items),
+        total_unique_event_types=len(KNOWN_EVENT_TYPES),
+        webhook_preferred=webhook_preferred,
+        websocket_preferred=websocket_preferred,
+        all_items=all_items,
+    )
+
+
 @app.post("/v1/interests", response_model=InterestResponse)
 async def create_interest(
     req: CreateInterestRequest,
     service: ServiceAccount = Depends(_service_auth),
 ):
+    event_type = req.event_type.strip().lower()
+    broadcaster_user_id = req.broadcaster_user_id.strip()
+    webhook_url = str(req.webhook_url) if req.webhook_url else None
+
     if req.transport == "webhook" and not req.webhook_url:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="webhook_url is required for webhook transport",
         )
+    if event_type not in KNOWN_EVENT_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Unsupported event_type '{req.event_type}'. "
+                "See GET /v1/eventsub/subscription-types."
+            ),
+        )
     async with session_factory() as session:
         bot = await session.get(BotAccount, req.bot_account_id)
         if not bot:
             raise HTTPException(status_code=404, detail="Bot not found")
-        interest = ServiceInterest(
-            service_account_id=service.id,
-            bot_account_id=req.bot_account_id,
-            event_type=req.event_type,
-            broadcaster_user_id=req.broadcaster_user_id,
-            transport=req.transport,
-            webhook_url=str(req.webhook_url) if req.webhook_url else None,
+        existing = await session.scalar(
+            select(ServiceInterest).where(
+                ServiceInterest.service_account_id == service.id,
+                ServiceInterest.bot_account_id == req.bot_account_id,
+                ServiceInterest.event_type == event_type,
+                ServiceInterest.broadcaster_user_id == broadcaster_user_id,
+                ServiceInterest.transport == req.transport,
+                ServiceInterest.webhook_url == webhook_url,
+            )
         )
-        session.add(interest)
-        await session.commit()
-        await session.refresh(interest)
+        if existing:
+            interest = existing
+        else:
+            interest = ServiceInterest(
+                service_account_id=service.id,
+                bot_account_id=req.bot_account_id,
+                event_type=event_type,
+                broadcaster_user_id=broadcaster_user_id,
+                transport=req.transport,
+                webhook_url=webhook_url,
+            )
+            session.add(interest)
+            await session.commit()
+            await session.refresh(interest)
+
     key = await interest_registry.add(interest)
     await eventsub_manager.on_interest_added(key)
     for default_interest in await _ensure_default_stream_interests(
         service=service,
         bot_account_id=req.bot_account_id,
-        broadcaster_user_id=req.broadcaster_user_id,
+        broadcaster_user_id=broadcaster_user_id,
     ):
         default_key = await interest_registry.add(default_interest)
         await eventsub_manager.on_interest_added(default_key)
@@ -507,6 +767,108 @@ async def interested_stream_status(service: ServiceAccount = Depends(_service_au
                 }
             )
     return {"data": rows}
+
+
+@app.post("/v1/twitch/chat/messages", response_model=SendChatMessageResponse)
+async def send_twitch_chat_message(
+    req: SendChatMessageRequest,
+    _: ServiceAccount = Depends(_service_auth),
+):
+    broadcaster_user_id = req.broadcaster_user_id.strip()
+    async with session_factory() as session:
+        bot = await session.get(BotAccount, req.bot_account_id)
+        if not bot:
+            raise HTTPException(status_code=404, detail="Bot not found")
+        if not bot.enabled:
+            raise HTTPException(status_code=409, detail="Bot is disabled")
+        token = await ensure_bot_access_token(session, twitch_client, bot)
+        token_info = await twitch_client.validate_user_token(token)
+        scopes = set(token_info.get("scopes", []))
+        if "user:write:chat" not in scopes:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Bot token missing required scope 'user:write:chat'. "
+                    "Re-run Guided bot setup to refresh OAuth scopes."
+                ),
+            )
+        if req.auth_mode in {"auto", "app"} and "user:bot" not in scopes:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Bot token missing required scope 'user:bot' for app-token chat mode. "
+                    "Re-run Guided bot setup to refresh OAuth scopes."
+                ),
+            )
+        if str(token_info.get("user_id", "")) != bot.twitch_user_id:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Stored bot token does not belong to this bot account. "
+                    "Re-run Guided bot setup and update the bot credentials."
+                ),
+            )
+
+    async def _send_with_mode(mode: str) -> tuple[dict, str]:
+        if mode == "app":
+            app_token = await twitch_client.app_access_token()
+            payload = await twitch_client.send_chat_message(
+                access_token=app_token,
+                broadcaster_id=broadcaster_user_id,
+                sender_id=bot.twitch_user_id,
+                message=req.message,
+                reply_parent_message_id=req.reply_parent_message_id,
+            )
+            return payload, "app"
+        payload = await twitch_client.send_chat_message(
+            access_token=token,
+            broadcaster_id=broadcaster_user_id,
+            sender_id=bot.twitch_user_id,
+            message=req.message,
+            reply_parent_message_id=req.reply_parent_message_id,
+        )
+        return payload, "user"
+
+    send_error: Exception | None = None
+    result: dict | None = None
+    auth_mode_used: str | None = None
+    try:
+        if req.auth_mode == "auto":
+            try:
+                result, auth_mode_used = await _send_with_mode("app")
+            except Exception as app_exc:
+                send_error = app_exc
+                result, auth_mode_used = await _send_with_mode("user")
+        else:
+            result, auth_mode_used = await _send_with_mode(req.auth_mode)
+    except Exception as exc:
+        extra = ""
+        if req.auth_mode == "auto" and send_error is not None:
+            extra = f" (app-token attempt failed first: {send_error})"
+        raise HTTPException(status_code=502, detail=f"{exc}{extra}") from exc
+
+    assert result is not None
+    assert auth_mode_used is not None
+    bot_badge_eligible = auth_mode_used == "app" and broadcaster_user_id != bot.twitch_user_id
+    if auth_mode_used != "app":
+        bot_badge_reason = "User token used; Twitch bot badge requires app-token send path."
+    elif broadcaster_user_id == bot.twitch_user_id:
+        bot_badge_reason = "Bot is chatting in its own broadcaster channel; Twitch does not show bot badge here."
+    else:
+        bot_badge_reason = "App-token send path used; badge eligibility depends on channel authorization/mod status."
+
+    drop_reason = result.get("drop_reason") or {}
+    return SendChatMessageResponse(
+        broadcaster_user_id=broadcaster_user_id,
+        sender_user_id=bot.twitch_user_id,
+        message_id=result.get("message_id", ""),
+        is_sent=bool(result.get("is_sent", False)),
+        auth_mode_used=auth_mode_used,
+        bot_badge_eligible=bot_badge_eligible,
+        bot_badge_reason=bot_badge_reason,
+        drop_reason_code=drop_reason.get("code"),
+        drop_reason_message=drop_reason.get("message"),
+    )
 
 
 @app.websocket("/ws/events")

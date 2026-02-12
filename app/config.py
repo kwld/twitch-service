@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     )
     twitch_scopes: str = Field(
         default=(
-            "channel:bot user:read:chat chat:read chat:edit "
+            "channel:bot user:bot user:read:chat user:write:chat chat:read chat:edit "
             "moderator:read:followers moderator:manage:chat_messages"
         ),
         alias="TWITCH_DEFAULT_SCOPES",

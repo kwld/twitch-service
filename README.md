@@ -13,6 +13,7 @@ Minimal API service that:
   - create service accounts (`client_id`, `client_secret`),
   - regenerate service account secret.
 - API for local services to register interest subscriptions.
+- API to list EventSub subscription catalog and transport recommendations.
 - API for local services to fetch Twitch user profiles and stream status via bot accounts.
 - In-memory + database interest registry.
 - Startup reconciliation:
@@ -60,12 +61,16 @@ If `.env` is missing, app/cli exits with an explicit error.
 - `GET /v1/admin/service-accounts` (admin)
 - `POST /v1/admin/service-accounts/{client_id}/regenerate` (admin)
 - `GET /v1/interests` (service)
+- `POST /v1/broadcaster-authorizations/start` (service)
+- `GET /v1/broadcaster-authorizations` (service)
+- `GET /v1/eventsub/subscription-types` (service)
 - `POST /v1/interests` (service)
 - `DELETE /v1/interests/{interest_id}` (service)
 - `POST /v1/interests/{interest_id}/heartbeat` (service)
 - `GET /v1/twitch/profiles?bot_account_id=...&user_ids=...&logins=...` (service)
 - `GET /v1/twitch/streams/status?bot_account_id=...&broadcaster_user_ids=...` (service)
 - `GET /v1/twitch/streams/status/interested` (service)
+- `POST /v1/twitch/chat/messages` (service)
 - `WS /ws/events?client_id=...&client_secret=...` (service)
 
 ### Create Interest Payload
@@ -80,6 +85,10 @@ If `.env` is missing, app/cli exits with an explicit error.
 ```
 
 For `transport=webhook`, `webhook_url` is required.
+
+`POST /v1/interests` also:
+- validates `event_type` against the known Twitch EventSub catalog,
+- deduplicates per-service interests (same service + bot + event_type + broadcaster + transport + webhook_url).
 
 Interests should be heartbeated periodically by client services:
 - call `POST /v1/interests/{interest_id}/heartbeat`
@@ -172,6 +181,27 @@ Twitch webhook callback:
 - `POST /webhooks/twitch/eventsub`
 
 `user.authorization.revoke` is always managed as webhook subscription and disables matching bot account when received.
+
+Catalog source for `GET /v1/eventsub/subscription-types`:
+- https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types/
+
+### Send Chat Message Payload
+```json
+{
+  "bot_account_id": "uuid",
+  "broadcaster_user_id": "12345",
+  "message": "hello chat",
+  "reply_parent_message_id": null,
+  "auth_mode": "auto"
+}
+```
+
+`POST /v1/twitch/chat/messages` uses Twitch Helix `chat/messages`.
+- `auth_mode=auto` (default): try app-token send first (bot-badge path), then fallback to user token.
+- `auth_mode=app`: app-token send only.
+- `auth_mode=user`: user-token send only.
+Required bot scope: `user:write:chat`.
+Required broadcaster channel authorization scope: `channel:bot`.
 
 Handler behavior:
 - verifies `Twitch-Eventsub-Message-Signature` using HMAC-SHA256 over:

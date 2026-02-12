@@ -56,6 +56,40 @@ Rules:
 ### Fetch cached stream status for your interested channels
 - `GET /v1/twitch/streams/status/interested`
 
+### Start broadcaster authorization for a bot (service-owned flow)
+- `POST /v1/broadcaster-authorizations/start`
+- Body:
+```json
+{
+  "bot_account_id": "uuid"
+}
+```
+- Returns:
+  - `authorize_url` (send broadcaster to this URL),
+  - `state`,
+  - requested scopes (currently `channel:bot`).
+- After broadcaster authorizes in Twitch, callback is handled by this service at `/oauth/callback`.
+
+### List connected broadcaster authorizations
+- `GET /v1/broadcaster-authorizations`
+
+### Send chat message as bot via Twitch API (no tmi.js)
+- `POST /v1/twitch/chat/messages`
+- Body:
+```json
+{
+  "bot_account_id": "uuid",
+  "broadcaster_user_id": "12345",
+  "message": "hello",
+  "reply_parent_message_id": null,
+  "auth_mode": "auto"
+}
+```
+- `auth_mode`:
+  - `auto`: app-token send first, then user-token fallback.
+  - `app`: app-token only (bot-badge path when channel authorization is valid).
+  - `user`: user-token only.
+
 ## 4) Receiving events
 ### Option A: websocket (recommended default)
 Connect:
@@ -91,7 +125,26 @@ Your callback receives the same envelope JSON.
 - `404`: interest not found (or bot not found on create).
 - `422`: invalid request body (for example missing `webhook_url` for webhook transport).
 
-## 7) Notes for client logic
+## 7) Broadcaster connection flow (recommended)
+1. Service calls `POST /v1/broadcaster-authorizations/start` with `bot_account_id`.
+2. Service sends returned `authorize_url` to broadcaster (browser redirect).
+3. Broadcaster approves on Twitch.
+4. This service handles callback at `/oauth/callback` and stores broadcaster authorization.
+5. Service can verify via `GET /v1/broadcaster-authorizations`.
+
+## 8) Twitch scope notes
+- Bot account OAuth (for chat/EventSub chat app mode):
+  - `user:bot`
+  - `user:read:chat`
+  - `user:write:chat`
+- Broadcaster authorization scope (for bot in that channel):
+  - `channel:bot`
+
+Reference docs:
+- https://dev.twitch.tv/docs/chat/authenticating/
+- https://dev.twitch.tv/docs/authentication/scopes/
+
+## 9) Notes for client logic
 - You may receive retries/duplicates from upstream sources in edge cases; dedupe by `id` if needed.
 - Keep websocket reconnect logic in your app.
-- Interest creation is not guaranteed idempotent by repeated identical POSTs; prefer storing and reusing created interest IDs.
+- `POST /v1/interests` is duplicate-safe for identical service/bot/event/channel/transport tuples.

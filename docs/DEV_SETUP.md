@@ -15,6 +15,12 @@ This guide runs the service, Postgres, and ngrok in containers with hot reload.
 
 If `.env` is missing, startup scripts fail immediately.
 
+For chat/EventSub bot flows, ensure `TWITCH_DEFAULT_SCOPES` includes:
+- `user:bot`
+- `user:read:chat`
+- `user:write:chat`
+- `channel:bot`
+
 ## 3) Start development containers
 Docker:
 ```powershell
@@ -51,6 +57,11 @@ docker compose -f docker-compose.dev.yml up -d --build
 ## 5) Verify service
 - Health: `http://localhost:8080/health`
 - ngrok inspector: `http://localhost:4040`
+
+Optional broadcaster authorization test (service credentials required):
+- `POST /v1/broadcaster-authorizations/start`
+- Open returned `authorize_url` in browser and complete Twitch consent.
+- Verify connection via `GET /v1/broadcaster-authorizations`.
 
 ## 6) Open interactive CLI in container
 Windows:

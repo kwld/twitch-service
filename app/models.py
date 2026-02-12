@@ -32,6 +32,12 @@ class BotAccount(Base):
 
     interests: Mapped[list["ServiceInterest"]] = relationship(back_populates="bot_account")
     twitch_subscriptions: Mapped[list["TwitchSubscription"]] = relationship(back_populates="bot_account")
+    broadcaster_authorizations: Mapped[list["BroadcasterAuthorization"]] = relationship(
+        back_populates="bot_account"
+    )
+    broadcaster_auth_requests: Mapped[list["BroadcasterAuthorizationRequest"]] = relationship(
+        back_populates="bot_account"
+    )
 
 
 class ServiceAccount(Base):
@@ -50,6 +56,12 @@ class ServiceAccount(Base):
     )
 
     interests: Mapped[list["ServiceInterest"]] = relationship(back_populates="service_account")
+    broadcaster_authorizations: Mapped[list["BroadcasterAuthorization"]] = relationship(
+        back_populates="service_account"
+    )
+    broadcaster_auth_requests: Mapped[list["BroadcasterAuthorizationRequest"]] = relationship(
+        back_populates="service_account"
+    )
 
 
 class ServiceInterest(Base):
@@ -157,3 +169,58 @@ class OAuthCallback(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+
+
+class BroadcasterAuthorization(Base):
+    __tablename__ = "broadcaster_authorizations"
+    __table_args__ = (
+        UniqueConstraint(
+            "service_account_id",
+            "bot_account_id",
+            "broadcaster_user_id",
+            name="uq_broadcaster_auth_per_service_bot_channel",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    service_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("service_accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    bot_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("bot_accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    broadcaster_user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    broadcaster_login: Mapped[str] = mapped_column(String(80), nullable=False)
+    scopes_csv: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    authorized_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    service_account: Mapped["ServiceAccount"] = relationship(back_populates="broadcaster_authorizations")
+    bot_account: Mapped["BotAccount"] = relationship(back_populates="broadcaster_authorizations")
+
+
+class BroadcasterAuthorizationRequest(Base):
+    __tablename__ = "broadcaster_authorization_requests"
+
+    state: Mapped[str] = mapped_column(String(255), primary_key=True)
+    service_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("service_accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    bot_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("bot_accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    requested_scopes_csv: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    broadcaster_user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    service_account: Mapped["ServiceAccount"] = relationship(back_populates="broadcaster_auth_requests")
+    bot_account: Mapped["BotAccount"] = relationship(back_populates="broadcaster_auth_requests")
