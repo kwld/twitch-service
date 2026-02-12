@@ -45,6 +45,7 @@ from app.models import (
     ChannelState,
     OAuthCallback,
     ServiceAccount,
+    ServiceBotAccess,
     ServiceInterest,
     ServiceRuntimeStats,
     TwitchSubscription,
@@ -95,6 +96,10 @@ DEFAULT_CHANNEL_EVENTS = ("channel.online", "channel.offline")
 BROADCASTER_AUTH_SCOPES = ("channel:bot",)
 
 
+def _counter(value: int | None) -> int:
+    return value or 0
+
+
 async def _require_admin(x_admin_key: str = Header(default="")) -> None:
     if x_admin_key != settings.admin_api_key:
         raise HTTPException(status_code=401, detail="Invalid admin key")
@@ -111,7 +116,7 @@ async def _service_auth(
         if not stats:
             stats = ServiceRuntimeStats(service_account_id=service.id)
             session.add(stats)
-        stats.total_api_requests += 1
+        stats.total_api_requests = _counter(stats.total_api_requests) + 1
         stats.last_api_request_at = now
         await session.commit()
         return service
@@ -131,8 +136,8 @@ async def _on_service_connect(service_account_id: uuid.UUID) -> None:
     now = datetime.now(UTC)
 
     def _mutator(stats: ServiceRuntimeStats) -> None:
-        stats.active_ws_connections += 1
-        stats.total_ws_connects += 1
+        stats.active_ws_connections = _counter(stats.active_ws_connections) + 1
+        stats.total_ws_connects = _counter(stats.total_ws_connects) + 1
         stats.is_connected = stats.active_ws_connections > 0
         stats.last_connected_at = now
 
@@ -143,7 +148,7 @@ async def _on_service_disconnect(service_account_id: uuid.UUID) -> None:
     now = datetime.now(UTC)
 
     def _mutator(stats: ServiceRuntimeStats) -> None:
-        stats.active_ws_connections = max(0, stats.active_ws_connections - 1)
+        stats.active_ws_connections = max(0, _counter(stats.active_ws_connections) - 1)
         stats.is_connected = stats.active_ws_connections > 0
         stats.last_disconnected_at = now
 
@@ -154,7 +159,7 @@ async def _on_service_ws_event(service_account_id: uuid.UUID) -> None:
     now = datetime.now(UTC)
 
     def _mutator(stats: ServiceRuntimeStats) -> None:
-        stats.total_events_sent_ws += 1
+        stats.total_events_sent_ws = _counter(stats.total_events_sent_ws) + 1
         stats.last_event_sent_at = now
 
     await _update_runtime_stats(service_account_id, _mutator)
@@ -164,7 +169,7 @@ async def _on_service_webhook_event(service_account_id: uuid.UUID) -> None:
     now = datetime.now(UTC)
 
     def _mutator(stats: ServiceRuntimeStats) -> None:
-        stats.total_events_sent_webhook += 1
+        stats.total_events_sent_webhook = _counter(stats.total_events_sent_webhook) + 1
         stats.last_event_sent_at = now
 
     await _update_runtime_stats(service_account_id, _mutator)
@@ -174,6 +179,32 @@ def _split_csv(values: str | None) -> list[str]:
     if not values:
         return []
     return [v.strip() for v in values.split(",") if v.strip()]
+
+
+async def _service_allowed_bot_ids(session, service_account_id: uuid.UUID) -> set[uuid.UUID]:
+    rows = list(
+        (
+            await session.scalars(
+                select(ServiceBotAccess.bot_account_id).where(
+                    ServiceBotAccess.service_account_id == service_account_id
+                )
+            )
+        ).all()
+    )
+    return set(rows)
+
+
+async def _ensure_service_can_access_bot(
+    session,
+    service_account_id: uuid.UUID,
+    bot_account_id: uuid.UUID,
+) -> None:
+    allowed_ids = await _service_allowed_bot_ids(session, service_account_id)
+    if allowed_ids and bot_account_id not in allowed_ids:
+        raise HTTPException(
+            status_code=403,
+            detail="Service is not allowed to access this bot account",
+        )
 
 
 event_hub.on_service_connect = _on_service_connect
@@ -429,6 +460,40 @@ async def list_bots(_: None = Depends(_require_admin)):
     ]
 
 
+@app.get("/v1/bots/accessible")
+async def list_accessible_bots(service: ServiceAccount = Depends(_service_auth)):
+    async with session_factory() as session:
+        allowed_ids = await _service_allowed_bot_ids(session, service.id)
+        if allowed_ids:
+            bots = list(
+                (
+                    await session.scalars(
+                        select(BotAccount).where(
+                            BotAccount.id.in_(allowed_ids),
+                            BotAccount.enabled.is_(True),
+                        )
+                    )
+                ).all()
+            )
+            access_mode = "restricted"
+        else:
+            bots = list((await session.scalars(select(BotAccount).where(BotAccount.enabled.is_(True)))).all())
+            access_mode = "all"
+    return {
+        "access_mode": access_mode,
+        "bots": [
+            {
+                "id": str(bot.id),
+                "name": bot.name,
+                "twitch_user_id": bot.twitch_user_id,
+                "twitch_login": bot.twitch_login,
+                "enabled": bot.enabled,
+            }
+            for bot in bots
+        ],
+    }
+
+
 @app.post("/v1/admin/service-accounts")
 async def create_service_account(
     name: str,
@@ -501,6 +566,7 @@ async def start_broadcaster_authorization(
             raise HTTPException(status_code=404, detail="Bot not found")
         if not bot.enabled:
             raise HTTPException(status_code=409, detail="Bot is disabled")
+        await _ensure_service_can_access_bot(session, service.id, req.bot_account_id)
 
         state = secrets.token_urlsafe(24)
         scopes_csv = ",".join(BROADCASTER_AUTH_SCOPES)
@@ -623,6 +689,7 @@ async def create_interest(
         bot = await session.get(BotAccount, req.bot_account_id)
         if not bot:
             raise HTTPException(status_code=404, detail="Bot not found")
+        await _ensure_service_can_access_bot(session, service.id, req.bot_account_id)
         existing = await session.scalar(
             select(ServiceInterest).where(
                 ServiceInterest.service_account_id == service.id,
@@ -702,7 +769,7 @@ async def twitch_profiles(
     bot_account_id: uuid.UUID,
     user_ids: str | None = None,
     logins: str | None = None,
-    _: ServiceAccount = Depends(_service_auth),
+    service: ServiceAccount = Depends(_service_auth),
 ):
     ids = _split_csv(user_ids)
     login_values = _split_csv(logins)
@@ -712,6 +779,7 @@ async def twitch_profiles(
         raise HTTPException(status_code=422, detail="At most 100 ids/logins per request")
 
     async with session_factory() as session:
+        await _ensure_service_can_access_bot(session, service.id, bot_account_id)
         bot = await session.get(BotAccount, bot_account_id)
         if not bot:
             raise HTTPException(status_code=404, detail="Bot not found")
@@ -726,7 +794,7 @@ async def twitch_profiles(
 async def twitch_stream_status(
     bot_account_id: uuid.UUID,
     broadcaster_user_ids: str,
-    _: ServiceAccount = Depends(_service_auth),
+    service: ServiceAccount = Depends(_service_auth),
 ):
     ids = _split_csv(broadcaster_user_ids)
     if not ids:
@@ -735,6 +803,7 @@ async def twitch_stream_status(
         raise HTTPException(status_code=422, detail="At most 100 broadcaster ids per request")
 
     async with session_factory() as session:
+        await _ensure_service_can_access_bot(session, service.id, bot_account_id)
         bot = await session.get(BotAccount, bot_account_id)
         if not bot:
             raise HTTPException(status_code=404, detail="Bot not found")
@@ -842,10 +911,11 @@ async def interested_stream_status(service: ServiceAccount = Depends(_service_au
 @app.post("/v1/twitch/chat/messages", response_model=SendChatMessageResponse)
 async def send_twitch_chat_message(
     req: SendChatMessageRequest,
-    _: ServiceAccount = Depends(_service_auth),
+    service: ServiceAccount = Depends(_service_auth),
 ):
     broadcaster_user_id = req.broadcaster_user_id.strip()
     async with session_factory() as session:
+        await _ensure_service_can_access_bot(session, service.id, req.bot_account_id)
         bot = await session.get(BotAccount, req.bot_account_id)
         if not bot:
             raise HTTPException(status_code=404, detail="Bot not found")

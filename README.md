@@ -10,10 +10,14 @@ Minimal API service that:
 - Async interactive CLI (`twitch-eventsub-cli console`) to:
   - guided Twitch bot setup wizard (OAuth),
   - add/list/refresh bot accounts,
-  - create service accounts (`client_id`, `client_secret`),
-  - regenerate service account secret.
+  - manage service accounts (`client_id`, `client_secret`) in a submenu:
+    - create account,
+    - regenerate secret,
+    - delete account,
+    - grant/revoke bot access per service.
 - API for local services to register interest subscriptions.
 - API to list EventSub subscription catalog and transport recommendations.
+- API for services to list effective bot access (`GET /v1/bots/accessible`).
 - API for local services to fetch Twitch user profiles and stream status via bot accounts.
 - In-memory + database interest registry.
 - Startup reconciliation:
@@ -62,6 +66,7 @@ If `.env` is missing, app/cli exits with an explicit error.
 - `GET /v1/admin/service-accounts` (admin)
 - `POST /v1/admin/service-accounts/{client_id}/regenerate` (admin)
 - `GET /v1/interests` (service)
+- `GET /v1/bots/accessible` (service)
 - `POST /v1/broadcaster-authorizations/start` (service)
 - `GET /v1/broadcaster-authorizations` (service)
 - `GET /v1/eventsub/subscription-types` (service)
@@ -73,6 +78,17 @@ If `.env` is missing, app/cli exits with an explicit error.
 - `GET /v1/twitch/streams/status/interested` (service)
 - `POST /v1/twitch/chat/messages` (service)
 - `WS /ws/events?client_id=...&client_secret=...` (service)
+
+### Service Bot Access Policy
+- Services can be restricted to a subset of bots.
+- If a service has no explicit bot-access mappings, it can access all enabled bots (default mode).
+- If mappings exist, access is restricted to only mapped bots.
+- Service can inspect effective access via `GET /v1/bots/accessible`.
+- Bot-specific service endpoints return `403` when service is not allowed to access the requested bot.
+
+### Service Secret Hashing
+- Service account secrets are hashed with PBKDF2-SHA256 (`pbkdf2_sha256$...`) to avoid bcrypt backend/runtime issues and length limits.
+- Legacy bcrypt hashes remain verifiable for backward compatibility.
 
 ### Create Interest Payload
 ```json
@@ -288,3 +304,18 @@ After first start, update `.env` with real Twitch values:
 Then restart compose.
 
 Full production guide: `docs/PRODUCTION_DEPLOY.md`.
+
+## Node Integration Test App
+A full-coverage Node.js integration client is available in `test-app/`.
+
+It covers:
+- admin bot listing + service account lifecycle,
+- service auth + accessible bot discovery (`/v1/bots/accessible`),
+- broadcaster authorization bootstrap,
+- interest lifecycle (create/list/heartbeat/delete),
+- websocket event listening,
+- optional webhook receive transport,
+- Twitch profile/stream reads,
+- chat send via service endpoint.
+
+See `test-app/README.md`.

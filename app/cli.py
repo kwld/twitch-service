@@ -8,7 +8,7 @@ from contextlib import suppress
 from urllib.parse import parse_qs, urlparse
 
 from prompt_toolkit import PromptSession
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 import websockets
 
 from app.auth import generate_client_id, generate_client_secret, hash_secret
@@ -21,6 +21,7 @@ from app.models import (
     BroadcasterAuthorization,
     OAuthCallback,
     ServiceAccount,
+    ServiceBotAccess,
     ServiceInterest,
     ServiceRuntimeStats,
     TwitchSubscription,
@@ -630,6 +631,249 @@ async def manage_webhook_subscriptions_menu(session: PromptSession, twitch: Twit
         print("Invalid option.")
 
 
+async def _select_service_account(session: PromptSession, session_factory):
+    async with session_factory() as db:
+        accounts = list((await db.scalars(select(ServiceAccount))).all())
+    if not accounts:
+        print("No service accounts.")
+        return None
+    print("\nService accounts:")
+    for idx, account in enumerate(accounts, start=1):
+        print(f"{idx}) {account.name} client_id={account.client_id} enabled={account.enabled}")
+    raw = (await session.prompt_async("Select service account number: ")).strip()
+    try:
+        selected = int(raw)
+    except ValueError:
+        print("Invalid selection.")
+        return None
+    if selected < 1 or selected > len(accounts):
+        print("Invalid selection.")
+        return None
+    return accounts[selected - 1]
+
+
+async def _print_service_bot_access(session_factory, service_id) -> None:
+    async with session_factory() as db:
+        mappings = list(
+            (
+                await db.scalars(
+                    select(ServiceBotAccess).where(ServiceBotAccess.service_account_id == service_id)
+                )
+            ).all()
+        )
+        bots = list((await db.scalars(select(BotAccount))).all())
+    bot_by_id = {bot.id: bot for bot in bots}
+    if not mappings:
+        print("Access mode: all bots (no explicit restrictions).")
+        for bot in bots:
+            print(f"- {bot.name} ({bot.twitch_login}/{bot.twitch_user_id}) enabled={bot.enabled}")
+        return
+    print("Access mode: restricted")
+    for mapping in mappings:
+        bot = bot_by_id.get(mapping.bot_account_id)
+        if not bot:
+            print(f"- missing bot {mapping.bot_account_id}")
+            continue
+        print(f"- {bot.name} ({bot.twitch_login}/{bot.twitch_user_id}) enabled={bot.enabled}")
+
+
+async def manage_service_bot_access_menu(session: PromptSession, session_factory) -> None:
+    service = await _select_service_account(session, session_factory)
+    if not service:
+        return
+    while True:
+        print(f"\nManage Bot Access for service '{service.name}'")
+        print("1) View current bot access")
+        print("2) Grant bot access")
+        print("3) Revoke bot access")
+        print("4) Clear restrictions (allow all bots)")
+        print("5) Back")
+        choice = (await session.prompt_async("Select option: ")).strip()
+
+        if choice == "1":
+            await _print_service_bot_access(session_factory, service.id)
+            continue
+
+        if choice == "2":
+            async with session_factory() as db:
+                bots = list((await db.scalars(select(BotAccount))).all())
+            if not bots:
+                print("No bots available.")
+                continue
+            print("\nBots:")
+            for idx, bot in enumerate(bots, start=1):
+                print(f"{idx}) {bot.name} ({bot.twitch_login}/{bot.twitch_user_id}) enabled={bot.enabled}")
+            raw = (await session.prompt_async("Bot number to grant: ")).strip()
+            try:
+                idx = int(raw)
+            except ValueError:
+                print("Invalid number.")
+                continue
+            if idx < 1 or idx > len(bots):
+                print("Invalid number.")
+                continue
+            bot = bots[idx - 1]
+            async with session_factory() as db:
+                existing = await db.scalar(
+                    select(ServiceBotAccess).where(
+                        ServiceBotAccess.service_account_id == service.id,
+                        ServiceBotAccess.bot_account_id == bot.id,
+                    )
+                )
+                if existing:
+                    print("Access already granted.")
+                    continue
+                db.add(ServiceBotAccess(service_account_id=service.id, bot_account_id=bot.id))
+                await db.commit()
+            print(f"Granted access: {service.name} -> {bot.name}")
+            continue
+
+        if choice == "3":
+            async with session_factory() as db:
+                mappings = list(
+                    (
+                        await db.scalars(
+                            select(ServiceBotAccess).where(ServiceBotAccess.service_account_id == service.id)
+                        )
+                    ).all()
+                )
+                bots = list((await db.scalars(select(BotAccount))).all())
+            if not mappings:
+                print("No explicit bot access mappings. Service already has access to all bots.")
+                continue
+            bot_by_id = {bot.id: bot for bot in bots}
+            print("\nGranted bot access:")
+            for idx, mapping in enumerate(mappings, start=1):
+                bot = bot_by_id.get(mapping.bot_account_id)
+                if bot:
+                    print(f"{idx}) {bot.name} ({bot.twitch_login}/{bot.twitch_user_id})")
+                else:
+                    print(f"{idx}) missing bot {mapping.bot_account_id}")
+            raw = (await session.prompt_async("Access entry number to revoke: ")).strip()
+            try:
+                idx = int(raw)
+            except ValueError:
+                print("Invalid number.")
+                continue
+            if idx < 1 or idx > len(mappings):
+                print("Invalid number.")
+                continue
+            mapping = mappings[idx - 1]
+            async with session_factory() as db:
+                await db.execute(delete(ServiceBotAccess).where(ServiceBotAccess.id == mapping.id))
+                await db.commit()
+            print("Access revoked.")
+            continue
+
+        if choice == "4":
+            confirm = (await session.prompt_async("Type 'allow all' to confirm: ")).strip().lower()
+            if confirm != "allow all":
+                print("Canceled.")
+                continue
+            async with session_factory() as db:
+                await db.execute(
+                    delete(ServiceBotAccess).where(ServiceBotAccess.service_account_id == service.id)
+                )
+                await db.commit()
+            print("Restrictions cleared. Service can access all bots.")
+            continue
+
+        if choice == "5":
+            return
+        print("Invalid option.")
+
+
+async def manage_service_accounts_menu(session: PromptSession, session_factory) -> None:
+    while True:
+        print(
+            "\nService Accounts\n"
+            "1) List service accounts\n"
+            "2) Create service account\n"
+            "3) Regenerate service secret\n"
+            "4) Delete service account\n"
+            "5) Manage bot access\n"
+            "6) Back\n"
+        )
+        choice = (await session.prompt_async("Select option: ")).strip()
+
+        if choice == "1":
+            async with session_factory() as db:
+                accounts = list((await db.scalars(select(ServiceAccount))).all())
+            if not accounts:
+                print("No service accounts.")
+                continue
+            for account in accounts:
+                print(f"- {account.name}: client_id={account.client_id} enabled={account.enabled}")
+            continue
+
+        if choice == "2":
+            name = (await session.prompt_async("Service name: ")).strip()
+            if not name:
+                print("Service name is required.")
+                continue
+            client_id = generate_client_id()
+            client_secret = generate_client_secret()
+            async with session_factory() as db:
+                existing = await db.scalar(select(ServiceAccount).where(ServiceAccount.name == name))
+                if existing:
+                    print("Service account name already exists.")
+                    continue
+                db.add(
+                    ServiceAccount(
+                        name=name,
+                        client_id=client_id,
+                        client_secret_hash=hash_secret(client_secret),
+                    )
+                )
+                await db.commit()
+            print("\nService account created:")
+            print(f"client_id: {client_id}")
+            print(f"client_secret: {client_secret}\n")
+            continue
+
+        if choice == "3":
+            account = await _select_service_account(session, session_factory)
+            if not account:
+                continue
+            new_secret = generate_client_secret()
+            async with session_factory() as db:
+                target = await db.get(ServiceAccount, account.id)
+                if not target:
+                    print("Service account not found.")
+                    continue
+                target.client_secret_hash = hash_secret(new_secret)
+                await db.commit()
+            print(f"\nNew client_secret: {new_secret}\n")
+            continue
+
+        if choice == "4":
+            account = await _select_service_account(session, session_factory)
+            if not account:
+                continue
+            confirm = (await session.prompt_async(f"Type '{account.name}' to confirm deletion: ")).strip()
+            if confirm != account.name:
+                print("Confirmation mismatch; canceled.")
+                continue
+            async with session_factory() as db:
+                target = await db.get(ServiceAccount, account.id)
+                if not target:
+                    print("Service account already removed.")
+                    continue
+                await db.delete(target)
+                await db.commit()
+            print(f"Deleted service account: {account.name}")
+            continue
+
+        if choice == "5":
+            await manage_service_bot_access_menu(session, session_factory)
+            continue
+
+        if choice == "6":
+            return
+
+        print("Invalid option.")
+
+
 async def list_service_status_menu(session_factory) -> None:
     async with session_factory() as db:
         services = list((await db.scalars(select(ServiceAccount))).all())
@@ -708,16 +952,14 @@ async def menu_loop() -> None:
             "2) Guided bot setup (OAuth wizard)\n"
             "3) Add bot (quick OAuth)\n"
             "4) Refresh bot token\n"
-            "5) Create service account\n"
-            "6) Regenerate service secret\n"
-            "7) List service accounts\n"
-            "8) Live chat (own channel)\n"
-            "9) Live chat (other channel)\n"
-            "10) Remove bot account\n"
-            "11) Manage webhook EventSub subscriptions\n"
-            "12) View service status and usage\n"
-            "13) View broadcaster authorizations\n"
-            "14) Exit\n"
+            "5) Manage service accounts\n"
+            "6) Live chat (own channel)\n"
+            "7) Live chat (other channel)\n"
+            "8) Remove bot account\n"
+            "9) Manage webhook EventSub subscriptions\n"
+            "10) View service status and usage\n"
+            "11) View broadcaster authorizations\n"
+            "12) Exit\n"
         )
         choice = (await session.prompt_async("Select option: ")).strip()
 
@@ -787,67 +1029,27 @@ async def menu_loop() -> None:
             print("Token refreshed.")
 
         elif choice == "5":
-            name = (await session.prompt_async("Service name: ")).strip()
-            client_id = generate_client_id()
-            client_secret = generate_client_secret()
-            async with session_factory() as db:
-                existing = await db.scalar(select(ServiceAccount).where(ServiceAccount.name == name))
-                if existing:
-                    print("Service account name already exists.")
-                    continue
-                db.add(
-                    ServiceAccount(
-                        name=name,
-                        client_id=client_id,
-                        client_secret_hash=hash_secret(client_secret),
-                    )
-                )
-                await db.commit()
-            print("\nService account created:")
-            print(f"client_id: {client_id}")
-            print(f"client_secret: {client_secret}\n")
+            await manage_service_accounts_menu(session, session_factory)
 
         elif choice == "6":
-            client_id = (await session.prompt_async("Client ID: ")).strip()
-            new_secret = generate_client_secret()
-            async with session_factory() as db:
-                account = await db.scalar(
-                    select(ServiceAccount).where(ServiceAccount.client_id == client_id)
-                )
-                if not account:
-                    print("Service account not found.")
-                    continue
-                account.client_secret_hash = hash_secret(new_secret)
-                await db.commit()
-            print(f"\nNew client_secret: {new_secret}\n")
-
-        elif choice == "7":
-            async with session_factory() as db:
-                accounts = list((await db.scalars(select(ServiceAccount))).all())
-            if not accounts:
-                print("No service accounts.")
-            for account in accounts:
-                print(f"- {account.name}: client_id={account.client_id} enabled={account.enabled}")
-
-        elif choice == "8":
             await chat_connect_menu(session, session_factory, twitch)
 
-        elif choice == "9":
+        elif choice == "7":
             await chat_connect_other_channel_menu(session, session_factory, twitch)
 
-        elif choice == "10":
+        elif choice == "8":
             await remove_bot_menu(session, session_factory, twitch)
 
-        elif choice == "11":
+        elif choice == "9":
             await manage_webhook_subscriptions_menu(session, twitch)
 
-        elif choice == "12":
+        elif choice == "10":
             await list_service_status_menu(session_factory)
 
-        elif choice == "13":
+        elif choice == "11":
             await list_broadcaster_authorizations_menu(session_factory)
 
-        elif choice == "14":
+        elif choice == "12":
             break
 
         else:

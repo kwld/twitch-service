@@ -1,17 +1,20 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import secrets
 import uuid
 
 from fastapi import HTTPException, status
-from passlib.context import CryptContext
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import ServiceAccount
 
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+PBKDF2_PREFIX = "pbkdf2_sha256"
+PBKDF2_ITERATIONS = 260_000
 
 
 def generate_client_id() -> str:
@@ -23,11 +26,44 @@ def generate_client_secret() -> str:
 
 
 def hash_secret(secret: str) -> str:
-    return pwd_context.hash(secret)
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        secret.encode("utf-8"),
+        salt,
+        PBKDF2_ITERATIONS,
+    )
+    salt_b64 = base64.urlsafe_b64encode(salt).decode("ascii")
+    digest_b64 = base64.urlsafe_b64encode(digest).decode("ascii")
+    return f"{PBKDF2_PREFIX}${PBKDF2_ITERATIONS}${salt_b64}${digest_b64}"
 
 
 def verify_secret(secret: str, secret_hash: str) -> bool:
-    return pwd_context.verify(secret, secret_hash)
+    if secret_hash.startswith(f"{PBKDF2_PREFIX}$"):
+        try:
+            _, iter_s, salt_b64, digest_b64 = secret_hash.split("$", 3)
+            iterations = int(iter_s)
+            salt = base64.urlsafe_b64decode(salt_b64.encode("ascii"))
+            expected = base64.urlsafe_b64decode(digest_b64.encode("ascii"))
+        except Exception:
+            return False
+
+        actual = hashlib.pbkdf2_hmac(
+            "sha256",
+            secret.encode("utf-8"),
+            salt,
+            iterations,
+        )
+        return hmac.compare_digest(actual, expected)
+
+    # Backward compatibility: verify legacy passlib hashes if present.
+    try:
+        from passlib.context import CryptContext
+
+        legacy_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+        return legacy_context.verify(secret, secret_hash)
+    except Exception:
+        return False
 
 
 async def authenticate_service(

@@ -38,6 +38,7 @@ class BotAccount(Base):
     broadcaster_auth_requests: Mapped[list["BroadcasterAuthorizationRequest"]] = relationship(
         back_populates="bot_account"
     )
+    service_access: Mapped[list["ServiceBotAccess"]] = relationship(back_populates="bot_account")
 
 
 class ServiceAccount(Base):
@@ -63,6 +64,7 @@ class ServiceAccount(Base):
         back_populates="service_account"
     )
     runtime_stats: Mapped["ServiceRuntimeStats | None"] = relationship(back_populates="service_account")
+    bot_access: Mapped[list["ServiceBotAccess"]] = relationship(back_populates="service_account")
 
 
 class ServiceInterest(Base):
@@ -250,3 +252,24 @@ class ServiceRuntimeStats(Base):
     )
 
     service_account: Mapped["ServiceAccount"] = relationship(back_populates="runtime_stats")
+
+
+class ServiceBotAccess(Base):
+    __tablename__ = "service_bot_access"
+    __table_args__ = (
+        UniqueConstraint("service_account_id", "bot_account_id", name="uq_service_bot_access"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    service_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("service_accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    bot_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("bot_accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    service_account: Mapped["ServiceAccount"] = relationship(back_populates="bot_access")
+    bot_account: Mapped["BotAccount"] = relationship(back_populates="service_access")

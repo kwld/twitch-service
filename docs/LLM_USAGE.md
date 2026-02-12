@@ -35,6 +35,7 @@ Admin endpoints use `X-Admin-Key`, which service clients should not rely on.
 Core:
 - `GET /health`
 - `GET /v1/eventsub/subscription-types`
+- `GET /v1/bots/accessible`
 
 Interest lifecycle:
 - `GET /v1/interests`
@@ -70,6 +71,18 @@ It returns:
 LLM rule:
 - Do not invent event type names.
 - Validate requested type against catalog response before creating interests.
+
+## 5.1) Bot Access Discovery (Do This Before Bot-Specific Calls)
+Use:
+- `GET /v1/bots/accessible`
+
+Response includes:
+- `access_mode`: `all` or `restricted`
+- `bots`: enabled bot accounts available to this service
+
+LLM rule:
+- Before calling bot-specific endpoints (`/v1/interests`, `/v1/twitch/*`, `/v1/broadcaster-authorizations/start`, `/v1/twitch/chat/messages`), ensure `bot_account_id` is listed here.
+- If `access_mode=restricted`, treat bots not listed as unauthorized and do not call bot-specific APIs for them.
 
 ## 6) Interest Creation Contract
 Request:
@@ -212,6 +225,7 @@ Reference docs:
 ## 12) Error Handling Strategy
 Common statuses:
 - `401`: invalid service credentials.
+- `403`: service is authenticated but not authorized for selected bot.
 - `404`: resource not found (bot/interest).
 - `409`: state conflict (disabled bot, missing required scopes for mode, token identity mismatch).
 - `422`: invalid request (unsupported event type, missing webhook URL, malformed payload).
