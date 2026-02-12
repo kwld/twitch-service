@@ -224,3 +224,41 @@ Remote host requirements:
 - Docker + Docker Compose plugin
 - SSH access
 - `.env` included in deployed project
+
+## Production Deploy From Fresh Clone (Local Host)
+Use these scripts when running directly on a server/host after cloning.
+
+Windows PowerShell:
+```powershell
+./scripts/prod-container.ps1 -Engine docker -Build
+```
+or
+```powershell
+./scripts/prod-container.ps1 -Engine podman -Build
+```
+
+Linux/macOS shell:
+```bash
+./scripts/prod-container.sh docker --build
+```
+or
+```bash
+./scripts/prod-container.sh podman --build
+```
+
+Behavior:
+- bootstraps `.env` from `.env.example` if missing,
+- sets `APP_ENV=prod`,
+- enforces container-safe DB URL (`db:5432`),
+- auto-generates secure secrets when placeholders are present,
+- starts `docker-compose.yml` with `up -d --remove-orphans`.
+
+After first start, update `.env` with real Twitch values:
+- `TWITCH_CLIENT_ID`
+- `TWITCH_CLIENT_SECRET`
+- `TWITCH_REDIRECT_URI`
+- `TWITCH_EVENTSUB_WEBHOOK_CALLBACK_URL`
+
+Then restart compose.
+
+Full production guide: `docs/PRODUCTION_DEPLOY.md`.
