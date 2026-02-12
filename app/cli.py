@@ -640,16 +640,22 @@ async def _select_service_account(session: PromptSession, session_factory):
     print("\nService accounts:")
     for idx, account in enumerate(accounts, start=1):
         print(f"{idx}) {account.name} client_id={account.client_id} enabled={account.enabled}")
-    raw = (await session.prompt_async("Select service account number: ")).strip()
+    raw = (await session.prompt_async("Select service account (number/name/client_id): ")).strip()
     try:
         selected = int(raw)
+        if selected < 1 or selected > len(accounts):
+            print("Invalid selection.")
+            return None
+        return accounts[selected - 1]
     except ValueError:
-        print("Invalid selection.")
-        return None
-    if selected < 1 or selected > len(accounts):
-        print("Invalid selection.")
-        return None
-    return accounts[selected - 1]
+        pass
+
+    for account in accounts:
+        if account.name == raw or account.client_id == raw:
+            return account
+
+    print("Invalid selection.")
+    return None
 
 
 async def _print_service_bot_access(session_factory, service_id) -> None:

@@ -63,7 +63,12 @@ class ServiceAccount(Base):
     broadcaster_auth_requests: Mapped[list["BroadcasterAuthorizationRequest"]] = relationship(
         back_populates="service_account"
     )
-    runtime_stats: Mapped["ServiceRuntimeStats | None"] = relationship(back_populates="service_account")
+    runtime_stats: Mapped["ServiceRuntimeStats | None"] = relationship(
+        back_populates="service_account",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        single_parent=True,
+    )
     bot_access: Mapped[list["ServiceBotAccess"]] = relationship(back_populates="service_account")
 
 
