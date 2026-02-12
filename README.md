@@ -8,6 +8,7 @@ Minimal API service that:
 
 ## Features
 - Async interactive CLI (`twitch-eventsub-cli console`) to:
+  - guided Twitch bot setup wizard (OAuth),
   - add/list/refresh bot accounts,
   - create service accounts (`client_id`, `client_secret`),
   - regenerate service account secret.
@@ -84,6 +85,8 @@ This repo includes a hot-reload development bundle:
 - `Dockerfile.dev`
 - `docker-compose.dev.yml`
 - `scripts/dev-container.ps1`
+- `scripts/cli-container.ps1`
+- `scripts/cli-container.sh`
 
 ### Start with Docker Desktop
 ```powershell
@@ -113,6 +116,28 @@ Notes:
 - Set `NGROK_AUTHTOKEN` in `.env` to enable ngrok tunnel.
 - Full setup guide: `docs/DEV_SETUP.md`.
 - LLM/agent usage guide: `docs/LLM_USAGE.md`.
+
+### Open CLI from project root in container
+Windows PowerShell:
+```powershell
+./scripts/cli-container.ps1 -Engine docker
+```
+or
+```powershell
+./scripts/cli-container.ps1 -Engine podman
+```
+
+Linux/macOS shell:
+```bash
+./scripts/cli-container.sh docker
+```
+or
+```bash
+./scripts/cli-container.sh podman
+```
+
+If the dev app container is running, scripts attach via `exec`.
+If not running, scripts start one-off `compose run` CLI container.
 
 ## Upstream EventSub Routing (Both Transports)
 The service can use websocket and webhook upstream at the same time.

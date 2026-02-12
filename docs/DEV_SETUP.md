@@ -52,7 +52,26 @@ docker compose -f docker-compose.dev.yml up -d --build
 - Health: `http://localhost:8080/health`
 - ngrok inspector: `http://localhost:4040`
 
-## 6) Stop containers
+## 6) Open interactive CLI in container
+Windows:
+```powershell
+./scripts/cli-container.ps1 -Engine docker
+```
+or
+```powershell
+./scripts/cli-container.ps1 -Engine podman
+```
+
+Linux/macOS:
+```bash
+./scripts/cli-container.sh docker
+```
+or
+```bash
+./scripts/cli-container.sh podman
+```
+
+## 7) Stop containers
 Docker:
 ```powershell
 docker compose -f docker-compose.dev.yml down

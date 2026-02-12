@@ -8,6 +8,7 @@ from urllib.parse import urlencode
 import httpx
 
 TOKEN_URL = "https://id.twitch.tv/oauth2/token"
+VALIDATE_URL = "https://id.twitch.tv/oauth2/validate"
 HELIX_BASE = "https://api.twitch.tv/helix"
 
 
@@ -97,6 +98,40 @@ class TwitchClient:
         if resp.status_code >= 300:
             raise TwitchApiError(f"Failed users lookup: {resp.text}")
         return resp.json().get("data", [])
+
+    async def get_user_by_login_app(self, login: str) -> dict[str, Any] | None:
+        token = await self.app_access_token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Client-Id": self.client_id,
+        }
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(f"{HELIX_BASE}/users", headers=headers, params={"login": login})
+        if resp.status_code >= 300:
+            raise TwitchApiError(f"Failed users lookup by login: {resp.text}")
+        users = resp.json().get("data", [])
+        return users[0] if users else None
+
+    async def get_user_by_id_app(self, user_id: str) -> dict[str, Any] | None:
+        token = await self.app_access_token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Client-Id": self.client_id,
+        }
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(f"{HELIX_BASE}/users", headers=headers, params={"id": user_id})
+        if resp.status_code >= 300:
+            raise TwitchApiError(f"Failed users lookup by id: {resp.text}")
+        users = resp.json().get("data", [])
+        return users[0] if users else None
+
+    async def validate_user_token(self, access_token: str) -> dict[str, Any]:
+        headers = {"Authorization": f"OAuth {access_token}"}
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(VALIDATE_URL, headers=headers)
+        if resp.status_code >= 300:
+            raise TwitchApiError(f"Failed token validation: {resp.text}")
+        return resp.json()
 
     async def app_access_token(self) -> str:
         if self._app_token and self._app_token_expiry and datetime.now(UTC) < self._app_token_expiry:
