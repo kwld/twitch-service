@@ -139,7 +139,7 @@ class TwitchClient:
         event_type: str,
         version: str,
         condition: dict[str, str],
-        session_id: str,
+        transport: dict[str, str],
     ) -> dict[str, Any]:
         token = await self.app_access_token()
         headers = {"Authorization": f"Bearer {token}", "Client-Id": self.client_id}
@@ -147,7 +147,7 @@ class TwitchClient:
             "type": event_type,
             "version": version,
             "condition": condition,
-            "transport": {"method": "websocket", "session_id": session_id},
+            "transport": transport,
         }
         async with httpx.AsyncClient(timeout=20) as client:
             resp = await client.post(f"{HELIX_BASE}/eventsub/subscriptions", headers=headers, json=body)

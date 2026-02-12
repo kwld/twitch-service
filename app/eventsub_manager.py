@@ -5,6 +5,7 @@ import json
 import logging
 from contextlib import suppress
 from datetime import UTC, datetime
+from typing import Literal
 
 import websockets
 from sqlalchemy import delete, select
@@ -24,19 +25,29 @@ class EventSubManager:
         session_factory: async_sessionmaker,
         registry: InterestRegistry,
         event_hub: LocalEventHub,
+        upstream_transport: Literal["websocket", "webhook"] = "websocket",
+        webhook_callback_url: str | None = None,
+        webhook_secret: str | None = None,
     ) -> None:
         self.twitch = twitch_client
         self.ws_url: str = getattr(self.twitch, "eventsub_ws_url", "wss://eventsub.wss.twitch.tv/ws")
         self.session_factory = session_factory
         self.registry = registry
         self.event_hub = event_hub
+        self.upstream_transport = upstream_transport
+        self.webhook_callback_url = webhook_callback_url
+        self.webhook_secret = webhook_secret
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._session_id: str | None = None
 
     async def start(self) -> None:
         await self._load_interests()
-        self._task = asyncio.create_task(self._run(), name="eventsub-manager")
+        if self.upstream_transport == "websocket":
+            self._task = asyncio.create_task(self._run(), name="eventsub-manager")
+            return
+        await self._sync_from_twitch_and_reconcile()
+        await self._ensure_all_subscriptions()
 
     async def stop(self) -> None:
         self._stop.set()
@@ -116,6 +127,9 @@ class EventSubManager:
                 condition = sub.get("condition", {})
                 event_type = sub.get("type")
                 broadcaster_user_id = condition.get("broadcaster_user_id")
+                method = sub.get("transport", {}).get("method")
+                if method and method != self.upstream_transport:
+                    continue
                 if not event_type or not broadcaster_user_id:
                     continue
                 bot = await session.scalar(
@@ -140,7 +154,7 @@ class EventSubManager:
             await self._ensure_subscription(key)
 
     async def _ensure_subscription(self, key: InterestKey) -> None:
-        if not self._session_id:
+        if self.upstream_transport == "websocket" and not self._session_id:
             return
         async with self.session_factory() as session:
             db_sub = await session.scalar(
@@ -157,11 +171,24 @@ class EventSubManager:
                     await self.twitch.delete_eventsub_subscription(db_sub.twitch_subscription_id)
                 await session.delete(db_sub)
                 await session.flush()
+            transport: dict[str, str]
+            if self.upstream_transport == "webhook":
+                if not self.webhook_callback_url or not self.webhook_secret:
+                    raise RuntimeError(
+                        "TWITCH_EVENTSUB_WEBHOOK_CALLBACK_URL and TWITCH_EVENTSUB_WEBHOOK_SECRET are required for webhook transport"
+                    )
+                transport = {
+                    "method": "webhook",
+                    "callback": self.webhook_callback_url,
+                    "secret": self.webhook_secret,
+                }
+            else:
+                transport = {"method": "websocket", "session_id": self._session_id or ""}
             created = await self.twitch.create_eventsub_subscription(
                 event_type=key.event_type,
                 version="1",
                 condition={"broadcaster_user_id": key.broadcaster_user_id},
-                session_id=self._session_id,
+                transport=transport,
             )
             new_sub = TwitchSubscription(
                 bot_account_id=key.bot_account_id,
@@ -175,9 +202,18 @@ class EventSubManager:
             session.add(new_sub)
             await session.commit()
 
+    async def handle_webhook_notification(self, payload: dict, message_id: str = "") -> None:
+        await self._forward_notification_payload(payload, message_id)
+
+    async def handle_webhook_revocation(self, payload: dict) -> None:
+        await self._handle_revocation(payload)
+
     async def _handle_notification(self, message: dict) -> None:
-        metadata = message.get("metadata", {})
         payload = message.get("payload", {})
+        metadata = message.get("metadata", {})
+        await self._forward_notification_payload(payload, metadata.get("message_id", ""))
+
+    async def _forward_notification_payload(self, payload: dict, message_id: str) -> None:
         subscription = payload.get("subscription", {})
         event = payload.get("event", {})
         event_type = subscription.get("type")
@@ -199,7 +235,7 @@ class EventSubManager:
         )
         interests = await self.registry.interested(key)
         envelope = self.event_hub.envelope(
-            message_id=metadata.get("message_id", ""),
+            message_id=message_id,
             event_type=event_type,
             event=event,
         )

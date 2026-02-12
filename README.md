@@ -3,7 +3,7 @@
 Minimal API service that:
 - manages Twitch bot OAuth credentials in PostgreSQL,
 - maintains deduplicated Twitch EventSub subscriptions,
-- receives Twitch EventSub over WebSocket,
+- receives Twitch EventSub over WebSocket or Webhook,
 - forwards events to local services over WebSocket or outgoing webhooks.
 
 ## Features
@@ -19,6 +19,7 @@ Minimal API service that:
   - reuse existing ones when possible,
   - create only missing subscriptions.
 - Reconnect support for Twitch EventSub WebSocket.
+- Twitch webhook callback verification + HMAC signature validation.
 
 ## Quickstart
 1. Copy `.env.example` to `.env` and configure values.
@@ -49,6 +50,7 @@ If `.env` is missing, app/cli exits with an explicit error.
 
 ## Main Endpoints
 - `GET /health`
+- `POST /webhooks/twitch/eventsub` (Twitch webhook callback)
 - `GET /v1/bots` (admin)
 - `POST /v1/admin/service-accounts?name=<name>` (admin)
 - `GET /v1/admin/service-accounts` (admin)
@@ -76,6 +78,22 @@ Run everything for local dev (DB + ngrok + reload):
 ```powershell
 ./scripts/dev.ps1 -Port 8080
 ```
+
+## Upstream EventSub Mode
+Choose Twitch transport in `.env`:
+- `TWITCH_EVENTSUB_TRANSPORT=websocket` uses `TWITCH_EVENTSUB_WS_URL`.
+- `TWITCH_EVENTSUB_TRANSPORT=webhook` uses:
+  - `TWITCH_EVENTSUB_WEBHOOK_CALLBACK_URL` (must be public HTTPS),
+  - `TWITCH_EVENTSUB_WEBHOOK_SECRET` (10-100 ASCII chars).
+
+For webhook mode, Twitch calls:
+- `POST /webhooks/twitch/eventsub`
+
+Handler behavior:
+- verifies `Twitch-Eventsub-Message-Signature` using HMAC-SHA256 over:
+  `message_id + timestamp + raw_body`,
+- handles `webhook_callback_verification` (returns raw challenge),
+- handles `notification` and `revocation` with fast `2XX` responses.
 
 ## Production Deploy Over SSH
 Linux/macOS:

@@ -1,14 +1,27 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import logging
 import uuid
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 
 import uvicorn
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
+from fastapi.responses import PlainTextResponse, Response
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import authenticate_service, generate_client_id, generate_client_secret, hash_secret
 from app.config import RuntimeState, load_settings
@@ -34,7 +47,15 @@ twitch_client = TwitchClient(
 )
 interest_registry = InterestRegistry()
 event_hub = LocalEventHub()
-eventsub_manager = EventSubManager(twitch_client, session_factory, interest_registry, event_hub)
+eventsub_manager = EventSubManager(
+    twitch_client,
+    session_factory,
+    interest_registry,
+    event_hub,
+    upstream_transport=settings.twitch_eventsub_transport,
+    webhook_callback_url=settings.twitch_eventsub_webhook_callback_url,
+    webhook_secret=settings.twitch_eventsub_webhook_secret,
+)
 runtime_state = RuntimeState(settings=settings)
 
 
@@ -66,9 +87,61 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="Twitch EventSub Service", lifespan=lifespan)
 
 
+def _verify_twitch_signature(request: Request, raw_body: bytes) -> bool:
+    message_id = request.headers.get("Twitch-Eventsub-Message-Id", "")
+    message_timestamp = request.headers.get("Twitch-Eventsub-Message-Timestamp", "")
+    message_signature = request.headers.get("Twitch-Eventsub-Message-Signature", "")
+    if not message_id or not message_timestamp or not message_signature:
+        return False
+
+    try:
+        ts = datetime.fromisoformat(message_timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if abs((datetime.now(UTC) - ts).total_seconds()) > timedelta(minutes=10).total_seconds():
+        return False
+
+    signed = message_id.encode("utf-8") + message_timestamp.encode("utf-8") + raw_body
+    digest = hmac.new(
+        settings.twitch_eventsub_webhook_secret.encode("utf-8"),
+        signed,
+        hashlib.sha256,
+    ).hexdigest()
+    expected = f"sha256={digest}"
+    return hmac.compare_digest(expected, message_signature)
+
+
 @app.get("/health")
 async def health():
     return {"ok": True}
+
+
+@app.post("/webhooks/twitch/eventsub")
+async def twitch_eventsub_webhook(request: Request):
+    raw_body = await request.body()
+    if not _verify_twitch_signature(request, raw_body):
+        raise HTTPException(status_code=403, detail="Invalid Twitch signature")
+
+    message_type = request.headers.get("Twitch-Eventsub-Message-Type", "").lower()
+    payload = await request.json()
+
+    if message_type == "webhook_callback_verification":
+        challenge = payload.get("challenge", "")
+        return PlainTextResponse(content=challenge, status_code=200)
+
+    if message_type == "notification":
+        asyncio.create_task(
+            eventsub_manager.handle_webhook_notification(
+                payload, request.headers.get("Twitch-Eventsub-Message-Id", "")
+            )
+        )
+        return Response(status_code=204)
+
+    if message_type == "revocation":
+        asyncio.create_task(eventsub_manager.handle_webhook_revocation(payload))
+        return Response(status_code=204)
+
+    return Response(status_code=204)
 
 
 @app.get("/v1/bots")
