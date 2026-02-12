@@ -6,6 +6,13 @@ Minimal API service that:
 - receives Twitch EventSub over WebSocket or Webhook,
 - forwards events to local services over WebSocket or outgoing webhooks.
 
+## Documentation Map
+- `README.md`: operator-facing overview, setup, deploy, and feature map.
+- `docs/ARCHITECTURE.md`: runtime internals and component behavior.
+- `docs/LLM_USAGE.md`: strict integration contract for LLM/service clients (code-aligned).
+- `docs/DEV_SETUP.md`: local development container workflow.
+- `docs/PRODUCTION_DEPLOY.md`: production deployment procedure.
+
 ## Features
 - Async interactive CLI (`twitch-eventsub-cli console`) to:
   - guided Twitch bot setup wizard (OAuth),
@@ -29,6 +36,9 @@ Minimal API service that:
 - Reconnect support for Twitch EventSub WebSocket.
 - Twitch webhook callback verification + HMAC signature validation.
 - Auto-prunes stale interests: if not heartbeated for 1 hour, interest/state is removed.
+
+For exact runtime flow and data model details, see `docs/ARCHITECTURE.md`.
+For 1:1 LLM integration behavior and endpoint contracts, see `docs/LLM_USAGE.md`.
 
 ## Quickstart
 1. Copy `.env.example` to `.env` and configure values.
@@ -305,17 +315,15 @@ Then restart compose.
 
 Full production guide: `docs/PRODUCTION_DEPLOY.md`.
 
-## Node Integration Test App
-A full-coverage Node.js integration client is available in `test-app/`.
+## Node Frontend Test App
+A browser-based test app (Node backend + static frontend) is available in `test-app/`.
 
 It covers:
-- admin bot listing + service account lifecycle,
 - service auth + accessible bot discovery (`/v1/bots/accessible`),
 - broadcaster authorization bootstrap,
 - interest lifecycle (create/list/heartbeat/delete),
-- websocket event listening,
-- optional webhook receive transport,
-- Twitch profile/stream reads,
+- websocket event listening and live UI log,
+- optional webhook receive transport via `/service-webhook`,
 - chat send via service endpoint.
 
 See `test-app/README.md`.
