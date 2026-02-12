@@ -79,6 +79,37 @@ Run everything for local dev (DB + ngrok + reload):
 ./scripts/dev.ps1 -Port 8080
 ```
 
+## Dev Bundle (Docker/Podman Desktop on Windows)
+This repo includes a hot-reload development bundle:
+- `Dockerfile.dev`
+- `docker-compose.dev.yml`
+- `scripts/dev-container.ps1`
+
+### Start with Docker Desktop
+```powershell
+./scripts/dev-container.ps1 -Engine docker -Build
+```
+
+### Start with Podman Desktop
+```powershell
+./scripts/dev-container.ps1 -Engine podman -Build
+```
+
+### Stop
+Docker:
+```powershell
+docker compose -f docker-compose.dev.yml down
+```
+Podman:
+```powershell
+podman compose -f docker-compose.dev.yml down
+```
+
+Notes:
+- `.env` is required; start command fails if missing.
+- Code is bind-mounted (`./:/workspace`) and `uvicorn --reload` is enabled.
+- `WATCHFILES_FORCE_POLLING=true` is set for reliable reload on Windows mounted volumes.
+
 ## Upstream EventSub Mode
 Choose Twitch transport in `.env`:
 - `TWITCH_EVENTSUB_TRANSPORT=websocket` uses `TWITCH_EVENTSUB_WS_URL`.
