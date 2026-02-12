@@ -47,5 +47,20 @@ services:
       - --reload-dir
       - /workspace/app
 
+  ngrok:
+    image: ngrok/ngrok:latest
+    container_name: twitch_eventsub_ngrok_dev
+    restart: unless-stopped
+    depends_on:
+      - app
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
+    command:
+      - http
+      - app:8080
+      - --log=stdout
+    ports:
+      - "4040:4040"
+
 volumes:
   postgres_data_dev:

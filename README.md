@@ -109,6 +109,9 @@ Notes:
 - `.env` is required; start command fails if missing.
 - Code is bind-mounted (`./:/workspace`) and `uvicorn --reload` is enabled.
 - `WATCHFILES_FORCE_POLLING=true` is set for reliable reload on Windows mounted volumes.
+- Dev bundle includes an `ngrok` container (inspector at `http://localhost:4040`).
+- Set `NGROK_AUTHTOKEN` in `.env` to enable ngrok tunnel.
+- Full setup guide: `docs/DEV_SETUP.md`.
 
 ## Upstream EventSub Mode
 Choose Twitch transport in `.env`:
