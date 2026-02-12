@@ -184,8 +184,8 @@ class TwitchClient:
         self._app_token_expiry = datetime.now(UTC) + timedelta(seconds=int(data["expires_in"]) - 60)
         return self._app_token
 
-    async def list_eventsub_subscriptions(self) -> list[dict[str, Any]]:
-        token = await self.app_access_token()
+    async def list_eventsub_subscriptions(self, access_token: str | None = None) -> list[dict[str, Any]]:
+        token = access_token or await self.app_access_token()
         headers = {"Authorization": f"Bearer {token}", "Client-Id": self.client_id}
         cursor = None
         out: list[dict[str, Any]] = []
@@ -208,8 +208,9 @@ class TwitchClient:
         version: str,
         condition: dict[str, str],
         transport: dict[str, str],
+        access_token: str | None = None,
     ) -> dict[str, Any]:
-        token = await self.app_access_token()
+        token = access_token or await self.app_access_token()
         headers = {"Authorization": f"Bearer {token}", "Client-Id": self.client_id}
         body = {
             "type": event_type,
@@ -226,8 +227,8 @@ class TwitchClient:
             raise TwitchApiError("Empty create subscription response")
         return data[0]
 
-    async def delete_eventsub_subscription(self, subscription_id: str) -> None:
-        token = await self.app_access_token()
+    async def delete_eventsub_subscription(self, subscription_id: str, access_token: str | None = None) -> None:
+        token = access_token or await self.app_access_token()
         headers = {"Authorization": f"Bearer {token}", "Client-Id": self.client_id}
         async with httpx.AsyncClient(timeout=20) as client:
             resp = await client.delete(

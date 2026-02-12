@@ -11,9 +11,10 @@ from sqlalchemy import select
 import websockets
 
 from app.auth import generate_client_id, generate_client_secret, hash_secret
+from app.bot_auth import ensure_bot_access_token
 from app.config import load_settings
 from app.db import create_engine_and_session
-from app.models import Base, BotAccount, ServiceAccount, TwitchSubscription
+from app.models import Base, BotAccount, OAuthCallback, ServiceAccount, TwitchSubscription
 from app.twitch import TwitchApiError, TwitchClient
 
 
@@ -50,6 +51,69 @@ def parse_oauth_callback(redirect_url: str) -> tuple[str | None, str | None, str
     return code, state, error
 
 
+async def wait_for_oauth_callback(
+    session_factory,
+    state: str,
+    timeout_seconds: int = 300,
+    poll_interval_seconds: float = 1.0,
+) -> tuple[str | None, str | None]:
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    while asyncio.get_running_loop().time() < deadline:
+        async with session_factory() as db:
+            row = await db.get(OAuthCallback, state)
+            if row and (row.code or row.error):
+                code, error = row.code, row.error
+                await db.delete(row)
+                await db.commit()
+                return code, error
+        await asyncio.sleep(poll_interval_seconds)
+    return None, None
+
+
+async def obtain_oauth_code(
+    session: PromptSession,
+    session_factory,
+    twitch: TwitchClient,
+    state: str,
+) -> str | None:
+    async with session_factory() as db:
+        existing = await db.get(OAuthCallback, state)
+        if existing:
+            await db.delete(existing)
+            await db.commit()
+
+    auth_url = twitch.build_authorize_url(state=state)
+    print("\nStep 1: Open this URL and authorize the Twitch account to use as bot:\n")
+    print(auth_url)
+    print("\nStep 2: Complete the browser flow. CLI will auto-detect callback for up to 5 minutes.")
+    print("Waiting for OAuth callback...")
+
+    code, error = await wait_for_oauth_callback(session_factory, state=state)
+    if error:
+        print(f"OAuth failed with error: {error}")
+        return None
+    if code:
+        print("OAuth callback confirmed.")
+        return code
+
+    print("Timed out waiting for callback.")
+    print("Paste full redirect URL to continue, or leave blank to cancel.")
+    callback = (await session.prompt_async("Redirect URL: ")).strip()
+    if not callback:
+        return None
+    code, returned_state, error = parse_oauth_callback(callback)
+    if error:
+        print(f"OAuth failed with error: {error}")
+        return None
+    if not code:
+        print("No OAuth code found in redirect URL.")
+        return None
+    if returned_state != state:
+        print("State mismatch. Stop and retry guided setup (possible CSRF or wrong callback URL).")
+        return None
+    return code
+
+
 async def ask_yes_no(session: PromptSession, prompt: str, default_yes: bool = True) -> bool:
     suffix = " [Y/n]: " if default_yes else " [y/N]: "
     raw = (await session.prompt_async(prompt + suffix)).strip().lower()
@@ -68,21 +132,8 @@ async def guided_bot_setup(session: PromptSession, session_factory, twitch: Twit
         return
 
     state = secrets.token_urlsafe(24)
-    auth_url = twitch.build_authorize_url(state=state)
-    print("\nStep 1: Open this URL and authorize the Twitch account to use as bot:\n")
-    print(auth_url)
-    print("\nStep 2: Paste full redirect URL after authorization.")
-    callback = (await session.prompt_async("Redirect URL: ")).strip()
-
-    code, returned_state, error = parse_oauth_callback(callback)
-    if error:
-        print(f"OAuth failed with error: {error}")
-        return
+    code = await obtain_oauth_code(session, session_factory, twitch, state=state)
     if not code:
-        print("No OAuth code found in redirect URL.")
-        return
-    if returned_state != state:
-        print("State mismatch. Stop and retry guided setup (possible CSRF or wrong callback URL).")
         return
 
     try:
@@ -209,8 +260,12 @@ async def connect_eventsub_websocket(twitch: TwitchClient):
     return ws, session_id
 
 
-async def list_chat_subscriptions(twitch: TwitchClient, bot_user_id: str) -> list[dict]:
-    subs = await twitch.list_eventsub_subscriptions()
+async def list_chat_subscriptions(
+    twitch: TwitchClient,
+    bot_user_id: str,
+    access_token: str,
+) -> list[dict]:
+    subs = await twitch.list_eventsub_subscriptions(access_token=access_token)
     out = []
     for sub in subs:
         event_type = sub.get("type", "")
@@ -265,6 +320,14 @@ async def resolve_broadcaster_user_id(twitch: TwitchClient, raw_target: str) -> 
     return user["id"], user["login"]
 
 
+async def get_bot_access_token(session_factory, twitch: TwitchClient, bot_id) -> str:
+    async with session_factory() as db:
+        bot = await db.get(BotAccount, bot_id)
+        if not bot:
+            raise RuntimeError("Bot not found")
+        return await ensure_bot_access_token(db, twitch, bot)
+
+
 async def chat_connect_menu(session: PromptSession, session_factory, twitch: TwitchClient) -> None:
     bot = await select_bot_account(session, session_factory)
     if not bot:
@@ -276,10 +339,27 @@ async def chat_connect_menu(session: PromptSession, session_factory, twitch: Twi
     except Exception as exc:
         print(f"Failed to connect EventSub websocket: {exc}")
         return
+    has_session_subscription = False
 
     print(f"Connected. EventSub session_id={session_id}")
     print("Chat event type used: channel.chat.message")
     print("Tip: for self-test you can subscribe bot to its own channel chat.\n")
+    try:
+        token = await get_bot_access_token(session_factory, twitch, bot.id)
+        token_info = await twitch.validate_user_token(token)
+        granted_scopes = set(token_info.get("scopes", []))
+        required_scopes = {"user:read:chat"}
+        missing_scopes = sorted(required_scopes - granted_scopes)
+        if missing_scopes:
+            print(
+                "Bot token is missing required scopes for chat EventSub: "
+                f"{', '.join(missing_scopes)}"
+            )
+            print(
+                "Update TWITCH_DEFAULT_SCOPES and re-run Guided bot setup to refresh bot OAuth token."
+            )
+    except Exception as exc:
+        print(f"Warning: could not validate bot token scopes: {exc}")
 
     try:
         while True:
@@ -295,7 +375,10 @@ async def chat_connect_menu(session: PromptSession, session_factory, twitch: Twi
 
             if choice == "1":
                 try:
-                    subs = await list_chat_subscriptions(twitch, bot.twitch_user_id)
+                    access_token = await get_bot_access_token(session_factory, twitch, bot.id)
+                    subs = await list_chat_subscriptions(
+                        twitch, bot.twitch_user_id, access_token=access_token
+                    )
                 except Exception as exc:
                     print(f"Failed listing chat subscriptions: {exc}")
                     continue
@@ -322,6 +405,7 @@ async def chat_connect_menu(session: PromptSession, session_factory, twitch: Twi
                     continue
 
                 try:
+                    access_token = await get_bot_access_token(session_factory, twitch, bot.id)
                     created = await twitch.create_eventsub_subscription(
                         event_type="channel.chat.message",
                         version="1",
@@ -330,8 +414,9 @@ async def chat_connect_menu(session: PromptSession, session_factory, twitch: Twi
                             "user_id": bot.twitch_user_id,
                         },
                         transport={"method": "websocket", "session_id": session_id},
+                        access_token=access_token,
                     )
-                    confirmed = await twitch.list_eventsub_subscriptions()
+                    confirmed = await twitch.list_eventsub_subscriptions(access_token=access_token)
                     success = any(sub.get("id") == created["id"] for sub in confirmed)
                     if not success:
                         print("Subscription call returned, but could not confirm from Twitch list.")
@@ -342,14 +427,22 @@ async def chat_connect_menu(session: PromptSession, session_factory, twitch: Twi
                         sub=created,
                         broadcaster_user_id=broadcaster_user_id,
                     )
+                    has_session_subscription = True
                     print(
                         f"Subscribed successfully: bot={bot.twitch_login} -> channel={broadcaster_login or broadcaster_user_id}"
                     )
                 except Exception as exc:
                     print(f"Failed subscribing to channel chat: {exc}")
+                    text = str(exc)
+                    if "403" in text and "authorization" in text.lower():
+                        print("Check bot OAuth scopes include at least: user:read:chat")
+                        print(
+                            "Then re-run menu option 2 (Guided bot setup) to re-authorize and store new token."
+                        )
 
             elif choice == "3":
                 try:
+                    access_token = await get_bot_access_token(session_factory, twitch, bot.id)
                     created = await twitch.create_eventsub_subscription(
                         event_type="channel.chat.message",
                         version="1",
@@ -358,8 +451,9 @@ async def chat_connect_menu(session: PromptSession, session_factory, twitch: Twi
                             "user_id": bot.twitch_user_id,
                         },
                         transport={"method": "websocket", "session_id": session_id},
+                        access_token=access_token,
                     )
-                    confirmed = await twitch.list_eventsub_subscriptions()
+                    confirmed = await twitch.list_eventsub_subscriptions(access_token=access_token)
                     success = any(sub.get("id") == created["id"] for sub in confirmed)
                     if not success:
                         print("Subscription call returned, but could not confirm from Twitch list.")
@@ -370,11 +464,24 @@ async def chat_connect_menu(session: PromptSession, session_factory, twitch: Twi
                         sub=created,
                         broadcaster_user_id=bot.twitch_user_id,
                     )
+                    has_session_subscription = True
                     print("Self-test subscription successful.")
                 except Exception as exc:
                     print(f"Self-test subscription failed: {exc}")
+                    text = str(exc)
+                    if "403" in text and "authorization" in text.lower():
+                        print("Check bot OAuth scopes include at least: user:read:chat")
+                        print(
+                            "Then re-run menu option 2 (Guided bot setup) to re-authorize and store new token."
+                        )
 
             elif choice == "4":
+                if not has_session_subscription:
+                    print(
+                        "No chat subscription is attached to this websocket session yet. "
+                        "Use option 2 or 3 first, then listen."
+                    )
+                    continue
                 raw_seconds = (await session.prompt_async("Listen seconds [30]: ")).strip()
                 listen_seconds = 30
                 if raw_seconds:
@@ -395,7 +502,28 @@ async def chat_connect_menu(session: PromptSession, session_factory, twitch: Twi
                     except asyncio.TimeoutError:
                         break
                     except Exception as exc:
-                        print(f"Listen stopped: {exc}")
+                        text = str(exc)
+                        if "4003" in text and "connection unused" in text:
+                            print(
+                                "Twitch closed this websocket session as unused (4003). "
+                                "Reconnecting now..."
+                            )
+                            try:
+                                await ws.close()
+                            except Exception:
+                                pass
+                            try:
+                                ws, session_id = await connect_eventsub_websocket(twitch)
+                                has_session_subscription = False
+                            except Exception as reconnect_exc:
+                                print(f"Reconnect failed: {reconnect_exc}")
+                                break
+                            print(
+                                "Reconnected with a new session. "
+                                "Create a new subscription via option 2 or 3 before listening."
+                            )
+                        else:
+                            print(f"Listen stopped: {exc}")
                         break
                     payload = json.loads(raw_msg)
                     metadata = payload.get("metadata", {})
@@ -465,12 +593,10 @@ async def menu_loop() -> None:
         elif choice == "3":
             name = (await session.prompt_async("Bot name: ")).strip()
             state = secrets.token_urlsafe(16)
-            auth_url = twitch.build_authorize_url(state=state)
-            print("\nOpen this URL in browser, authorize, then paste full redirect URL:\n")
-            print(auth_url)
-            redirect = (await session.prompt_async("\nRedirect URL: ")).strip()
+            code = await obtain_oauth_code(session, session_factory, twitch, state=state)
+            if not code:
+                continue
             try:
-                code = extract_code(redirect)
                 token = await twitch.exchange_code(code)
                 users = await twitch.get_users(token.access_token)
                 if not users:

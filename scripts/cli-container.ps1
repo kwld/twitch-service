@@ -1,5 +1,6 @@
 param(
-  [ValidateSet("docker", "podman")][string]$Engine = "docker"
+  [ValidateSet("docker", "podman")][string]$Engine = "docker",
+  [Parameter(ValueFromRemainingArguments = $true)][string[]]$CliArgs
 )
 
 $ErrorActionPreference = "Stop"
@@ -11,21 +12,43 @@ if (!(Test-Path ".env")) {
 
 $containerName = "twitch_eventsub_app_dev"
 $composeFile = "docker-compose.dev.yml"
+if (-not $CliArgs -or $CliArgs.Count -eq 0) {
+  $CliArgs = @("console")
+}
+
+function Get-ExecTtyFlags {
+  if ([Console]::IsInputRedirected -or [Console]::IsOutputRedirected) {
+    return @("-i")
+  }
+  return @("-it")
+}
 
 if ($Engine -eq "docker") {
   $running = docker ps --filter "name=^$containerName$" --format "{{.Names}}"
-  if ($running -eq $containerName) {
-    docker exec -it $containerName twitch-eventsub-cli console
-    exit $LASTEXITCODE
+  if ($running -ne $containerName) {
+    docker compose -f $composeFile up -d db app
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   }
-  docker compose -f $composeFile run --rm app twitch-eventsub-cli console
+  $ttyFlags = Get-ExecTtyFlags
+  $dockerExecArgs = @("exec")
+  $dockerExecArgs += $ttyFlags
+  $dockerExecArgs += $containerName
+  $dockerExecArgs += "twitch-eventsub-cli"
+  $dockerExecArgs += $CliArgs
+  & docker @dockerExecArgs
   exit $LASTEXITCODE
 }
 
 $running = podman ps --filter "name=^$containerName$" --format "{{.Names}}"
-if ($running -eq $containerName) {
-  podman exec -it $containerName twitch-eventsub-cli console
-  exit $LASTEXITCODE
+if ($running -ne $containerName) {
+  podman compose -f $composeFile up -d db app
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
-podman compose -f $composeFile run --rm app twitch-eventsub-cli console
+$ttyFlags = Get-ExecTtyFlags
+$podmanExecArgs = @("exec")
+$podmanExecArgs += $ttyFlags
+$podmanExecArgs += $containerName
+$podmanExecArgs += "twitch-eventsub-cli"
+$podmanExecArgs += $CliArgs
+& podman @podmanExecArgs
 exit $LASTEXITCODE

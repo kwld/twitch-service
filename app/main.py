@@ -29,7 +29,7 @@ from app.config import RuntimeState, load_settings
 from app.db import create_engine_and_session
 from app.event_router import InterestRegistry, LocalEventHub
 from app.eventsub_manager import EventSubManager
-from app.models import Base, BotAccount, ChannelState, ServiceAccount, ServiceInterest
+from app.models import Base, BotAccount, ChannelState, OAuthCallback, ServiceAccount, ServiceInterest
 from app.schemas import CreateInterestRequest, InterestResponse
 from app.twitch import TwitchClient
 
@@ -160,6 +160,34 @@ def _verify_twitch_signature(request: Request, raw_body: bytes) -> bool:
 @app.get("/health")
 async def health():
     return {"ok": True}
+
+
+@app.get("/oauth/callback")
+async def oauth_callback(code: str | None = None, state: str | None = None, error: str | None = None):
+    if state:
+        async with session_factory() as session:
+            callback = await session.get(OAuthCallback, state)
+            if callback is None:
+                callback = OAuthCallback(state=state)
+                session.add(callback)
+            callback.code = code
+            callback.error = error
+            await session.commit()
+
+    if error:
+        return {
+            "ok": False,
+            "error": error,
+            "message": "OAuth authorization returned an error.",
+        }
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing OAuth code")
+    return {
+        "ok": True,
+        "message": "OAuth callback received. You can return to CLI and continue setup.",
+        "code_received": True,
+        "state_received": bool(state),
+    }
 
 
 @app.post("/webhooks/twitch/eventsub")
