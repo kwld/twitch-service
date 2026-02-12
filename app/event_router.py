@@ -140,6 +140,7 @@ class LocalEventHub:
     def envelope(self, message_id: str, event_type: str, event: dict) -> dict:
         return {
             "id": message_id,
+            "provider": "twitch",
             "type": event_type,
             "event_timestamp": datetime.now(UTC).isoformat(),
             "event": event,

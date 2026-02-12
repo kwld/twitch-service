@@ -94,6 +94,7 @@ Envelope format (current implementation):
 ```json
 {
   "id": "<message-id>",
+  "provider": "twitch",
   "type": "<event-type>",
   "event_timestamp": "<iso8601>",
   "event": {}

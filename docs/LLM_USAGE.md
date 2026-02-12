@@ -249,6 +249,7 @@ Envelope shape emitted by local hub:
 ```json
 {
   "id": "message-id",
+  "provider": "twitch",
   "type": "event.type",
   "event_timestamp": "ISO8601",
   "event": {}

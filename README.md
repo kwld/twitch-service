@@ -89,6 +89,18 @@ If `.env` is missing, app/cli exits with an explicit error.
 - `POST /v1/twitch/chat/messages` (service)
 - `WS /ws/events?client_id=...&client_secret=...` (service)
 
+### Service Event Envelope
+Events delivered via service websocket (`/ws/events`) and service webhooks include:
+```json
+{
+  "id": "message-id",
+  "provider": "twitch",
+  "type": "event.type",
+  "event_timestamp": "ISO8601",
+  "event": {}
+}
+```
+
 ### Service Bot Access Policy
 - Services can be restricted to a subset of bots.
 - If a service has no explicit bot-access mappings, it can access all enabled bots (default mode).
