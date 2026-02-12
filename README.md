@@ -11,6 +11,7 @@ Minimal API service that:
 - `docs/ARCHITECTURE.md`: runtime internals and component behavior.
 - `docs/LLM_USAGE.md`: strict integration contract for LLM/service clients (code-aligned).
 - `docs/DEV_SETUP.md`: local development container workflow.
+- `docs/START_AND_TEST_APP.md`: full step-by-step local walkthrough (start API + run test app).
 - `docs/PRODUCTION_DEPLOY.md`: production deployment procedure.
 
 ## Features
