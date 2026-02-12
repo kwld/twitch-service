@@ -112,6 +112,7 @@ Notes:
 - Dev bundle includes an `ngrok` container (inspector at `http://localhost:4040`).
 - Set `NGROK_AUTHTOKEN` in `.env` to enable ngrok tunnel.
 - Full setup guide: `docs/DEV_SETUP.md`.
+- LLM/agent usage guide: `docs/LLM_USAGE.md`.
 
 ## Upstream EventSub Routing (Both Transports)
 The service can use websocket and webhook upstream at the same time.
