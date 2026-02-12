@@ -1,79 +1,30 @@
-# LLM-Friendly Service Usage Guide
+# External App Integration Guide
 
-This document is for automated agents that need to use this service.
-It is intentionally strict and task-oriented.
+This guide covers only how an external application should consume this service.
 
-## 1) Service Purpose
-- Accept downstream service interests in Twitch EventSub events.
-- Maintain deduplicated Twitch EventSub subscriptions.
-- Receive Twitch events (websocket + webhook upstream).
-- Fan out events to local services via:
-  - downstream websocket (`/ws/events`)
-  - downstream webhook callback URLs (per interest)
+## 1) What your app needs
+- A service `client_id` and `client_secret` issued by this service.
+- At least one `bot_account_id` to subscribe through.
+- Base URL of the service (example: `http://localhost:8080`).
 
-## 2) Required Configuration
-Read from `.env`.
+## 2) Authentication
+For HTTP service endpoints, send:
+- `X-Client-Id: <client_id>`
+- `X-Client-Secret: <client_secret>`
 
-Minimum required keys:
-- `APP_HOST`, `APP_PORT`
-- `DATABASE_URL`
-- `TWITCH_CLIENT_ID`, `TWITCH_CLIENT_SECRET`
-- `TWITCH_REDIRECT_URI`
-- `TWITCH_EVENTSUB_WS_URL`
-- `TWITCH_EVENTSUB_WEBHOOK_CALLBACK_URL`
-- `TWITCH_EVENTSUB_WEBHOOK_SECRET`
-- `TWITCH_EVENTSUB_WEBHOOK_EVENT_TYPES`
-- `ADMIN_API_KEY`
+For websocket event stream:
+- `/ws/events?client_id=<client_id>&client_secret=<client_secret>`
 
-Routing behavior:
-- Event types listed in `TWITCH_EVENTSUB_WEBHOOK_EVENT_TYPES` use upstream Twitch webhook transport.
-- All other event types use upstream Twitch websocket transport.
-
-## 3) Auth Model
-### Admin auth
-Use header:
-- `X-Admin-Key: <ADMIN_API_KEY>`
-
-### Service auth
-Use headers:
-- `X-Client-Id: <service_client_id>`
-- `X-Client-Secret: <service_client_secret>`
-
-### WS auth (downstream)
-Use query params:
-- `/ws/events?client_id=<id>&client_secret=<secret>`
-
-## 4) Core Endpoints
-### Health
+## 3) Endpoints your app should use
+### Health check
 - `GET /health`
-- Response: `{"ok": true}`
 
-### Admin: bots
-- `GET /v1/bots`
-- Auth: admin
-
-### Admin: create service account
-- `POST /v1/admin/service-accounts?name=<name>`
-- Auth: admin
-- Response includes one-time plaintext `client_secret`.
-
-### Admin: list service accounts
-- `GET /v1/admin/service-accounts`
-- Auth: admin
-
-### Admin: regenerate service secret
-- `POST /v1/admin/service-accounts/{client_id}/regenerate`
-- Auth: admin
-- Response includes new one-time plaintext `client_secret`.
-
-### Service: list interests
+### List your interests
 - `GET /v1/interests`
-- Auth: service
 
-### Service: create interest
+### Create interest
 - `POST /v1/interests`
-- Auth: service
-- JSON body:
+- Body:
 ```json
 {
   "bot_account_id": "uuid",
@@ -84,16 +35,19 @@ Use query params:
 }
 ```
 Rules:
-- `transport` is downstream fanout transport, not Twitch upstream transport.
-- If `transport = webhook`, `webhook_url` is required.
+- `transport` controls how this service sends events to your app.
+- `transport=websocket`: you receive events on `/ws/events`.
+- `transport=webhook`: you must provide `webhook_url`.
 
-### Service: delete interest
+### Delete interest
 - `DELETE /v1/interests/{interest_id}`
-- Auth: service
 
-### Downstream event stream websocket
-- `WS /ws/events?client_id=...&client_secret=...`
-- Receives JSON envelopes:
+## 4) Receiving events
+### Option A: websocket (recommended default)
+Connect:
+- `WS /ws/events?client_id=<id>&client_secret=<secret>`
+
+Receive JSON envelope:
 ```json
 {
   "id": "message-id",
@@ -103,55 +57,26 @@ Rules:
 }
 ```
 
-### Twitch upstream webhook callback
-- `POST /webhooks/twitch/eventsub`
-- Validates Twitch signature HMAC.
-- Handles:
-  - `webhook_callback_verification`
-  - `notification`
-  - `revocation`
+### Option B: webhook callback in your app
+When creating interest, set:
+- `"transport": "webhook"`
+- `"webhook_url": "https://your-app/callback"`
 
-## 5) Recommended Agent Workflows
-### A) Bootstrap a new downstream service
-1. Call `POST /v1/admin/service-accounts?name=<name>`.
-2. Persist returned `client_id` + `client_secret` securely.
-3. Open WS connection to `/ws/events?...` or prepare downstream webhook endpoint.
-4. Create interests with `POST /v1/interests`.
+Your callback receives the same envelope JSON.
 
-### B) Subscribe to online/offline + chat
-1. Ensure `.env` contains:
-   - `TWITCH_EVENTSUB_WEBHOOK_EVENT_TYPES=channel.online,channel.offline`
-2. Create interests for:
-   - `channel.online`
-   - `channel.offline`
-   - chat event type(s), e.g. `channel.chat.message`
-3. Service will route upstream automatically:
-   - online/offline via Twitch webhook
-   - chat via Twitch websocket
+## 5) Typical flow for an external app
+1. Open websocket connection to `/ws/events` (or prepare webhook endpoint).
+2. Call `POST /v1/interests` for each event type/channel needed.
+3. Store returned interest IDs.
+4. On shutdown or unsubscribe, call `DELETE /v1/interests/{interest_id}`.
+5. On reconnect, reopen websocket and keep existing interests.
 
-### C) Rotate service credentials
-1. Call `POST /v1/admin/service-accounts/{client_id}/regenerate`.
-2. Replace old secret everywhere.
-3. Reconnect downstream websocket clients with new credentials.
+## 6) Error handling
+- `401`: invalid service credentials.
+- `404`: interest not found (or bot not found on create).
+- `422`: invalid request body (for example missing `webhook_url` for webhook transport).
 
-## 6) Error Handling Expectations
-- `401`: invalid admin key or service credentials.
-- `404`: unknown bot/interest/service account.
-- `422`: invalid request body (for example missing `webhook_url` with downstream webhook transport).
-- `403` on `/webhooks/twitch/eventsub`: invalid Twitch signature or stale/invalid timestamp.
-
-## 7) Idempotency and Dedup Semantics
-- Multiple downstream services can register the same logical interest.
-- Service deduplicates on Twitch side by `(bot_account_id, event_type, broadcaster_user_id)`.
-- Removing one interest keeps Twitch subscription if others still depend on it.
-- Removing last interest deletes Twitch subscription.
-
-## 8) Operational Notes
-- `.env` is mandatory. Service startup fails if missing.
-- Startup behavior:
-  - Load interests from DB.
-  - Fetch Twitch subscriptions.
-  - Reconcile DB state and ensure missing subscriptions.
-- On Twitch websocket reconnect:
-  - session is re-established
-  - websocket-routed subscriptions are recreated for the new session as needed.
+## 7) Notes for client logic
+- You may receive retries/duplicates from upstream sources in edge cases; dedupe by `id` if needed.
+- Keep websocket reconnect logic in your app.
+- Interest creation is not guaranteed idempotent by repeated identical POSTs; prefer storing and reusing created interest IDs.
