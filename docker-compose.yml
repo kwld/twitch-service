@@ -1,0 +1,31 @@
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-twitch_eventsub}
+      POSTGRES_USER: ${POSTGRES_USER:-twitch}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-twitch}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-twitch} -d ${POSTGRES_DB:-twitch_eventsub}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "5432:5432"
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    ports:
+      - "${APP_PORT:-8080}:8080"
+
+volumes:
+  postgres_data:

@@ -1,0 +1,26 @@
+[project]
+name = "twitch-eventsub-service"
+version = "0.1.0"
+description = "Minimal Twitch EventSub bridge service"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "asyncpg>=0.30.0",
+  "fastapi>=0.116.0",
+  "httpx>=0.28.0",
+  "passlib[bcrypt]>=1.7.4",
+  "pydantic-settings>=2.10.0",
+  "python-dotenv>=1.1.0",
+  "sqlalchemy[asyncio]>=2.0.40",
+  "uvicorn[standard]>=0.35.0",
+  "websockets>=15.0.1",
+  "prompt-toolkit>=3.0.51",
+]
+
+[project.scripts]
+twitch-eventsub-api = "app.main:run"
+twitch-eventsub-cli = "app.cli:main"
+
+[build-system]
+requires = ["setuptools>=69.0"]
+build-backend = "setuptools.build_meta"
