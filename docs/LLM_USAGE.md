@@ -132,9 +132,17 @@ Response includes:
 Flow:
 1. Your app redirects broadcaster to `authorize_url`.
 2. Broadcaster approves on Twitch.
-3. Service handles callback at `/oauth/callback`.
+3. Twitch redirects to this service at `TWITCH_REDIRECT_URI` (`GET /oauth/callback`).
 4. Service stores authorization mapping in DB.
 5. Verify status with `GET /v1/broadcaster-authorizations`.
+
+Required scope model (Twitch cloud-chatbot pattern):
+- Bot user token scopes: `user:bot`, `user:read:chat`, `user:write:chat`
+- Broadcaster grant scope: `channel:bot`
+
+Why this matters:
+- Missing broadcaster grant can cause `403` with `subscription missing proper authorization` when creating chat EventSub subscriptions.
+- Missing bot scopes can block chat read/write and app-token chat path.
 
 LLM behavior:
 - Treat `state` as one-time correlation.
@@ -187,6 +195,7 @@ If missing scopes:
 Reference docs:
 - https://dev.twitch.tv/docs/chat/authenticating/
 - https://dev.twitch.tv/docs/authentication/scopes/
+- https://dev.twitch.tv/docs/api/reference/#create-eventsub-subscription
 - https://dev.twitch.tv/docs/api/reference/#send-chat-message
 
 ## 11) Recommended Full Lifecycle (LLM Playbook)

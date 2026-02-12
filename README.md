@@ -55,6 +55,7 @@ If `.env` is missing, app/cli exits with an explicit error.
 
 ## Main Endpoints
 - `GET /health`
+- `GET /oauth/callback` (OAuth redirect handler for bot setup + broadcaster channel authorization)
 - `POST /webhooks/twitch/eventsub` (Twitch webhook callback)
 - `GET /v1/bots` (admin)
 - `POST /v1/admin/service-accounts?name=<name>` (admin)
@@ -202,6 +203,31 @@ Catalog source for `GET /v1/eventsub/subscription-types`:
 - `auth_mode=user`: user-token send only.
 Required bot scope: `user:write:chat`.
 Required broadcaster channel authorization scope: `channel:bot`.
+
+## Streamer Authorization Flow (Bot In Streamer Channel)
+Yes, the required redirect API is implemented. Broadcaster authorization is handled by:
+- `POST /v1/broadcaster-authorizations/start` (service starts flow and gets Twitch `authorize_url`)
+- `GET /oauth/callback` (Twitch redirects here after streamer consent)
+- `GET /v1/broadcaster-authorizations` (service checks stored authorizations)
+
+Use this flow for each streamer channel where the bot should act as a cloud bot:
+1. Ensure bot account OAuth token includes: `user:read:chat`, `user:write:chat`, `user:bot`.
+2. Service calls `POST /v1/broadcaster-authorizations/start` with `bot_account_id`.
+3. Redirect streamer in browser to returned `authorize_url`.
+4. Streamer approves Twitch consent for scope `channel:bot`.
+5. Twitch redirects to this service at `TWITCH_REDIRECT_URI` (this app handles `/oauth/callback`).
+6. Service verifies with `GET /v1/broadcaster-authorizations` before creating chat subscriptions or sending bot-badge-eligible messages.
+
+If streamer authorization is missing, Twitch may return:
+- `403 subscription missing proper authorization`
+
+If bot scopes are missing, chat/eventsub actions may fail until bot OAuth is refreshed.
+
+Twitch references:
+- https://dev.twitch.tv/docs/chat/authenticating/
+- https://dev.twitch.tv/docs/authentication/scopes/
+- https://dev.twitch.tv/docs/api/reference/#create-eventsub-subscription
+- https://dev.twitch.tv/docs/api/reference/#send-chat-message
 
 Handler behavior:
 - verifies `Twitch-Eventsub-Message-Signature` using HMAC-SHA256 over:
