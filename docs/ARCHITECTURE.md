@@ -102,9 +102,9 @@ Envelope format (current implementation):
 ```
 
 ## 8) Stream State Behavior
-- Interests auto-create default `channel.online` and `channel.offline` websocket interests for same `(service, bot, broadcaster)` on creation.
+- Interests auto-create default `stream.online` and `stream.offline` websocket interests for same `(service, bot, broadcaster)` on creation.
 - Stream states are refreshed on startup for interested channels.
-- `channel.online` / `channel.offline` notifications update `channel_states`.
+- `stream.online` / `stream.offline` notifications update `channel_states`.
 
 ## 9) Broadcaster Authorization Flow
 1. Service calls `POST /v1/broadcaster-authorizations/start`.

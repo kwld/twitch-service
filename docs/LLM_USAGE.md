@@ -110,8 +110,8 @@ Side effects:
 - creates/upserts one logical interest.
 - ensures upstream Twitch subscription exists.
 - auto-ensures default stream interests for same `(service, bot, broadcaster)`:
-  - `channel.online`
-  - `channel.offline`
+  - `stream.online`
+  - `stream.offline`
 
 ### `DELETE /v1/interests/{interest_id}`
 - deletes interest only if owned by service.

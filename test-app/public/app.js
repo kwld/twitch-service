@@ -42,6 +42,20 @@ function appendLog(line) {
   eventsLog.textContent = `${at} ${line}\n${eventsLog.textContent}`.slice(0, 20000);
 }
 
+function formatEventPayload(payload) {
+  if (payload == null) {
+    return "null";
+  }
+  if (typeof payload === "string") {
+    return payload;
+  }
+  try {
+    return JSON.stringify(payload);
+  } catch {
+    return String(payload);
+  }
+}
+
 function selectedBotId() {
   return botSelect.value;
 }
@@ -206,8 +220,9 @@ function startSse() {
   eventSource.onmessage = (evt) => {
     try {
       const data = JSON.parse(evt.data);
-      const eventType = data?.payload?.subscription_type || data?.payload?.type || data.kind;
-      appendLog(`[${data.kind}] ${eventType}`);
+      const eventType = data?.payload?.subscription_type || data?.payload?.type || "unknown";
+      const payloadText = formatEventPayload(data?.payload);
+      appendLog(`[${data.kind}] type=${eventType} payload=${payloadText}`);
     } catch {
       appendLog(`[sse] ${evt.data}`);
     }

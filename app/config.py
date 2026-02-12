@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     )
     twitch_redirect_uri: str = Field(alias="TWITCH_REDIRECT_URI")
     twitch_eventsub_webhook_event_types: str = Field(
-        default="channel.online,channel.offline",
+        default="stream.online,stream.offline",
         alias="TWITCH_EVENTSUB_WEBHOOK_EVENT_TYPES",
     )
     twitch_scopes: str = Field(

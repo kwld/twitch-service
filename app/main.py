@@ -93,7 +93,7 @@ eventsub_manager = EventSubManager(
     webhook_secret=settings.twitch_eventsub_webhook_secret,
 )
 runtime_state = RuntimeState(settings=settings)
-DEFAULT_CHANNEL_EVENTS = ("channel.online", "channel.offline")
+DEFAULT_STREAM_EVENTS = ("stream.online", "stream.offline")
 BROADCASTER_AUTH_SCOPES = ("channel:bot",)
 
 
@@ -230,7 +230,7 @@ async def _ensure_default_stream_interests(
 ) -> list[ServiceInterest]:
     created: list[ServiceInterest] = []
     async with session_factory() as session:
-        for event_type in DEFAULT_CHANNEL_EVENTS:
+        for event_type in DEFAULT_STREAM_EVENTS:
             existing = await session.scalar(
                 select(ServiceInterest).where(
                     ServiceInterest.service_account_id == service.id,
@@ -261,6 +261,31 @@ async def _ensure_default_stream_interests(
 async def lifespan(_: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Legacy compatibility: older builds stored invalid EventSub types.
+        await conn.execute(
+            text(
+                "UPDATE service_interests SET event_type = 'stream.online' "
+                "WHERE event_type = 'channel.online'"
+            )
+        )
+        await conn.execute(
+            text(
+                "UPDATE service_interests SET event_type = 'stream.offline' "
+                "WHERE event_type = 'channel.offline'"
+            )
+        )
+        await conn.execute(
+            text(
+                "UPDATE twitch_subscriptions SET event_type = 'stream.online' "
+                "WHERE event_type = 'channel.online'"
+            )
+        )
+        await conn.execute(
+            text(
+                "UPDATE twitch_subscriptions SET event_type = 'stream.offline' "
+                "WHERE event_type = 'channel.offline'"
+            )
+        )
         try:
             await conn.execute(
                 text(

@@ -78,6 +78,7 @@ const recentEvents = [];
 const RECENT_EVENT_LIMIT = 200;
 let serviceWs = null;
 let wsState = "disconnected";
+let shouldKeepWsConnected = false;
 
 function pushEvent(kind, payload) {
   const entry = {
@@ -123,6 +124,14 @@ function connectServiceWs() {
     wsState = "disconnected";
     pushEvent("system", { message: "Service websocket closed", code, reason: String(reason) });
     serviceWs = null;
+    if (shouldKeepWsConnected) {
+      pushEvent("system", { message: "Reconnecting service websocket in 1s" });
+      setTimeout(() => {
+        if (shouldKeepWsConnected) {
+          connectServiceWs();
+        }
+      }, 1000);
+    }
   });
   serviceWs.on("error", (error) => {
     wsState = "error";
@@ -131,6 +140,7 @@ function connectServiceWs() {
 }
 
 function disconnectServiceWs() {
+  shouldKeepWsConnected = false;
   if (!serviceWs) {
     wsState = "disconnected";
     return;
@@ -292,6 +302,7 @@ app.post("/api/chat/send", async (req, res) => {
 });
 
 app.post("/api/events/connect", (_req, res) => {
+  shouldKeepWsConnected = true;
   connectServiceWs();
   res.json({ ok: true, ws_state: wsState });
 });

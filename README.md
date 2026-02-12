@@ -117,7 +117,7 @@ Events delivered via service websocket (`/ws/events`) and service webhooks inclu
 ```json
 {
   "bot_account_id": "uuid",
-  "event_type": "channel.online",
+  "event_type": "stream.online",
   "broadcaster_user_id": "12345",
   "transport": "websocket",
   "webhook_url": null
@@ -213,8 +213,8 @@ Routing rule:
 - Otherwise, subscription uses Twitch websocket.
 
 Example:
-- `TWITCH_EVENTSUB_WEBHOOK_EVENT_TYPES=channel.online,channel.offline`
-- `channel.online` and `channel.offline` go through webhook.
+- `TWITCH_EVENTSUB_WEBHOOK_EVENT_TYPES=stream.online,stream.offline`
+- `stream.online` and `stream.offline` go through webhook.
 - `channel.chat.message` goes through websocket.
 
 Twitch webhook callback:

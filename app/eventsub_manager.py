@@ -267,12 +267,18 @@ class EventSubManager:
 
     async def _ensure_all_subscriptions(self) -> None:
         for key in await self.registry.keys():
-            await self._ensure_subscription(key)
+            try:
+                await self._ensure_subscription(key)
+            except Exception as exc:
+                logger.warning("Failed ensuring subscription for %s: %s", key, exc)
 
     async def _ensure_webhook_subscriptions(self) -> None:
         for key in await self.registry.keys():
             if self._transport_for_event(key.event_type) == "webhook":
-                await self._ensure_subscription(key)
+                try:
+                    await self._ensure_subscription(key)
+                except Exception as exc:
+                    logger.warning("Failed ensuring webhook subscription for %s: %s", key, exc)
 
     async def _ensure_subscription(self, key: InterestKey) -> None:
         upstream_transport = self._transport_for_event(key.event_type)
@@ -434,7 +440,7 @@ class EventSubManager:
     async def _update_channel_state_from_event(
         self, bot_account_id, event_type: str, broadcaster_user_id: str, event: dict
     ) -> None:
-        if event_type not in {"channel.online", "channel.offline"}:
+        if event_type not in {"stream.online", "stream.offline"}:
             return
         async with self.session_factory() as session:
             state = await session.scalar(
@@ -450,7 +456,7 @@ class EventSubManager:
                     is_live=False,
                 )
                 session.add(state)
-            if event_type == "channel.online":
+            if event_type == "stream.online":
                 state.is_live = True
                 state.started_at = self._parse_datetime(event.get("started_at"))
             else:

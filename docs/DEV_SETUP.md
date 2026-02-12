@@ -43,7 +43,7 @@ Open `http://localhost:4040` and copy the HTTPS forwarding URL.
 For mixed upstream transport, set in `.env`:
 - `TWITCH_EVENTSUB_WEBHOOK_CALLBACK_URL=<ngrok-https-url>/webhooks/twitch/eventsub`
 - `TWITCH_EVENTSUB_WEBHOOK_SECRET=<10-100 chars>`
-- `TWITCH_EVENTSUB_WEBHOOK_EVENT_TYPES=channel.online,channel.offline`
+- `TWITCH_EVENTSUB_WEBHOOK_EVENT_TYPES=stream.online,stream.offline`
 
 Events listed in `TWITCH_EVENTSUB_WEBHOOK_EVENT_TYPES` use webhook.
 All other events use websocket.
