@@ -278,7 +278,7 @@ Yes, the required redirect API is implemented. Broadcaster authorization is hand
 - `GET /v1/broadcaster-authorizations` (service checks stored authorizations)
 
 Use this flow for each streamer channel where the bot should act as a cloud bot:
-1. Ensure bot account OAuth token includes: `user:read:chat`, `user:write:chat`, `user:bot`.
+1. Ensure bot account OAuth token includes: `user:read:chat`, `user:write:chat`, `user:bot`, `clips:edit`.
 2. Service calls `POST /v1/broadcaster-authorizations/start` with `bot_account_id`.
    - Optional: include `redirect_url` so callback redirects back to your app after consent.
 3. Redirect streamer in browser to returned `authorize_url`.

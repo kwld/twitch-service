@@ -19,6 +19,7 @@ For chat/EventSub bot flows, ensure `TWITCH_DEFAULT_SCOPES` includes:
 - `user:bot`
 - `user:read:chat`
 - `user:write:chat`
+- `clips:edit`
 - `channel:bot`
 
 ## 3) Start development containers
