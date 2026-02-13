@@ -9,15 +9,22 @@ from typing import Literal
 
 import websockets
 from websockets.exceptions import ConnectionClosedError
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.bot_auth import ensure_bot_access_token
 from app.event_router import InterestKey, InterestRegistry, LocalEventHub
-from app.models import BotAccount, ChannelState, ServiceInterest, TwitchSubscription
+from app.models import (
+    BotAccount,
+    ChannelState,
+    ServiceInterest,
+    ServiceRuntimeStats,
+    TwitchSubscription,
+)
 from app.twitch import TwitchApiError, TwitchClient
 
 logger = logging.getLogger(__name__)
+WS_LISTENER_COOLDOWN = timedelta(minutes=5)
 
 
 class EventSubManager:
@@ -43,6 +50,7 @@ class EventSubManager:
         self._cleanup_task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._session_id: str | None = None
+        self._zero_listener_since: datetime | None = None
 
     def _transport_for_event(self, event_type: str) -> Literal["websocket", "webhook"]:
         if event_type == "user.authorization.revoke":
@@ -146,9 +154,14 @@ class EventSubManager:
     async def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                # Twitch closes idle EventSub websocket sessions with 4003 ("connection unused").
-                # Avoid opening/keeping a websocket when there are no websocket-routed interests.
                 if not await self._has_websocket_interest():
+                    self._session_id = None
+                    self._zero_listener_since = None
+                    await asyncio.sleep(5)
+                    continue
+                remaining = await self._websocket_listener_cooldown_remaining()
+                if remaining is not None and remaining.total_seconds() <= 0:
+                    await self._disable_websocket_transport_subscriptions()
                     self._session_id = None
                     await asyncio.sleep(5)
                     continue
@@ -175,7 +188,20 @@ class EventSubManager:
         target_url = reconnect_url or self.ws_url
         async with websockets.connect(target_url, max_size=4 * 1024 * 1024) as ws:
             while not self._stop.is_set():
-                raw = await ws.recv()
+                remaining = await self._websocket_listener_cooldown_remaining()
+                if remaining is not None and remaining.total_seconds() <= 0:
+                    logger.info(
+                        "No service websocket listeners for %ss; suspending websocket EventSub subscriptions",
+                        int(WS_LISTENER_COOLDOWN.total_seconds()),
+                    )
+                    await self._disable_websocket_transport_subscriptions()
+                    await ws.close()
+                    self._session_id = None
+                    return
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=5)
+                except asyncio.TimeoutError:
+                    continue
                 message = json.loads(raw)
                 metadata = message.get("metadata", {})
                 payload = message.get("payload", {})
@@ -199,6 +225,47 @@ class EventSubManager:
                 if msg_type == "revocation":
                     await self._handle_revocation(payload)
                     continue
+
+    async def _websocket_listener_cooldown_remaining(self) -> timedelta | None:
+        active_ws, latest_disconnect = await self._service_ws_listener_activity()
+        if active_ws > 0:
+            self._zero_listener_since = None
+            return None
+        now = datetime.now(UTC)
+        if latest_disconnect and (
+            self._zero_listener_since is None or latest_disconnect > self._zero_listener_since
+        ):
+            self._zero_listener_since = latest_disconnect
+        if self._zero_listener_since is None:
+            self._zero_listener_since = now
+        elapsed = now - self._zero_listener_since
+        return WS_LISTENER_COOLDOWN - elapsed
+
+    async def _service_ws_listener_activity(self) -> tuple[int, datetime | None]:
+        async with self.session_factory() as session:
+            active = await session.scalar(select(func.coalesce(func.sum(ServiceRuntimeStats.active_ws_connections), 0)))
+            latest_disconnect = await session.scalar(select(func.max(ServiceRuntimeStats.last_disconnected_at)))
+        return int(active or 0), latest_disconnect
+
+    async def _disable_websocket_transport_subscriptions(self) -> None:
+        async with self.session_factory() as session:
+            db_subs = list((await session.scalars(select(TwitchSubscription))).all())
+            for db_sub in db_subs:
+                if self._transport_for_event(db_sub.event_type) != "websocket":
+                    continue
+                delete_access_token: str | None = None
+                if db_sub.event_type.startswith("channel.chat."):
+                    bot = await session.get(BotAccount, db_sub.bot_account_id)
+                    if bot and bot.enabled:
+                        with suppress(Exception):
+                            delete_access_token = await ensure_bot_access_token(session, self.twitch, bot)
+                with suppress(TwitchApiError):
+                    await self.twitch.delete_eventsub_subscription(
+                        db_sub.twitch_subscription_id,
+                        access_token=delete_access_token,
+                    )
+                await session.delete(db_sub)
+            await session.commit()
 
     async def _sync_from_twitch_and_reconcile(self) -> None:
         subs = await self.twitch.list_eventsub_subscriptions()

@@ -5,6 +5,7 @@ import asyncio
 import json
 import secrets
 from contextlib import suppress
+from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 
 from prompt_toolkit import PromptSession
@@ -658,6 +659,25 @@ async def _list_active_eventsub_subscriptions_cli(session_factory, twitch: Twitc
     return list(by_id.values())
 
 
+def _format_duration_short(duration: timedelta) -> str:
+    total = max(0, int(duration.total_seconds()))
+    minutes, seconds = divmod(total, 60)
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+async def _websocket_listener_cooldown_remaining_cli(session_factory) -> timedelta | None:
+    async with session_factory() as db:
+        rows = list((await db.scalars(select(ServiceRuntimeStats))).all())
+    active_total = sum((row.active_ws_connections or 0) for row in rows)
+    if active_total > 0:
+        return None
+    latest_disconnect = max((row.last_disconnected_at for row in rows if row.last_disconnected_at), default=None)
+    if latest_disconnect is None:
+        return timedelta(minutes=5)
+    now = datetime.now(UTC)
+    return timedelta(minutes=5) - (now - latest_disconnect)
+
+
 async def manage_eventsub_subscriptions_menu(
     session: PromptSession,
     session_factory,
@@ -678,7 +698,22 @@ async def manage_eventsub_subscriptions_menu(
         else:
             view_subs = subs
 
+        status_counts: dict[str, int] = {}
+        for sub in view_subs:
+            status = str(sub.get("status", "unknown"))
+            status_counts[status] = status_counts.get(status, 0) + 1
+        status_summary = ", ".join(f"{k}={v}" for k, v in sorted(status_counts.items())) if status_counts else "none"
+        cooldown_remaining = await _websocket_listener_cooldown_remaining_cli(session_factory)
+
         print(f"\nActive EventSub subscriptions (filter={filter_mode}):")
+        print(f"Status counts: {status_summary}")
+        if cooldown_remaining is None:
+            print("Service WS listener cooldown: active listeners connected")
+        else:
+            print(
+                "Service WS listener cooldown remaining: "
+                f"{_format_duration_short(cooldown_remaining)}"
+            )
         if not view_subs:
             print("No active subscriptions for current filter.")
         else:
@@ -1012,6 +1047,15 @@ async def list_service_status_menu(session_factory) -> None:
             )
         ).all()
         interest_count_by_id = {sid: cnt for sid, cnt in counts}
+
+    cooldown_remaining = await _websocket_listener_cooldown_remaining_cli(session_factory)
+    if cooldown_remaining is None:
+        print("\nService WS listener cooldown: active listeners connected")
+    else:
+        print(
+            "\nService WS listener cooldown remaining: "
+            f"{_format_duration_short(cooldown_remaining)}"
+        )
 
     print("\nService Status and Usage:")
     for svc in services:
