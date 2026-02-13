@@ -62,6 +62,23 @@ For 1:1 LLM integration behavior and endpoint contracts, see `docs/LLM_USAGE.md`
 
 If `.env` is missing, app/cli exits with an explicit error.
 
+## Helper Scripts (Install, Run, Run Dev)
+These scripts validate `.env` and guide setup when file or required properties are missing.
+
+PowerShell:
+```powershell
+./scripts/install.ps1
+./scripts/run.ps1
+./scripts/run-dev.ps1 -Port 8080
+```
+
+Bash:
+```bash
+bash ./scripts/install.sh
+bash ./scripts/run.sh
+bash ./scripts/run-dev.sh 8080
+```
+
 ## API Authentication
 - Admin endpoints use header: `X-Admin-Key: <ADMIN_API_KEY>`
 - Service endpoints use:
