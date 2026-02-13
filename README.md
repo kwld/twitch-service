@@ -68,6 +68,12 @@ If `.env` is missing, app/cli exits with an explicit error.
   - `X-Client-Id: <client_id>`
   - `X-Client-Secret: <client_secret>`
 
+## IP Allowlist
+- `APP_ALLOWED_IPS`: comma-separated IPv4/IPv6 addresses or CIDRs allowed to access the service.
+- `APP_TRUST_X_FORWARDED_FOR`: set `true` only when running behind a trusted reverse proxy; then first `X-Forwarded-For` IP is used.
+- Empty `APP_ALLOWED_IPS` means no IP restriction.
+- The general allowlist does not block `POST /webhooks/twitch/eventsub`; that endpoint remains protected by Twitch HMAC signature verification.
+
 ## Main Endpoints
 - `GET /health`
 - `GET /oauth/callback` (OAuth redirect handler for bot setup + broadcaster channel authorization)

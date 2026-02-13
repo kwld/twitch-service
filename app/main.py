@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import logging
 import secrets
 import uuid
@@ -66,9 +67,31 @@ from app.twitch import TwitchClient
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("twitch-eventsub-service")
+TWITCH_WEBHOOK_PATH = "/webhooks/twitch/eventsub"
+
+
+def _parse_allowed_ip_networks(raw: str) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+    values = [v.strip() for v in raw.split(",") if v.strip()]
+    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    for value in values:
+        try:
+            if "/" in value:
+                network = ipaddress.ip_network(value, strict=False)
+            else:
+                host = ipaddress.ip_address(value)
+                network = ipaddress.ip_network(f"{host}/{host.max_prefixlen}", strict=False)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Invalid APP_ALLOWED_IPS entry '{value}'. Use IPv4/IPv6 or CIDR values."
+            ) from exc
+        networks.append(network)
+    return networks
 
 
 settings = load_settings()
+allowed_ip_networks = _parse_allowed_ip_networks(settings.app_allowed_ips)
+if allowed_ip_networks:
+    logger.info("IP allowlist enabled with %d entries", len(allowed_ip_networks))
 engine, session_factory = create_engine_and_session(settings)
 twitch_client = TwitchClient(
     client_id=settings.twitch_client_id,
@@ -99,6 +122,34 @@ BROADCASTER_AUTH_SCOPES = ("channel:bot",)
 
 def _counter(value: int | None) -> int:
     return value or 0
+
+
+def _resolve_client_ip(
+    direct_host: str | None,
+    x_forwarded_for: str | None,
+) -> str | None:
+    if settings.app_trust_x_forwarded_for and x_forwarded_for:
+        forwarded = x_forwarded_for.split(",", 1)[0].strip()
+        if forwarded:
+            return forwarded
+    return direct_host
+
+
+def _request_client_ip(request: Request) -> str | None:
+    direct_host = request.client.host if request.client else None
+    return _resolve_client_ip(direct_host, request.headers.get("x-forwarded-for"))
+
+
+def _is_ip_allowed(client_ip: str | None) -> bool:
+    if not allowed_ip_networks:
+        return True
+    if not client_ip:
+        return False
+    try:
+        parsed_ip = ipaddress.ip_address(client_ip)
+    except ValueError:
+        return False
+    return any(parsed_ip in network for network in allowed_ip_networks)
 
 
 async def _require_admin(x_admin_key: str = Header(default="")) -> None:
@@ -304,6 +355,19 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Twitch EventSub Service", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def enforce_ip_allowlist(request: Request, call_next):
+    if request.url.path == TWITCH_WEBHOOK_PATH:
+        return await call_next(request)
+    if not allowed_ip_networks:
+        return await call_next(request)
+    client_ip = _request_client_ip(request)
+    if not _is_ip_allowed(client_ip):
+        logger.warning("Blocked HTTP request from IP %s to %s", client_ip or "unknown", request.url.path)
+        return Response(status_code=403, content="Client IP not allowed")
+    return await call_next(request)
 
 
 def _verify_twitch_signature(request: Request, raw_body: bytes) -> bool:
@@ -1135,6 +1199,14 @@ async def send_twitch_chat_message(
 
 @app.websocket("/ws/events")
 async def ws_events(websocket: WebSocket, client_id: str = Query(), client_secret: str = Query()):
+    client_ip = _resolve_client_ip(
+        websocket.client.host if websocket.client else None,
+        websocket.headers.get("x-forwarded-for"),
+    )
+    if not _is_ip_allowed(client_ip):
+        logger.warning("Blocked WebSocket connection from IP %s", client_ip or "unknown")
+        await websocket.close(code=4403)
+        return
     try:
         async with session_factory() as session:
             service = await authenticate_service(session, client_id, client_secret)
