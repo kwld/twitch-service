@@ -157,50 +157,13 @@ Interests should be heartbeated periodically by client services:
 - call `POST /v1/interests/{interest_id}/heartbeat`
 - if no heartbeat for 1 hour, service auto-removes stale interests and channel state.
 
-## Dev Script
-Run everything for local dev (DB + ngrok + reload):
-```powershell
-./scripts/dev.ps1 -Port 8080
-```
-
-## Dev Bundle (Docker/Podman Desktop on Windows)
-This repo includes a hot-reload development bundle:
-- `Dockerfile.dev`
-- `docker-compose.dev.yml`
-- `scripts/dev-container.ps1`
+## Container CLI Helper
+Kept helper scripts:
 - `scripts/cli-container.ps1`
 - `scripts/cli-container.sh`
 
-### Start with Docker Desktop
-```powershell
-./scripts/dev-container.ps1 -Engine docker -Build
-```
+Use these from project root to run `twitch-eventsub-cli` inside the dev app container.
 
-### Start with Podman Desktop
-```powershell
-./scripts/dev-container.ps1 -Engine podman -Build
-```
-
-### Stop
-Docker:
-```powershell
-docker compose -f docker-compose.dev.yml down
-```
-Podman:
-```powershell
-podman compose -f docker-compose.dev.yml down
-```
-
-Notes:
-- `.env` is required; start command fails if missing.
-- Code is bind-mounted (`./:/workspace`) and `uvicorn --reload` is enabled.
-- `WATCHFILES_FORCE_POLLING=true` is set for reliable reload on Windows mounted volumes.
-- Dev bundle includes an `ngrok` container (inspector at `http://localhost:4040`).
-- Set `NGROK_AUTHTOKEN` in `.env` to enable ngrok tunnel.
-- Full setup guide: `docs/DEV_SETUP.md`.
-- LLM/agent usage guide: `docs/LLM_USAGE.md`.
-
-### Open CLI from project root in container
 Windows PowerShell:
 ```powershell
 ./scripts/cli-container.ps1 -Engine docker
@@ -302,59 +265,8 @@ Handler behavior:
 - handles `webhook_callback_verification` (returns raw challenge),
 - handles `notification` and `revocation` with fast `2XX` responses.
 
-## Production Deploy Over SSH
-Linux/macOS:
-```bash
-./scripts/deploy.sh user@server /opt/twitch-eventsub-service
-```
-
-Windows PowerShell:
-```powershell
-./scripts/deploy.ps1 -RemoteHost user@server -RemotePath /opt/twitch-eventsub-service
-```
-
-Remote host requirements:
-- Docker + Docker Compose plugin
-- SSH access
-- `.env` included in deployed project
-
-## Production Deploy From Fresh Clone (Local Host)
-Use these scripts when running directly on a server/host after cloning.
-
-Windows PowerShell:
-```powershell
-./scripts/prod-container.ps1 -Engine docker -Build
-```
-or
-```powershell
-./scripts/prod-container.ps1 -Engine podman -Build
-```
-
-Linux/macOS shell:
-```bash
-./scripts/prod-container.sh docker --build
-```
-or
-```bash
-./scripts/prod-container.sh podman --build
-```
-
-Behavior:
-- bootstraps `.env` from `.env.example` if missing,
-- sets `APP_ENV=prod`,
-- enforces container-safe DB URL (`db:5432`),
-- auto-generates secure secrets when placeholders are present,
-- starts `docker-compose.yml` with `up -d --remove-orphans`.
-
-After first start, update `.env` with real Twitch values:
-- `TWITCH_CLIENT_ID`
-- `TWITCH_CLIENT_SECRET`
-- `TWITCH_REDIRECT_URI`
-- `TWITCH_EVENTSUB_WEBHOOK_CALLBACK_URL`
-
-Then restart compose.
-
-Full production guide: `docs/PRODUCTION_DEPLOY.md`.
+## Production Deploy
+Production deployment guidance remains in `docs/PRODUCTION_DEPLOY.md`.
 
 ## Node Frontend Test App
 A browser-based test app (Node backend + static frontend) is available in `test-app/`.
