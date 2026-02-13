@@ -576,6 +576,18 @@ async def remove_bot_menu(session: PromptSession, session_factory, twitch: Twitc
         for sub in subs:
             with suppress(Exception):
                 await twitch.delete_eventsub_subscription(sub.twitch_subscription_id)
+        await db.execute(delete(TwitchSubscription).where(TwitchSubscription.bot_account_id == target.id))
+        await db.execute(delete(ServiceInterest).where(ServiceInterest.bot_account_id == target.id))
+        await db.execute(delete(ChannelState).where(ChannelState.bot_account_id == target.id))
+        await db.execute(
+            delete(BroadcasterAuthorization).where(BroadcasterAuthorization.bot_account_id == target.id)
+        )
+        await db.execute(
+            delete(BroadcasterAuthorizationRequest).where(
+                BroadcasterAuthorizationRequest.bot_account_id == target.id
+            )
+        )
+        await db.execute(delete(ServiceBotAccess).where(ServiceBotAccess.bot_account_id == target.id))
         await db.delete(target)
         await db.commit()
     print(f"Removed bot: {bot.name}")
