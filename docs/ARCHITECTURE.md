@@ -144,6 +144,9 @@ Endpoint: `POST /v1/twitch/chat/messages`
 Endpoint: `POST /v1/twitch/clips`
 - validates service bot access and bot enabled state,
 - validates bot OAuth scope `clips:edit`,
+- passes `has_delay` through to Twitch Create Clip:
+  - `true` -> buffered clip start (good for just-happened moments),
+  - `false` -> live-edge clip start,
 - calls Twitch Create Clip then polls Twitch Get Clips for up to 15 seconds,
 - returns `status=ready` with URLs when available, otherwise `status=processing`.
 

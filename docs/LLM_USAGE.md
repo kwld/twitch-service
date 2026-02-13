@@ -272,6 +272,8 @@ Validation:
 - `duration` must be between `5` and `60` seconds.
 - bot must be accessible and enabled.
 - bot token must include `clips:edit`.
+- `has_delay=true` asks Twitch to clip from buffered video (slightly earlier than live edge), which is better for "clip what just happened" use cases.
+- `has_delay=false` starts from the current live edge.
 
 Multi-step behavior:
 1. API calls Twitch Create Clip.
@@ -279,6 +281,10 @@ Multi-step behavior:
 3. response:
    - `status=ready` with clip URL metadata when Twitch finishes quickly,
    - `status=processing` with `clip_id` + `edit_url` if still processing.
+
+LLM guidance:
+- If user intent is "clip the moment that just happened", default to `has_delay=true`.
+- If user intent is "start clipping from now", use `has_delay=false`.
 
 ## 6) OAuth Callback Semantics
 Endpoint: `GET /oauth/callback`

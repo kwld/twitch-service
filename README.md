@@ -270,6 +270,8 @@ Required broadcaster channel authorization scope: `channel:bot`.
 
 Required bot scope: `clips:edit`.
 Duration must be between 5 and 60 seconds.
+`has_delay=true` tells Twitch to use buffered video (slightly earlier than live edge), useful for clipping a moment that just happened.
+`has_delay=false` starts clip capture from the current live edge.
 
 ## Streamer Authorization Flow (Bot In Streamer Channel)
 Yes, the required redirect API is implemented. Broadcaster authorization is handled by:
