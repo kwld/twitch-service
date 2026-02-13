@@ -27,9 +27,18 @@
         <label>Broadcaster username
           <input id="broadcasterLoginInput" type="text" placeholder="streamer_login" />
         </label>
+        <div class="profileCard" id="broadcasterProfileCard">
+          <img id="broadcasterAvatar" alt="Broadcaster avatar" />
+          <div>
+            <div id="broadcasterName" class="profileName">No broadcaster profile loaded</div>
+            <div id="broadcasterMeta" class="profileMeta"></div>
+            <div id="broadcasterBio" class="profileBio"></div>
+          </div>
+        </div>
         <div class="row">
           <button id="refreshBotsBtn" type="button">Refresh Bots</button>
           <button id="resolveBroadcasterBtn" type="button">Resolve Username To ID</button>
+          <button id="fetchProfileBtn" type="button">Fetch Broadcaster Profile</button>
           <button id="startGrantBtn" type="button">Start Broadcaster Grant</button>
           <button id="refreshGrantsBtn" type="button">Refresh Grants</button>
         </div>
@@ -87,6 +96,26 @@
         </label>
         <button id="sendMessageBtn" type="button">Send Message</button>
         <pre id="sendResult"></pre>
+      </section>
+
+      <section class="card">
+        <h2>Create Clip</h2>
+        <label>Title
+          <input id="clipTitleInput" type="text" placeholder="Moment title" />
+        </label>
+        <div class="grid2">
+          <label>Duration (seconds 5-60)
+            <input id="clipDurationInput" type="number" min="5" max="60" step="1" value="30" />
+          </label>
+          <label>Use Delay
+            <select id="clipDelaySelect">
+              <option value="false">false</option>
+              <option value="true">true</option>
+            </select>
+          </label>
+        </div>
+        <button id="createClipBtn" type="button">Create Clip</button>
+        <pre id="clipResult"></pre>
       </section>
     </main>
     <script type="module" src="/app.js"></script>

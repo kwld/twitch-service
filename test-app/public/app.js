@@ -2,6 +2,10 @@ const statusLine = document.getElementById("statusLine");
 const botSelect = document.getElementById("botSelect");
 const broadcasterInput = document.getElementById("broadcasterInput");
 const broadcasterLoginInput = document.getElementById("broadcasterLoginInput");
+const broadcasterAvatar = document.getElementById("broadcasterAvatar");
+const broadcasterName = document.getElementById("broadcasterName");
+const broadcasterMeta = document.getElementById("broadcasterMeta");
+const broadcasterBio = document.getElementById("broadcasterBio");
 const grantUrl = document.getElementById("grantUrl");
 const eventTypeSelect = document.getElementById("eventTypeSelect");
 const transportSelect = document.getElementById("transportSelect");
@@ -11,9 +15,36 @@ const eventsLog = document.getElementById("eventsLog");
 const authModeSelect = document.getElementById("authModeSelect");
 const messageInput = document.getElementById("messageInput");
 const sendResult = document.getElementById("sendResult");
+const clipTitleInput = document.getElementById("clipTitleInput");
+const clipDurationInput = document.getElementById("clipDurationInput");
+const clipDelaySelect = document.getElementById("clipDelaySelect");
+const clipResult = document.getElementById("clipResult");
 
 let eventSource = null;
 let accessibleBots = [];
+
+function clearBroadcasterProfile() {
+  broadcasterAvatar.removeAttribute("src");
+  broadcasterAvatar.style.display = "none";
+  broadcasterName.textContent = "No broadcaster profile loaded";
+  broadcasterMeta.textContent = "";
+  broadcasterBio.textContent = "";
+}
+
+function renderBroadcasterProfile(profile) {
+  if (profile.profile_image_url) {
+    broadcasterAvatar.src = profile.profile_image_url;
+    broadcasterAvatar.style.display = "block";
+  } else {
+    broadcasterAvatar.removeAttribute("src");
+    broadcasterAvatar.style.display = "none";
+  }
+  broadcasterName.textContent = `${profile.display_name} (@${profile.login})`;
+  const created = profile.created_at ? ` created=${new Date(profile.created_at).toISOString().slice(0, 10)}` : "";
+  const views = profile.view_count != null ? ` views=${profile.view_count}` : "";
+  broadcasterMeta.textContent = `id=${profile.user_id}${views}${created}`;
+  broadcasterBio.textContent = profile.description || "";
+}
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -164,7 +195,36 @@ async function resolveBroadcaster() {
   const payload = await api(`/api/users/resolve?${search.toString()}`);
   broadcasterInput.value = payload.user_id;
   broadcasterLoginInput.value = payload.login;
+  renderBroadcasterProfile(payload);
   appendLog(`resolved @${payload.login} -> ${payload.user_id}`);
+}
+
+async function fetchBroadcasterProfile() {
+  const botId = selectedBotId();
+  if (!botId) {
+    throw new Error("Select a bot first.");
+  }
+  const broadcasterUserId = broadcasterInput.value.trim();
+  const login = broadcasterLoginInput.value.trim().toLowerCase();
+  if (!broadcasterUserId && !login) {
+    throw new Error("Provide broadcaster user id or username.");
+  }
+  const search = new URLSearchParams();
+  search.set("bot_account_id", botId);
+  if (broadcasterUserId) {
+    search.set("broadcaster_user_id", broadcasterUserId);
+  } else {
+    search.set("login", login);
+  }
+  const payload = await api(`/api/users/profile?${search.toString()}`);
+  if (!broadcasterUserId && payload.user_id) {
+    broadcasterInput.value = payload.user_id;
+  }
+  if (payload.login) {
+    broadcasterLoginInput.value = payload.login;
+  }
+  renderBroadcasterProfile(payload);
+  appendLog(`loaded profile @${payload.login} (${payload.user_id})`);
 }
 
 async function refreshGrants() {
@@ -218,6 +278,35 @@ async function sendMessage() {
   appendLog(`chat send result: sent=${payload.is_sent} mode=${payload.auth_mode_used}`);
 }
 
+async function createClip() {
+  const botId = selectedBotId();
+  const broadcaster = requireBroadcaster();
+  if (!botId) {
+    throw new Error("Select a bot first.");
+  }
+  const title = clipTitleInput.value.trim();
+  if (!title) {
+    throw new Error("Clip title is required.");
+  }
+  const duration = Number.parseFloat(clipDurationInput.value);
+  if (Number.isNaN(duration) || duration < 5 || duration > 60) {
+    throw new Error("Clip duration must be between 5 and 60 seconds.");
+  }
+  const hasDelay = clipDelaySelect.value === "true";
+  const payload = await api("/api/clips", {
+    method: "POST",
+    body: {
+      bot_account_id: botId,
+      broadcaster_user_id: broadcaster,
+      title,
+      duration,
+      has_delay: hasDelay,
+    },
+  });
+  clipResult.textContent = JSON.stringify(payload, null, 2);
+  appendLog(`clip create result: status=${payload.status} clip_id=${payload.clip_id}`);
+}
+
 function startSse() {
   if (eventSource) {
     return;
@@ -254,6 +343,7 @@ function wireButtons() {
   document.getElementById("refreshStatusBtn").onclick = () => withError(refreshStatus);
   document.getElementById("refreshBotsBtn").onclick = () => withError(refreshBots);
   document.getElementById("resolveBroadcasterBtn").onclick = () => withError(resolveBroadcaster);
+  document.getElementById("fetchProfileBtn").onclick = () => withError(fetchBroadcasterProfile);
   document.getElementById("startGrantBtn").onclick = () => withError(startGrant);
   document.getElementById("refreshGrantsBtn").onclick = () => withError(refreshGrants);
   document.getElementById("createInterestBtn").onclick = () => withError(createInterest);
@@ -264,6 +354,9 @@ function wireButtons() {
     eventsLog.textContent = "";
   };
   document.getElementById("sendMessageBtn").onclick = () => withError(sendMessage);
+  document.getElementById("createClipBtn").onclick = () => withError(createClip);
+  broadcasterInput.oninput = clearBroadcasterProfile;
+  broadcasterLoginInput.oninput = clearBroadcasterProfile;
 }
 
 async function withError(fn) {
@@ -293,6 +386,7 @@ async function main() {
   }
 
   wireButtons();
+  clearBroadcasterProfile();
   startSse();
   await withError(refreshStatus);
   await withError(refreshBots);

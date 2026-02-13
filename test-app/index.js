@@ -219,6 +219,49 @@ app.get("/api/users/resolve", async (req, res) => {
       user_id: String(user.id),
       login: String(user.login),
       display_name: String(user.display_name ?? user.login ?? ""),
+      profile_image_url: user.profile_image_url ?? null,
+      offline_image_url: user.offline_image_url ?? null,
+      description: user.description ?? "",
+    });
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+app.get("/api/users/profile", async (req, res) => {
+  try {
+    const botAccountId = String(req.query.bot_account_id ?? "").trim();
+    const broadcasterUserId = String(req.query.broadcaster_user_id ?? "").trim();
+    const login = String(req.query.login ?? "").trim().toLowerCase();
+    if (!botAccountId) {
+      return res.status(400).json({ error: "validation_error", detail: "bot_account_id is required" });
+    }
+    if (!broadcasterUserId && !login) {
+      return res
+        .status(400)
+        .json({ error: "validation_error", detail: "broadcaster_user_id or login is required" });
+    }
+    const search = new URLSearchParams();
+    search.set("bot_account_id", botAccountId);
+    if (broadcasterUserId) {
+      search.set("user_ids", broadcasterUserId);
+    } else {
+      search.set("logins", login);
+    }
+    const data = await serviceFetch(`/v1/twitch/profiles?${search.toString()}`);
+    const user = (data?.data ?? [])[0];
+    if (!user) {
+      return res.status(404).json({ error: "not_found", detail: "Twitch user not found" });
+    }
+    return res.json({
+      user_id: String(user.id),
+      login: String(user.login ?? ""),
+      display_name: String(user.display_name ?? user.login ?? ""),
+      profile_image_url: user.profile_image_url ?? null,
+      offline_image_url: user.offline_image_url ?? null,
+      description: user.description ?? "",
+      view_count: user.view_count ?? null,
+      created_at: user.created_at ?? null,
     });
   } catch (error) {
     sendError(res, error);
@@ -292,6 +335,18 @@ app.post("/api/broadcaster-authorizations/start", async (req, res) => {
 app.post("/api/chat/send", async (req, res) => {
   try {
     const data = await serviceFetch("/v1/twitch/chat/messages", {
+      method: "POST",
+      body: req.body,
+    });
+    res.json(data);
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+app.post("/api/clips", async (req, res) => {
+  try {
+    const data = await serviceFetch("/v1/twitch/clips", {
       method: "POST",
       body: req.body,
     });

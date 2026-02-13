@@ -537,6 +537,99 @@ async def chat_connect_other_channel_menu(session: PromptSession, session_factor
     )
 
 
+async def create_clip_menu(session: PromptSession, session_factory, twitch: TwitchClient) -> None:
+    bot = await select_bot_account(session, session_factory)
+    if not bot:
+        return
+
+    raw_target = (await session.prompt_async("Target channel login or user_id: ")).strip()
+    if not raw_target:
+        print("No target provided.")
+        return
+    try:
+        broadcaster_user_id, broadcaster_login = await resolve_target_channel(twitch, raw_target)
+    except Exception as exc:
+        print(f"Failed resolving target channel: {exc}")
+        return
+    if not broadcaster_user_id:
+        print("Target channel not found.")
+        return
+
+    title = (await session.prompt_async("Clip title: ")).strip()
+    if not title:
+        print("Clip title is required.")
+        return
+
+    raw_duration = (await session.prompt_async("Clip duration seconds [30]: ")).strip() or "30"
+    try:
+        duration = float(raw_duration)
+    except ValueError:
+        print("Duration must be a number.")
+        return
+    if duration < 5 or duration > 60:
+        print("Duration must be between 5 and 60 seconds.")
+        return
+
+    has_delay = await ask_yes_no(
+        session,
+        "Use delayed clip start? (Twitch has_delay=true)",
+        default_yes=False,
+    )
+
+    try:
+        token = await get_bot_access_token(session_factory, twitch, bot.id)
+        token_info = await twitch.validate_user_token(token)
+        granted_scopes = set(token_info.get("scopes", []))
+        if "clips:edit" not in granted_scopes:
+            print("Bot token missing required scope: clips:edit")
+            print("Re-run Guided bot setup to refresh OAuth scopes.")
+            return
+    except Exception as exc:
+        print(f"Failed validating bot token: {exc}")
+        return
+
+    try:
+        create_payload = await twitch.create_clip(
+            access_token=token,
+            broadcaster_id=broadcaster_user_id,
+            title=title,
+            duration=duration,
+            has_delay=has_delay,
+        )
+    except Exception as exc:
+        print(f"Failed creating clip: {exc}")
+        return
+
+    clip_id = str(create_payload.get("id", ""))
+    edit_url = str(create_payload.get("edit_url", ""))
+    if not clip_id:
+        print("Clip API returned empty clip id.")
+        return
+
+    ready_clip: dict | None = None
+    for _ in range(15):
+        await asyncio.sleep(1)
+        try:
+            clips = await twitch.get_clips(access_token=token, clip_ids=[clip_id])
+        except Exception:
+            clips = []
+        if clips:
+            ready_clip = clips[0]
+            break
+
+    print("\nClip result:")
+    print(f"- clip_id: {clip_id}")
+    print(f"- status: {'ready' if ready_clip else 'processing'}")
+    print(f"- channel: {broadcaster_login or broadcaster_user_id}")
+    print(f"- title: {title}")
+    print(f"- duration: {duration}")
+    print(f"- edit_url: {edit_url}")
+    if ready_clip:
+        print(f"- url: {ready_clip.get('url')}")
+        print(f"- embed_url: {ready_clip.get('embed_url')}")
+        print(f"- thumbnail_url: {ready_clip.get('thumbnail_url')}")
+
+
 async def remove_bot_menu(session: PromptSession, session_factory, twitch: TwitchClient) -> None:
     async with session_factory() as db:
         bots = list((await db.scalars(select(BotAccount))).all())
@@ -1135,7 +1228,8 @@ async def menu_loop() -> None:
             "9) Manage active EventSub subscriptions\n"
             "10) View service status and usage\n"
             "11) View broadcaster authorizations\n"
-            "12) Exit\n"
+            "12) Create clip\n"
+            "13) Exit\n"
         )
         choice = (await session.prompt_async("Select option: ")).strip()
 
@@ -1226,6 +1320,9 @@ async def menu_loop() -> None:
             await list_broadcaster_authorizations_menu(session_factory)
 
         elif choice == "12":
+            await create_clip_menu(session, session_factory, twitch)
+
+        elif choice == "13":
             break
 
         else:

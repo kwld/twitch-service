@@ -80,6 +80,45 @@ button:hover {
   min-width: 0;
 }
 
+.profileCard {
+  margin-top: 8px;
+  border: 1px solid #d7dfec;
+  border-radius: 8px;
+  padding: 8px;
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: 10px;
+  align-items: start;
+}
+
+.profileCard img {
+  width: 72px;
+  height: 72px;
+  border-radius: 8px;
+  object-fit: cover;
+  display: none;
+  border: 1px solid #c7d2e6;
+  background: #f4f7fb;
+}
+
+.profileName {
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.profileMeta {
+  margin-top: 4px;
+  color: #496080;
+  font-size: 0.85rem;
+}
+
+.profileBio {
+  margin-top: 6px;
+  color: #243750;
+  font-size: 0.9rem;
+  white-space: pre-wrap;
+}
+
 #interestList {
   list-style: none;
   padding: 0;
@@ -97,7 +136,8 @@ button:hover {
 }
 
 #eventsLog,
-#sendResult {
+#sendResult,
+#clipResult {
   margin: 10px 0 0;
   border: 1px solid #d7dfec;
   border-radius: 8px;
