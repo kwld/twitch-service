@@ -68,8 +68,4 @@ class RuntimeState:
 
 
 def load_settings() -> Settings:
-    if not ENV_FILE.exists():
-        raise RuntimeError(
-            "Missing .env file. Copy .env.example to .env and fill required values."
-        )
     return Settings()
