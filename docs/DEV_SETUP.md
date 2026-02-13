@@ -24,12 +24,12 @@ For chat/EventSub bot flows, ensure `TWITCH_DEFAULT_SCOPES` includes:
 ## 3) Start development containers
 Docker:
 ```powershell
-./scripts/dev-container.ps1 -Engine docker -Build
+docker compose -f docker-compose.dev.yml up -d --build
 ```
 
 Podman:
 ```powershell
-./scripts/dev-container.ps1 -Engine podman -Build
+podman compose -f docker-compose.dev.yml up -d --build
 ```
 
 This starts:
