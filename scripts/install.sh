@@ -63,8 +63,18 @@ if [[ ${#missing[@]} -gt 0 ]]; then
   print_env_guidance "${missing[@]}"
 fi
 
-python -m pip install --upgrade pip
-python -m pip install -e .
+PYTHON_BIN=""
+if command -v python >/dev/null 2>&1; then
+  PYTHON_BIN="python"
+elif command -v python3 >/dev/null 2>&1; then
+  PYTHON_BIN="python3"
+else
+  echo "Python is required but neither 'python' nor 'python3' was found." >&2
+  exit 1
+fi
+
+"${PYTHON_BIN}" -m pip install --upgrade pip
+"${PYTHON_BIN}" -m pip install -e .
 
 if [[ -f "test-app/package.json" ]]; then
   (
