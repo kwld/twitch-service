@@ -280,4 +280,3 @@ It covers:
 - chat send via service endpoint.
 
 See `test-app/README.md`.
-# twitch-service
