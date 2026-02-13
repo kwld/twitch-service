@@ -52,3 +52,4 @@ For webhook transport tests:
 1. Set `TEST_WEBHOOK_PUBLIC_URL` in `.env`.
 2. Create an interest with `transport=webhook`.
 3. Trigger event and observe `[webhook]` entries in live log.
+4. If webhook events are no longer desired, remove matching interests (`DELETE /v1/interests/{interest_id}`) instead of leaving stale subscriptions active.

@@ -142,6 +142,7 @@ Expected envelope fields include:
 3. Restart test app.
 4. Create interest with `transport=webhook`.
 5. Trigger event and verify `[webhook]` log entries in the test app UI.
+6. If you observe webhook events that are no longer desired, delete matching webhook interests via `DELETE /v1/interests/{interest_id}`.
 
 ## 12) Stop Everything
 API: `Ctrl+C` in API terminal.
@@ -153,4 +154,3 @@ DB:
 ```powershell
 docker compose down
 ```
-

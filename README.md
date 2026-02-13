@@ -157,6 +157,11 @@ Interests should be heartbeated periodically by client services:
 - call `POST /v1/interests/{interest_id}/heartbeat`
 - if no heartbeat for 1 hour, service auto-removes stale interests and channel state.
 
+Webhook consumer rule:
+- if your service receives webhook events it no longer wants, unsubscribe immediately.
+- do this by listing current interests (`GET /v1/interests`) and deleting matching webhook interests (`DELETE /v1/interests/{interest_id}`).
+- keeping stale webhook interests active will continue event delivery.
+
 ## Container CLI Helper
 Kept helper scripts:
 - `scripts/cli-container.ps1`

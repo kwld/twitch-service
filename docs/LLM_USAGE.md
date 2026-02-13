@@ -244,6 +244,11 @@ For broadcaster auth requests:
 
 ### Service webhook delivery
 - if interest transport is `webhook`, service posts envelope JSON to `webhook_url`.
+- if your service receives a webhook event that it is no longer interested in, treat it as stale delivery and unsubscribe immediately by deleting matching interest rows.
+- matching rule for unsubscribe:
+  - compare incoming envelope `type` + `event.broadcaster_user_id` to your current desired subscriptions for the same bot/service context.
+  - if not desired, call `GET /v1/interests`, find matching webhook interests, then call `DELETE /v1/interests/{interest_id}`.
+- do not leave stale webhook interests active; they will continue to receive events until deleted.
 
 Envelope shape emitted by local hub:
 ```json
@@ -294,8 +299,9 @@ LLM rule:
 5. Create interests.
 6. Open websocket and/or webhook receiver.
 7. Heartbeat interests while active.
-8. Send chat with chosen `auth_mode`.
-9. Delete interests when no longer needed.
+8. On each incoming webhook, verify it is still desired; if not desired, delete matching webhook interests immediately.
+9. Send chat with chosen `auth_mode`.
+10. Delete interests when no longer needed.
 
 ## 11) Non-Service Endpoints (Admin/Operator)
 For completeness:

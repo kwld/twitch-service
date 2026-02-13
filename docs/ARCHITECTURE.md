@@ -89,6 +89,9 @@ Interest transport in `service_interests` is independent and controls service de
    - API request count via `_service_auth`,
    - websocket connect/disconnect counts,
    - sent-event counts for websocket/webhook fanout.
+6. Consumer-side hygiene expectation:
+   - if a service receives webhook events it no longer wants, it should delete matching webhook interests.
+   - this prevents stale interest rows from continuing webhook fanout.
 
 Envelope format (current implementation):
 ```json
