@@ -70,6 +70,10 @@ LLM rule:
 - `POST /v1/broadcaster-authorizations/start`
 - `GET /v1/broadcaster-authorizations`
 
+### Service user authentication (Twitch user login)
+- `POST /v1/user-auth/start`
+- `GET /v1/user-auth/session/{state}`
+
 ### Twitch helper reads
 - `GET /v1/twitch/profiles`
 - `GET /v1/twitch/streams/status`
@@ -167,6 +171,38 @@ Returns:
 Returns broadcaster grants for this service:
 - includes `broadcaster_user_id`, `broadcaster_login`, `scopes`, timestamps.
 
+### `POST /v1/user-auth/start`
+Request:
+```json
+{
+  "redirect_url": "https://your-service.example.com/twitch-auth/done"
+}
+```
+Returns:
+```json
+{
+  "state": "string",
+  "authorize_url": "https://id.twitch.tv/oauth2/authorize?...",
+  "requested_scopes": ["user:read:email"],
+  "expires_in_seconds": 600
+}
+```
+
+Behavior:
+- creates a service-owned auth session keyed by `state`.
+- authorize URL requests Twitch scope `user:read:email`.
+- callback is completed by this service at `GET /oauth/callback`.
+
+### `GET /v1/user-auth/session/{state}`
+Returns service-owned auth session state:
+- `status`: `pending|completed|failed`
+- Twitch user identity fields: `twitch_user_id`, `twitch_login`, `twitch_display_name`, `twitch_email`
+- OAuth token fields: `access_token`, `refresh_token`, `token_expires_at`
+- metadata: `error`, `scopes`, `created_at`, `completed_at`
+
+Ownership:
+- `404` if state does not exist or belongs to another service account.
+
 ### `GET /v1/twitch/profiles`
 Query:
 - `bot_account_id` (required)
@@ -225,6 +261,8 @@ Two behaviors share this endpoint:
    - when `state` matches pending broadcaster auth request.
 2. CLI bot OAuth callback relay:
    - stores callback row in `oauth_callbacks` for CLI polling.
+3. Service user-auth completion:
+   - when `state` matches pending service user-auth request.
 
 For broadcaster auth requests:
 - exchanges code,
@@ -295,13 +333,14 @@ LLM rule:
 1. Authenticate once with `GET /v1/interests`.
 2. Fetch `GET /v1/bots/accessible`; choose only listed bot.
 3. Fetch catalog `GET /v1/eventsub/subscription-types`.
-4. If target channel requires channel grant, start and complete broadcaster auth.
-5. Create interests.
-6. Open websocket and/or webhook receiver.
-7. Heartbeat interests while active.
-8. On each incoming webhook, verify it is still desired; if not desired, delete matching webhook interests immediately.
-9. Send chat with chosen `auth_mode`.
-10. Delete interests when no longer needed.
+4. If your product requires Twitch end-user login, run service user-auth (`/v1/user-auth/start` then poll `/v1/user-auth/session/{state}`).
+5. If target channel requires channel grant, start and complete broadcaster auth.
+6. Create interests.
+7. Open websocket and/or webhook receiver.
+8. Heartbeat interests while active.
+9. On each incoming webhook, verify it is still desired; if not desired, delete matching webhook interests immediately.
+10. Send chat with chosen `auth_mode`.
+11. Delete interests when no longer needed.
 
 ## 11) Non-Service Endpoints (Admin/Operator)
 For completeness:

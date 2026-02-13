@@ -70,6 +70,9 @@ class ServiceAccount(Base):
         single_parent=True,
     )
     bot_access: Mapped[list["ServiceBotAccess"]] = relationship(back_populates="service_account")
+    user_auth_requests: Mapped[list["ServiceUserAuthRequest"]] = relationship(
+        back_populates="service_account"
+    )
 
 
 class ServiceInterest(Base):
@@ -279,3 +282,29 @@ class ServiceBotAccess(Base):
 
     service_account: Mapped["ServiceAccount"] = relationship(back_populates="bot_access")
     bot_account: Mapped["BotAccount"] = relationship(back_populates="service_access")
+
+
+class ServiceUserAuthRequest(Base):
+    __tablename__ = "service_user_auth_requests"
+
+    state: Mapped[str] = mapped_column(String(255), primary_key=True)
+    service_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("service_accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    requested_scopes_csv: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    redirect_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    twitch_user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    twitch_login: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    twitch_display_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    twitch_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    access_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    refresh_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    service_account: Mapped["ServiceAccount"] = relationship(back_populates="user_auth_requests")

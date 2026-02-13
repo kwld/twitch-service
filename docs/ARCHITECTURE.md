@@ -42,6 +42,7 @@ Main tables:
 - `channel_states`: cached live/offline state for `(bot, broadcaster)`.
 - `broadcaster_authorization_requests`: pending/completed OAuth grant attempts for broadcaster channel access.
 - `broadcaster_authorizations`: completed grants (service + bot + broadcaster).
+- `service_user_auth_requests`: pending/completed Twitch end-user auth sessions per service (`user:read:email`).
 - `oauth_callbacks`: callback relay storage for CLI OAuth polling.
 - `service_runtime_stats`: per-service counters and connection/event timestamps.
 
@@ -116,7 +117,15 @@ Envelope format (current implementation):
 4. Twitch redirects to `GET /oauth/callback`.
 5. Callback exchanges code, validates scope `channel:bot`, upserts `broadcaster_authorizations`.
 
-## 10) Chat Send Behavior
+## 10) Service User Authentication Flow
+1. Service calls `POST /v1/user-auth/start`.
+2. API creates `service_user_auth_requests` row and returns Twitch authorize URL with scope `user:read:email`.
+3. End user consents on Twitch.
+4. Twitch redirects to `GET /oauth/callback`.
+5. Callback exchanges code, validates required scope, resolves user identity/email, and stores token/session fields in `service_user_auth_requests`.
+6. Service reads result via `GET /v1/user-auth/session/{state}`.
+
+## 11) Chat Send Behavior
 Endpoint: `POST /v1/twitch/chat/messages`
 - validates bot token and required scopes:
   - always: `user:write:chat`
@@ -131,7 +140,7 @@ Endpoint: `POST /v1/twitch/chat/messages`
   - bot badge eligibility hint,
   - drop reason if Twitch dropped message.
 
-## 11) CLI Responsibilities
+## 12) CLI Responsibilities
 `twitch-eventsub-cli console` provides operator workflows:
 - bot OAuth setup/update and token refresh,
 - service account management (create/regenerate/delete),

@@ -50,6 +50,7 @@ from app.models import (
     ServiceBotAccess,
     ServiceInterest,
     ServiceRuntimeStats,
+    ServiceUserAuthRequest,
     TwitchSubscription,
 )
 from app.schemas import (
@@ -62,6 +63,9 @@ from app.schemas import (
     SendChatMessageResponse,
     StartBroadcasterAuthorizationRequest,
     StartBroadcasterAuthorizationResponse,
+    StartUserAuthorizationRequest,
+    StartUserAuthorizationResponse,
+    UserAuthorizationSessionResponse,
 )
 from app.twitch import TwitchClient
 
@@ -118,6 +122,7 @@ eventsub_manager = EventSubManager(
 runtime_state = RuntimeState(settings=settings)
 DEFAULT_STREAM_EVENTS = ("stream.online", "stream.offline")
 BROADCASTER_AUTH_SCOPES = ("channel:bot",)
+SERVICE_USER_AUTH_SCOPES = ("user:read:email",)
 
 
 def _counter(value: int | None) -> int:
@@ -581,6 +586,177 @@ async def oauth_callback(code: str | None = None, state: str | None = None, erro
                     "broadcaster_login": broadcaster_login,
                     "scopes": granted_scopes,
                 }
+            user_auth_request = await session.get(ServiceUserAuthRequest, state)
+            if user_auth_request:
+                redirect_url = user_auth_request.redirect_url
+                now = datetime.now(UTC)
+                if error:
+                    user_auth_request.status = "failed"
+                    user_auth_request.error = error
+                    user_auth_request.completed_at = now
+                    await session.commit()
+                    if redirect_url:
+                        return RedirectResponse(
+                            url=_append_query(
+                                redirect_url,
+                                {
+                                    "ok": "false",
+                                    "auth_type": "service_user",
+                                    "state": state,
+                                    "error": error,
+                                    "message": "Service user authorization failed.",
+                                },
+                            ),
+                            status_code=302,
+                        )
+                    return {
+                        "ok": False,
+                        "auth_type": "service_user",
+                        "state": state,
+                        "error": error,
+                        "message": "Service user authorization failed.",
+                    }
+                if not code:
+                    user_auth_request.status = "failed"
+                    user_auth_request.error = "missing_code"
+                    user_auth_request.completed_at = now
+                    await session.commit()
+                    if redirect_url:
+                        return RedirectResponse(
+                            url=_append_query(
+                                redirect_url,
+                                {
+                                    "ok": "false",
+                                    "auth_type": "service_user",
+                                    "state": state,
+                                    "error": "missing_code",
+                                    "message": "Missing OAuth code",
+                                },
+                            ),
+                            status_code=302,
+                        )
+                    raise HTTPException(status_code=400, detail="Missing OAuth code")
+
+                try:
+                    token = await twitch_client.exchange_code(code)
+                    token_info = await twitch_client.validate_user_token(token.access_token)
+                    users = await twitch_client.get_users(token.access_token)
+                    user = users[0] if users else {}
+                except Exception as exc:
+                    user_auth_request.status = "failed"
+                    user_auth_request.error = str(exc)
+                    user_auth_request.completed_at = now
+                    await session.commit()
+                    if redirect_url:
+                        return RedirectResponse(
+                            url=_append_query(
+                                redirect_url,
+                                {
+                                    "ok": "false",
+                                    "auth_type": "service_user",
+                                    "state": state,
+                                    "error": "oauth_exchange_failed",
+                                    "message": f"OAuth exchange failed: {exc}",
+                                },
+                            ),
+                            status_code=302,
+                        )
+                    raise HTTPException(status_code=502, detail=f"OAuth exchange failed: {exc}") from exc
+
+                granted_scopes = sorted(set(token_info.get("scopes", [])))
+                required = set(SERVICE_USER_AUTH_SCOPES)
+                if not required.issubset(set(granted_scopes)):
+                    missing_required = ",".join(sorted(required - set(granted_scopes)))
+                    user_auth_request.status = "failed"
+                    user_auth_request.error = "missing_required_scopes:" + missing_required
+                    user_auth_request.completed_at = now
+                    await session.commit()
+                    if redirect_url:
+                        return RedirectResponse(
+                            url=_append_query(
+                                redirect_url,
+                                {
+                                    "ok": "false",
+                                    "auth_type": "service_user",
+                                    "state": state,
+                                    "error": "missing_required_scopes",
+                                    "message": (
+                                        "Service user authorization succeeded but required scopes are missing: "
+                                        + missing_required
+                                    ),
+                                },
+                            ),
+                            status_code=302,
+                        )
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "Service user authorization succeeded but required scopes are missing: "
+                            + missing_required
+                        ),
+                    )
+
+                twitch_user_id = str(token_info.get("user_id", "") or user.get("id", ""))
+                twitch_login = str(token_info.get("login", "") or user.get("login", ""))
+                if not twitch_user_id or not twitch_login:
+                    user_auth_request.status = "failed"
+                    user_auth_request.error = "missing_user_identity"
+                    user_auth_request.completed_at = now
+                    await session.commit()
+                    if redirect_url:
+                        return RedirectResponse(
+                            url=_append_query(
+                                redirect_url,
+                                {
+                                    "ok": "false",
+                                    "auth_type": "service_user",
+                                    "state": state,
+                                    "error": "missing_user_identity",
+                                    "message": "Could not resolve authenticated Twitch user identity",
+                                },
+                            ),
+                            status_code=302,
+                        )
+                    raise HTTPException(
+                        status_code=400, detail="Could not resolve authenticated Twitch user identity"
+                    )
+
+                user_auth_request.status = "completed"
+                user_auth_request.error = None
+                user_auth_request.twitch_user_id = twitch_user_id
+                user_auth_request.twitch_login = twitch_login
+                user_auth_request.twitch_display_name = str(user.get("display_name", twitch_login))
+                user_auth_request.twitch_email = user.get("email")
+                user_auth_request.access_token = token.access_token
+                user_auth_request.refresh_token = token.refresh_token
+                user_auth_request.token_expires_at = token.expires_at
+                user_auth_request.completed_at = now
+                await session.commit()
+                if redirect_url:
+                    return RedirectResponse(
+                        url=_append_query(
+                            redirect_url,
+                            {
+                                "ok": "true",
+                                "auth_type": "service_user",
+                                "state": state,
+                                "message": "Service user authorization completed.",
+                                "twitch_user_id": twitch_user_id,
+                                "twitch_login": twitch_login,
+                                "scopes": ",".join(granted_scopes),
+                            },
+                        ),
+                        status_code=302,
+                    )
+                return {
+                    "ok": True,
+                    "auth_type": "service_user",
+                    "state": state,
+                    "message": "Service user authorization completed.",
+                    "twitch_user_id": twitch_user_id,
+                    "twitch_login": twitch_login,
+                    "scopes": granted_scopes,
+                }
 
     if state:
         async with session_factory() as session:
@@ -730,6 +906,63 @@ async def regenerate_service_secret(client_id: str, _: None = Depends(_require_a
         account.client_secret_hash = hash_secret(new_secret)
         await session.commit()
     return {"client_id": client_id, "client_secret": new_secret}
+
+
+@app.post("/v1/user-auth/start", response_model=StartUserAuthorizationResponse)
+async def start_service_user_authorization(
+    req: StartUserAuthorizationRequest,
+    service: ServiceAccount = Depends(_service_auth),
+):
+    state = secrets.token_urlsafe(24)
+    scopes_csv = ",".join(SERVICE_USER_AUTH_SCOPES)
+    async with session_factory() as session:
+        session.add(
+            ServiceUserAuthRequest(
+                state=state,
+                service_account_id=service.id,
+                requested_scopes_csv=scopes_csv,
+                redirect_url=str(req.redirect_url) if req.redirect_url else None,
+                status="pending",
+            )
+        )
+        await session.commit()
+    authorize_url = twitch_client.build_authorize_url_with_scopes(
+        state=state,
+        scopes=" ".join(SERVICE_USER_AUTH_SCOPES),
+        force_verify=True,
+    )
+    return StartUserAuthorizationResponse(
+        state=state,
+        authorize_url=authorize_url,
+        requested_scopes=list(SERVICE_USER_AUTH_SCOPES),
+        expires_in_seconds=600,
+    )
+
+
+@app.get("/v1/user-auth/session/{state}", response_model=UserAuthorizationSessionResponse)
+async def get_service_user_authorization_session(
+    state: str,
+    service: ServiceAccount = Depends(_service_auth),
+):
+    async with session_factory() as session:
+        row = await session.get(ServiceUserAuthRequest, state)
+        if not row or row.service_account_id != service.id:
+            raise HTTPException(status_code=404, detail="User auth session not found")
+    return UserAuthorizationSessionResponse(
+        state=row.state,
+        status=row.status,
+        error=row.error,
+        twitch_user_id=row.twitch_user_id,
+        twitch_login=row.twitch_login,
+        twitch_display_name=row.twitch_display_name,
+        twitch_email=row.twitch_email,
+        scopes=_split_csv(row.requested_scopes_csv),
+        access_token=row.access_token,
+        refresh_token=row.refresh_token,
+        token_expires_at=row.token_expires_at,
+        created_at=row.created_at,
+        completed_at=row.completed_at,
+    )
 
 
 @app.get("/v1/interests", response_model=list[InterestResponse])

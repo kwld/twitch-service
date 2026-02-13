@@ -96,3 +96,30 @@ class BroadcasterAuthorizationResponse(BaseModel):
     scopes: list[str]
     authorized_at: datetime
     updated_at: datetime
+
+
+class StartUserAuthorizationRequest(BaseModel):
+    redirect_url: HttpUrl | None = None
+
+
+class StartUserAuthorizationResponse(BaseModel):
+    state: str
+    authorize_url: str
+    requested_scopes: list[str]
+    expires_in_seconds: int
+
+
+class UserAuthorizationSessionResponse(BaseModel):
+    state: str
+    status: str
+    error: str | None
+    twitch_user_id: str | None
+    twitch_login: str | None
+    twitch_display_name: str | None
+    twitch_email: str | None
+    scopes: list[str]
+    access_token: str | None
+    refresh_token: str | None
+    token_expires_at: datetime | None
+    created_at: datetime
+    completed_at: datetime | None

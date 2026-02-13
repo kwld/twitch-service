@@ -41,6 +41,21 @@ Minimal API service that:
 For exact runtime flow and data model details, see `docs/ARCHITECTURE.md`.
 For 1:1 LLM integration behavior and endpoint contracts, see `docs/LLM_USAGE.md`.
 
+## Service User Authentication Flow
+Service clients can authenticate Twitch end-users with OAuth scope `user:read:email`.
+
+Endpoints:
+- `POST /v1/user-auth/start`
+- `GET /v1/user-auth/session/{state}`
+- callback is handled by `GET /oauth/callback`
+
+Flow:
+1. Service calls `POST /v1/user-auth/start` (optional `redirect_url`).
+2. Service redirects user to returned `authorize_url`.
+3. Twitch redirects to service callback (`/oauth/callback`) after consent.
+4. Service polls `GET /v1/user-auth/session/{state}` until status is `completed` or `failed`.
+5. On `completed`, session includes authenticated Twitch identity, email, and OAuth tokens.
+
 ## Quickstart
 1. Copy `.env.example` to `.env` and configure values.
 2. Install dependencies:
@@ -103,6 +118,8 @@ bash ./scripts/run-dev.sh 8080
 - `GET /v1/bots/accessible` (service)
 - `POST /v1/broadcaster-authorizations/start` (service)
 - `GET /v1/broadcaster-authorizations` (service)
+- `POST /v1/user-auth/start` (service)
+- `GET /v1/user-auth/session/{state}` (service)
 - `GET /v1/eventsub/subscription-types` (service)
 - `POST /v1/interests` (service)
 - `DELETE /v1/interests/{interest_id}` (service)
