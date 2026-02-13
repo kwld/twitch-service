@@ -59,6 +59,11 @@ class EventSubManager:
             return "webhook"
         return "websocket"
 
+    @staticmethod
+    def _is_dead_websocket_status(status: str | None) -> bool:
+        normalized = (status or "").strip().lower()
+        return bool(normalized) and not normalized.startswith("enabled")
+
     async def start(self) -> None:
         await self._load_interests()
         await self._sync_from_twitch_and_reconcile()
@@ -274,10 +279,14 @@ class EventSubManager:
             for sub in subs:
                 condition = sub.get("condition", {})
                 event_type = sub.get("type")
+                sub_id = str(sub.get("id", ""))
+                sub_status = str(sub.get("status", "unknown"))
                 broadcaster_user_id = condition.get("broadcaster_user_id")
                 bot_user_id = condition.get("user_id")
                 method = sub.get("transport", {}).get("method")
                 if method not in {"websocket", "webhook"}:
+                    continue
+                if not sub_id:
                     continue
                 if not event_type or not broadcaster_user_id:
                     continue
@@ -296,12 +305,30 @@ class EventSubManager:
                     )
                 if not bot:
                     continue
+                if (
+                    method == "websocket"
+                    and expected_method == "websocket"
+                    and self._is_dead_websocket_status(sub_status)
+                ):
+                    delete_access_token: str | None = None
+                    if event_type.startswith("channel.chat.") and bot.enabled:
+                        with suppress(Exception):
+                            delete_access_token = await ensure_bot_access_token(session, self.twitch, bot)
+                    with suppress(TwitchApiError):
+                        await self.twitch.delete_eventsub_subscription(sub_id, access_token=delete_access_token)
+                    logger.info(
+                        "Removed stale websocket subscription %s type=%s status=%s for automatic recovery",
+                        sub_id,
+                        event_type,
+                        sub_status,
+                    )
+                    continue
                 db_sub = TwitchSubscription(
                     bot_account_id=bot.id,
                     event_type=event_type,
                     broadcaster_user_id=broadcaster_user_id,
-                    twitch_subscription_id=sub["id"],
-                    status=sub.get("status", "unknown"),
+                    twitch_subscription_id=sub_id,
+                    status=sub_status,
                     session_id=sub.get("transport", {}).get("session_id"),
                     last_seen_at=datetime.now(UTC),
                 )

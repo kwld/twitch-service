@@ -346,6 +346,14 @@ async def lifespan(_: FastAPI):
             )
         except Exception as exc:
             logger.warning("Skipping redirect_url compatibility migration: %s", exc)
+    async with session_factory() as session:
+        await session.execute(
+            text(
+                "UPDATE service_runtime_stats "
+                "SET active_ws_connections = 0, is_connected = false"
+            )
+        )
+        await session.commit()
     await eventsub_manager.start()
     try:
         yield
