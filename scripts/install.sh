@@ -63,24 +63,21 @@ if [[ ${#missing[@]} -gt 0 ]]; then
   print_env_guidance "${missing[@]}"
 fi
 
-PYTHON_BIN=""
-if command -v python >/dev/null 2>&1; then
-  PYTHON_BIN="python"
-elif command -v python3 >/dev/null 2>&1; then
-  PYTHON_BIN="python3"
-else
-  echo "Python is required but neither 'python' nor 'python3' was found." >&2
+if ! command -v docker >/dev/null 2>&1; then
+  echo "Docker is required but was not found in PATH." >&2
   exit 1
 fi
 
-"${PYTHON_BIN}" -m pip install --upgrade pip
-"${PYTHON_BIN}" -m pip install -e .
-
-if [[ -f "test-app/package.json" ]]; then
-  (
-    cd test-app
-    npm install
-  )
+if ! docker compose version >/dev/null 2>&1; then
+  echo "Docker Compose plugin is required but unavailable." >&2
+  exit 1
 fi
 
+echo "Pulling base images..."
+docker compose -f docker-compose.yml pull db
+
+echo "Building app image..."
+docker compose -f docker-compose.yml build app
+
 echo "Install complete."
+echo "Next step: docker compose -f docker-compose.yml up -d"
