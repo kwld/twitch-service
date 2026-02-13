@@ -75,6 +75,27 @@ class SendChatMessageResponse(BaseModel):
     drop_reason_message: str | None = None
 
 
+class CreateClipRequest(BaseModel):
+    bot_account_id: uuid.UUID
+    broadcaster_user_id: str = Field(min_length=1, max_length=64)
+    title: str = Field(min_length=1, max_length=140)
+    duration: float = Field(ge=5.0, le=60.0)
+    has_delay: bool = False
+
+
+class CreateClipResponse(BaseModel):
+    clip_id: str
+    edit_url: str
+    status: Literal["processing", "ready"]
+    title: str
+    duration: float
+    broadcaster_user_id: str
+    created_at: str | None = None
+    url: str | None = None
+    embed_url: str | None = None
+    thumbnail_url: str | None = None
+
+
 class StartBroadcasterAuthorizationRequest(BaseModel):
     bot_account_id: uuid.UUID
     redirect_url: HttpUrl | None = None

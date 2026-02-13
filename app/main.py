@@ -55,6 +55,8 @@ from app.models import (
 )
 from app.schemas import (
     BroadcasterAuthorizationResponse,
+    CreateClipRequest,
+    CreateClipResponse,
     CreateInterestRequest,
     EventSubCatalogItem,
     EventSubCatalogResponse,
@@ -1435,6 +1437,82 @@ async def send_twitch_chat_message(
         bot_badge_reason=bot_badge_reason,
         drop_reason_code=drop_reason.get("code"),
         drop_reason_message=drop_reason.get("message"),
+    )
+
+
+@app.post("/v1/twitch/clips", response_model=CreateClipResponse)
+async def create_twitch_clip(
+    req: CreateClipRequest,
+    service: ServiceAccount = Depends(_service_auth),
+):
+    broadcaster_user_id = req.broadcaster_user_id.strip()
+    async with session_factory() as session:
+        await _ensure_service_can_access_bot(session, service.id, req.bot_account_id)
+        bot = await session.get(BotAccount, req.bot_account_id)
+        if not bot:
+            raise HTTPException(status_code=404, detail="Bot not found")
+        if not bot.enabled:
+            raise HTTPException(status_code=409, detail="Bot is disabled")
+        token = await ensure_bot_access_token(session, twitch_client, bot)
+        token_info = await twitch_client.validate_user_token(token)
+        scopes = set(token_info.get("scopes", []))
+        if "clips:edit" not in scopes:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Bot token missing required scope 'clips:edit'. "
+                    "Re-run Guided bot setup to refresh OAuth scopes."
+                ),
+            )
+
+    try:
+        create_payload = await twitch_client.create_clip(
+            access_token=token,
+            broadcaster_id=broadcaster_user_id,
+            title=req.title,
+            duration=req.duration,
+            has_delay=req.has_delay,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed creating clip: {exc}") from exc
+
+    clip_id = str(create_payload.get("id", ""))
+    if not clip_id:
+        raise HTTPException(status_code=502, detail="Clip API returned empty clip id")
+
+    # Create Clip is asynchronous; poll Get Clips for up to ~15s for final metadata.
+    ready_clip: dict | None = None
+    for _ in range(15):
+        await asyncio.sleep(1)
+        try:
+            clips = await twitch_client.get_clips(access_token=token, clip_ids=[clip_id])
+        except Exception:
+            clips = []
+        if clips:
+            ready_clip = clips[0]
+            break
+
+    if not ready_clip:
+        return CreateClipResponse(
+            clip_id=clip_id,
+            edit_url=str(create_payload.get("edit_url", "")),
+            status="processing",
+            title=req.title,
+            duration=req.duration,
+            broadcaster_user_id=broadcaster_user_id,
+        )
+
+    return CreateClipResponse(
+        clip_id=clip_id,
+        edit_url=str(create_payload.get("edit_url", "")),
+        status="ready",
+        title=req.title,
+        duration=req.duration,
+        broadcaster_user_id=broadcaster_user_id,
+        created_at=ready_clip.get("created_at"),
+        url=ready_clip.get("url"),
+        embed_url=ready_clip.get("embed_url"),
+        thumbnail_url=ready_clip.get("thumbnail_url"),
     )
 
 

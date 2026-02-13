@@ -82,6 +82,9 @@ LLM rule:
 ### Chat send
 - `POST /v1/twitch/chat/messages`
 
+### Clip creation
+- `POST /v1/twitch/clips`
+
 ### Event delivery
 - `WS /ws/events`
 - outgoing webhook callbacks to service-owned URLs.
@@ -253,6 +256,30 @@ Response fields include:
 - `bot_badge_eligible`, `bot_badge_reason`,
 - `drop_reason_code`, `drop_reason_message`.
 
+### `POST /v1/twitch/clips`
+Request:
+```json
+{
+  "bot_account_id": "uuid",
+  "broadcaster_user_id": "12345",
+  "title": "Best moment",
+  "duration": 30,
+  "has_delay": false
+}
+```
+
+Validation:
+- `duration` must be between `5` and `60` seconds.
+- bot must be accessible and enabled.
+- bot token must include `clips:edit`.
+
+Multi-step behavior:
+1. API calls Twitch Create Clip.
+2. API polls Twitch Get Clips for up to 15 seconds.
+3. response:
+   - `status=ready` with clip URL metadata when Twitch finishes quickly,
+   - `status=processing` with `clip_id` + `edit_url` if still processing.
+
 ## 6) OAuth Callback Semantics
 Endpoint: `GET /oauth/callback`
 
@@ -340,7 +367,8 @@ LLM rule:
 8. Heartbeat interests while active.
 9. On each incoming webhook, verify it is still desired; if not desired, delete matching webhook interests immediately.
 10. Send chat with chosen `auth_mode`.
-11. Delete interests when no longer needed.
+11. Create clips with `POST /v1/twitch/clips` when needed.
+12. Delete interests when no longer needed.
 
 ## 11) Non-Service Endpoints (Admin/Operator)
 For completeness:

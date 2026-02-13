@@ -128,6 +128,7 @@ bash ./scripts/run-dev.sh 8080
 - `GET /v1/twitch/streams/status?bot_account_id=...&broadcaster_user_ids=...` (service)
 - `GET /v1/twitch/streams/status/interested` (service)
 - `POST /v1/twitch/chat/messages` (service)
+- `POST /v1/twitch/clips` (service)
 - `WS /ws/events?client_id=...&client_secret=...` (service)
 
 ### Service Event Envelope
@@ -250,6 +251,25 @@ Catalog source for `GET /v1/eventsub/subscription-types`:
 - `auth_mode=user`: user-token send only.
 Required bot scope: `user:write:chat`.
 Required broadcaster channel authorization scope: `channel:bot`.
+
+### Create Clip Payload
+```json
+{
+  "bot_account_id": "uuid",
+  "broadcaster_user_id": "12345",
+  "title": "Best moment",
+  "duration": 30,
+  "has_delay": false
+}
+```
+
+`POST /v1/twitch/clips` is a multi-step helper:
+1. Calls Twitch Create Clip.
+2. Polls Twitch Get Clips for up to 15 seconds until clip metadata is available.
+3. Returns `status=ready` with URLs, or `status=processing` if Twitch is still preparing the clip.
+
+Required bot scope: `clips:edit`.
+Duration must be between 5 and 60 seconds.
 
 ## Streamer Authorization Flow (Bot In Streamer Channel)
 Yes, the required redirect API is implemented. Broadcaster authorization is handled by:

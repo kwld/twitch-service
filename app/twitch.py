@@ -270,3 +270,48 @@ class TwitchClient:
         if not data:
             raise TwitchApiError("Empty send chat message response")
         return data[0]
+
+    async def create_clip(
+        self,
+        access_token: str,
+        broadcaster_id: str,
+        title: str,
+        duration: float,
+        has_delay: bool = False,
+    ) -> dict[str, Any]:
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Client-Id": self.client_id,
+        }
+        params: dict[str, Any] = {
+            "broadcaster_id": broadcaster_id,
+            "title": title,
+            "duration": duration,
+            "has_delay": "true" if has_delay else "false",
+        }
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(f"{HELIX_BASE}/clips", headers=headers, params=params)
+        if resp.status_code >= 300:
+            raise TwitchApiError(f"Failed creating clip: {resp.text}")
+        data = resp.json().get("data", [])
+        if not data:
+            raise TwitchApiError("Empty create clip response")
+        return data[0]
+
+    async def get_clips(
+        self,
+        access_token: str,
+        clip_ids: list[str],
+    ) -> list[dict[str, Any]]:
+        if not clip_ids:
+            return []
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Client-Id": self.client_id,
+        }
+        params = [("id", clip_id) for clip_id in clip_ids]
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(f"{HELIX_BASE}/clips", headers=headers, params=params)
+        if resp.status_code >= 300:
+            raise TwitchApiError(f"Failed getting clips: {resp.text}")
+        return resp.json().get("data", [])

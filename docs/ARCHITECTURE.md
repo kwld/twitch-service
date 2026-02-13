@@ -140,7 +140,14 @@ Endpoint: `POST /v1/twitch/chat/messages`
   - bot badge eligibility hint,
   - drop reason if Twitch dropped message.
 
-## 12) CLI Responsibilities
+## 12) Clip Creation Behavior
+Endpoint: `POST /v1/twitch/clips`
+- validates service bot access and bot enabled state,
+- validates bot OAuth scope `clips:edit`,
+- calls Twitch Create Clip then polls Twitch Get Clips for up to 15 seconds,
+- returns `status=ready` with URLs when available, otherwise `status=processing`.
+
+## 13) CLI Responsibilities
 `twitch-eventsub-cli console` provides operator workflows:
 - bot OAuth setup/update and token refresh,
 - service account management (create/regenerate/delete),
