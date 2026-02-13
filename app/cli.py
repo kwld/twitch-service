@@ -629,6 +629,35 @@ async def _delete_eventsub_subscription_cli(
             await db.commit()
 
 
+async def _list_active_eventsub_subscriptions_cli(session_factory, twitch: TwitchClient) -> list[dict]:
+    by_id: dict[str, dict] = {}
+
+    with suppress(Exception):
+        app_subs = await twitch.list_eventsub_subscriptions()
+        for sub in app_subs:
+            sub_id = str(sub.get("id", "")).strip()
+            if sub_id:
+                by_id[sub_id] = sub
+
+    async with session_factory() as db:
+        bots = list((await db.scalars(select(BotAccount).where(BotAccount.enabled.is_(True)))).all())
+
+    for bot in bots:
+        with suppress(Exception):
+            async with session_factory() as db:
+                db_bot = await db.get(BotAccount, bot.id)
+                if not db_bot:
+                    continue
+                token = await ensure_bot_access_token(db, twitch, db_bot)
+            user_subs = await twitch.list_eventsub_subscriptions(access_token=token)
+            for sub in user_subs:
+                sub_id = str(sub.get("id", "")).strip()
+                if sub_id and sub_id not in by_id:
+                    by_id[sub_id] = sub
+
+    return list(by_id.values())
+
+
 async def manage_eventsub_subscriptions_menu(
     session: PromptSession,
     session_factory,
@@ -637,7 +666,7 @@ async def manage_eventsub_subscriptions_menu(
     filter_mode = "all"
     while True:
         try:
-            subs = await twitch.list_eventsub_subscriptions()
+            subs = await _list_active_eventsub_subscriptions_cli(session_factory, twitch)
         except Exception as exc:
             print(f"Failed listing subscriptions: {exc}")
             return
