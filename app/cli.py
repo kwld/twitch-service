@@ -580,35 +580,96 @@ async def remove_bot_menu(session: PromptSession, session_factory, twitch: Twitc
     print(f"Removed bot: {bot.name}")
 
 
-async def manage_webhook_subscriptions_menu(session: PromptSession, twitch: TwitchClient) -> None:
+def _render_eventsub_subscription_line(idx: int, sub: dict) -> str:
+    cond = sub.get("condition", {})
+    transport = sub.get("transport", {})
+    method = transport.get("method", "unknown")
+    target = transport.get("callback") if method == "webhook" else transport.get("session_id")
+    return (
+        f"{idx}) id={sub.get('id')} type={sub.get('type')} status={sub.get('status')} "
+        f"method={method} broadcaster={cond.get('broadcaster_user_id')} bot_user={cond.get('user_id')} "
+        f"target={target}"
+    )
+
+
+async def _delete_eventsub_subscription_cli(
+    session_factory,
+    twitch: TwitchClient,
+    sub: dict,
+) -> None:
+    subscription_id = str(sub.get("id", ""))
+    event_type = str(sub.get("type", ""))
+    condition = sub.get("condition", {})
+
+    access_token: str | None = None
+    if event_type.startswith("channel.chat."):
+        bot_user_id = str(condition.get("user_id", "")).strip()
+        if not bot_user_id:
+            raise RuntimeError("Cannot delete chat subscription: missing condition.user_id")
+        async with session_factory() as db:
+            bot = await db.scalar(select(BotAccount).where(BotAccount.twitch_user_id == bot_user_id))
+            if not bot:
+                raise RuntimeError(
+                    f"Cannot delete chat subscription {subscription_id}: no bot with twitch_user_id={bot_user_id}"
+                )
+            if not bot.enabled:
+                raise RuntimeError(
+                    f"Cannot delete chat subscription {subscription_id}: bot '{bot.name}' is disabled"
+                )
+            access_token = await ensure_bot_access_token(db, twitch, bot)
+
+    await twitch.delete_eventsub_subscription(subscription_id, access_token=access_token)
+
+    async with session_factory() as db:
+        db_sub = await db.scalar(
+            select(TwitchSubscription).where(TwitchSubscription.twitch_subscription_id == subscription_id)
+        )
+        if db_sub:
+            await db.delete(db_sub)
+            await db.commit()
+
+
+async def manage_eventsub_subscriptions_menu(
+    session: PromptSession,
+    session_factory,
+    twitch: TwitchClient,
+) -> None:
+    filter_mode = "all"
     while True:
         try:
             subs = await twitch.list_eventsub_subscriptions()
         except Exception as exc:
             print(f"Failed listing subscriptions: {exc}")
             return
-        webhook_subs = [s for s in subs if s.get("transport", {}).get("method") == "webhook"]
-        print("\nWebhook subscriptions:")
-        if not webhook_subs:
-            print("No active webhook subscriptions.")
+
+        if filter_mode == "webhook":
+            view_subs = [s for s in subs if s.get("transport", {}).get("method") == "webhook"]
+        elif filter_mode == "websocket":
+            view_subs = [s for s in subs if s.get("transport", {}).get("method") == "websocket"]
         else:
-            for idx, sub in enumerate(webhook_subs, start=1):
-                cond = sub.get("condition", {})
-                transport = sub.get("transport", {})
-                print(
-                    f"{idx}) id={sub.get('id')} type={sub.get('type')} status={sub.get('status')} "
-                    f"broadcaster={cond.get('broadcaster_user_id')} callback={transport.get('callback')}"
-                )
-        print("\nWebhook Subscription Menu")
+            view_subs = subs
+
+        print(f"\nActive EventSub subscriptions (filter={filter_mode}):")
+        if not view_subs:
+            print("No active subscriptions for current filter.")
+        else:
+            for idx, sub in enumerate(view_subs, start=1):
+                print(_render_eventsub_subscription_line(idx, sub))
+
+        print("\nEventSub Subscription Menu")
         print("1) Refresh")
-        print("2) Delete by number")
-        print("3) Back")
+        print("2) Unsubscribe by number")
+        print("3) Unsubscribe by id")
+        print("4) Filter: all")
+        print("5) Filter: webhook only")
+        print("6) Filter: websocket only")
+        print("7) Back")
         choice = (await session.prompt_async("Select option: ")).strip()
         if choice == "1":
             continue
         if choice == "2":
-            if not webhook_subs:
-                print("No webhook subscriptions to delete.")
+            if not view_subs:
+                print("No subscriptions to unsubscribe.")
                 continue
             raw = (await session.prompt_async("Subscription number: ")).strip()
             try:
@@ -616,17 +677,41 @@ async def manage_webhook_subscriptions_menu(session: PromptSession, twitch: Twit
             except ValueError:
                 print("Invalid number.")
                 continue
-            if idx < 1 or idx > len(webhook_subs):
+            if idx < 1 or idx > len(view_subs):
                 print("Invalid number.")
                 continue
-            sub = webhook_subs[idx - 1]
+            sub = view_subs[idx - 1]
             try:
-                await twitch.delete_eventsub_subscription(sub["id"])
-                print(f"Deleted subscription {sub['id']}")
+                await _delete_eventsub_subscription_cli(session_factory, twitch, sub)
+                print(f"Unsubscribed {sub['id']}")
             except Exception as exc:
-                print(f"Failed deleting subscription: {exc}")
+                print(f"Failed unsubscribing: {exc}")
             continue
         if choice == "3":
+            raw_id = (await session.prompt_async("Subscription id: ")).strip()
+            if not raw_id:
+                print("Subscription id is required.")
+                continue
+            sub = next((x for x in subs if str(x.get("id", "")) == raw_id), None)
+            if not sub:
+                print("Subscription id not found in active subscriptions.")
+                continue
+            try:
+                await _delete_eventsub_subscription_cli(session_factory, twitch, sub)
+                print(f"Unsubscribed {raw_id}")
+            except Exception as exc:
+                print(f"Failed unsubscribing: {exc}")
+            continue
+        if choice == "4":
+            filter_mode = "all"
+            continue
+        if choice == "5":
+            filter_mode = "webhook"
+            continue
+        if choice == "6":
+            filter_mode = "websocket"
+            continue
+        if choice == "7":
             return
         print("Invalid option.")
 
@@ -962,7 +1047,7 @@ async def menu_loop() -> None:
             "6) Live chat (own channel)\n"
             "7) Live chat (other channel)\n"
             "8) Remove bot account\n"
-            "9) Manage webhook EventSub subscriptions\n"
+            "9) Manage active EventSub subscriptions\n"
             "10) View service status and usage\n"
             "11) View broadcaster authorizations\n"
             "12) Exit\n"
@@ -1047,7 +1132,7 @@ async def menu_loop() -> None:
             await remove_bot_menu(session, session_factory, twitch)
 
         elif choice == "9":
-            await manage_webhook_subscriptions_menu(session, twitch)
+            await manage_eventsub_subscriptions_menu(session, session_factory, twitch)
 
         elif choice == "10":
             await list_service_status_menu(session_factory)
