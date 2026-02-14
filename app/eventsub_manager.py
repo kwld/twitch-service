@@ -638,13 +638,15 @@ class EventSubManager:
             )
         for sub in stream_subs:
             per_bot.setdefault(sub.bot_account_id, set()).add(sub.broadcaster_user_id)
-        if per_bot:
-            total = sum(len(v) for v in per_bot.values())
-            logger.info(
-                "Refreshing stream state from active subscriptions: bots=%d targets=%d",
-                len(per_bot),
-                total,
-            )
+        if not per_bot:
+            logger.info("No active stream.online/stream.offline subscriptions found; skipping Helix refresh")
+            return
+        total = sum(len(v) for v in per_bot.values())
+        logger.info(
+            "Refreshing stream state from active subscriptions: bots=%d targets=%d",
+            len(per_bot),
+            total,
+        )
         await self._refresh_stream_states_for_bot_targets(per_bot)
 
     async def _refresh_stream_states_for_interested_channels(self) -> None:
