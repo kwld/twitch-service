@@ -1659,7 +1659,7 @@ async def twitch_chat_assets(
     if refresh:
         await chat_assets.refresh(broadcaster_user_id)
     else:
-        await chat_assets.prefetch(broadcaster_user_id)
+        chat_assets.prefetch(broadcaster_user_id)
 
     snapshot = await chat_assets.snapshot(broadcaster_user_id)
     return {

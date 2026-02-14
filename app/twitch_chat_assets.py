@@ -102,7 +102,7 @@ class TwitchChatAssetCache:
         await self._set("channel_emotes", broadcaster_id, payload)
         return payload
 
-    async def prefetch(self, broadcaster_id: str) -> None:
+    def prefetch(self, broadcaster_id: str) -> None:
         # Fire-and-forget refresh; used on interest creation.
         for key in (
             ("global_badges", ""),
