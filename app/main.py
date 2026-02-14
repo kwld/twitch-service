@@ -1337,6 +1337,96 @@ async def interested_stream_status(service: ServiceAccount = Depends(_service_au
     return {"data": rows}
 
 
+@app.get("/v1/twitch/streams/live-test")
+async def twitch_stream_live_test(
+    bot_account_id: uuid.UUID,
+    broadcaster_user_id: str | None = None,
+    broadcaster_login: str | None = None,
+    refresh: bool = True,
+    service: ServiceAccount = Depends(_service_auth),
+):
+    resolved_user_id = (broadcaster_user_id or "").strip()
+    resolved_login = (broadcaster_login or "").strip().lower()
+    if not resolved_user_id and not resolved_login:
+        raise HTTPException(
+            status_code=422,
+            detail="Provide broadcaster_user_id or broadcaster_login",
+        )
+
+    async with session_factory() as session:
+        await _ensure_service_can_access_bot(session, service.id, bot_account_id)
+        bot = await session.get(BotAccount, bot_account_id)
+        if not bot:
+            raise HTTPException(status_code=404, detail="Bot not found")
+        if not bot.enabled:
+            raise HTTPException(status_code=409, detail="Bot is disabled")
+        token = await ensure_bot_access_token(session, twitch_client, bot)
+
+        if resolved_login and not resolved_user_id:
+            users = await twitch_client.get_users_by_query(token, logins=[resolved_login])
+            if not users:
+                raise HTTPException(status_code=404, detail="Broadcaster login not found")
+            resolved_user_id = str(users[0].get("id", "")).strip()
+            if not resolved_user_id:
+                raise HTTPException(status_code=502, detail="Twitch user lookup returned empty id")
+            resolved_login = str(users[0].get("login", resolved_login)).strip().lower()
+
+        state = await session.scalar(
+            select(ChannelState).where(
+                ChannelState.bot_account_id == bot_account_id,
+                ChannelState.broadcaster_user_id == resolved_user_id,
+            )
+        )
+        if refresh:
+            streams = await twitch_client.get_streams_by_user_ids(token, [resolved_user_id])
+            stream = streams[0] if streams else None
+            now = datetime.now(UTC)
+            if not state:
+                state = ChannelState(
+                    bot_account_id=bot_account_id,
+                    broadcaster_user_id=resolved_user_id,
+                    is_live=False,
+                )
+                session.add(state)
+            if stream:
+                state.is_live = True
+                state.title = stream.get("title")
+                state.game_name = stream.get("game_name")
+                raw_started = stream.get("started_at")
+                if raw_started:
+                    try:
+                        state.started_at = datetime.fromisoformat(raw_started.replace("Z", "+00:00"))
+                    except ValueError:
+                        state.started_at = None
+                else:
+                    state.started_at = None
+            else:
+                state.is_live = False
+                state.title = None
+                state.game_name = None
+                state.started_at = None
+            state.last_checked_at = now
+            await session.commit()
+
+        if not state:
+            raise HTTPException(
+                status_code=404,
+                detail="No cached stream state found. Retry with refresh=true.",
+            )
+
+        return {
+            "bot_account_id": str(bot_account_id),
+            "broadcaster_user_id": resolved_user_id,
+            "broadcaster_login": resolved_login or None,
+            "is_live": state.is_live,
+            "title": state.title,
+            "game_name": state.game_name,
+            "started_at": state.started_at.isoformat() if state.started_at else None,
+            "last_checked_at": state.last_checked_at.isoformat() if state.last_checked_at else None,
+            "source": "twitch" if refresh else "cache",
+        }
+
+
 @app.post("/v1/twitch/chat/messages", response_model=SendChatMessageResponse)
 async def send_twitch_chat_message(
     req: SendChatMessageRequest,

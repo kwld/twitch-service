@@ -127,6 +127,7 @@ bash ./scripts/run-dev.sh 8080
 - `GET /v1/twitch/profiles?bot_account_id=...&user_ids=...&logins=...` (service)
 - `GET /v1/twitch/streams/status?bot_account_id=...&broadcaster_user_ids=...` (service)
 - `GET /v1/twitch/streams/status/interested` (service)
+- `GET /v1/twitch/streams/live-test?bot_account_id=...&broadcaster_user_id=...` (service)
 - `POST /v1/twitch/chat/messages` (service)
 - `POST /v1/twitch/clips` (service)
 - `WS /ws/events?client_id=...&client_secret=...` (service)

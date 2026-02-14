@@ -78,6 +78,7 @@ LLM rule:
 - `GET /v1/twitch/profiles`
 - `GET /v1/twitch/streams/status`
 - `GET /v1/twitch/streams/status/interested`
+- `GET /v1/twitch/streams/live-test`
 
 ### Chat send
 - `POST /v1/twitch/chat/messages`
@@ -226,6 +227,29 @@ Behavior:
 
 ### `GET /v1/twitch/streams/status/interested`
 Returns cached stream rows for pairs derived from current service interests.
+
+### `GET /v1/twitch/streams/live-test`
+Purpose:
+- test if a single streamer is currently live for a connected service app.
+
+Query:
+- `bot_account_id` (required)
+- one of:
+  - `broadcaster_user_id`
+  - `broadcaster_login`
+- `refresh` (optional, default `true`)
+
+Behavior:
+- enforces service auth and bot-access policy.
+- resolves `broadcaster_login` to Twitch user id when needed.
+- with `refresh=true` (default):
+  - fetches current state from Twitch,
+  - upserts `channel_states`,
+  - returns `source=\"twitch\"`.
+- with `refresh=false`:
+  - returns cached state only,
+  - returns `404` if cache row does not exist,
+  - returns `source=\"cache\"`.
 
 ### `POST /v1/twitch/chat/messages`
 Request:
