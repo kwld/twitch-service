@@ -1547,6 +1547,10 @@ _SOCKET_IO_MISMATCH_MESSAGE = (
     "Socket.IO is not supported by this service. Use plain WebSocket endpoint "
     "/ws/events?client_id=<client_id>&client_secret=<client_secret>."
 )
+_WS_ENDPOINT_MISMATCH_MESSAGE = (
+    "Invalid WebSocket endpoint. Use /ws/events?client_id=<client_id>&client_secret=<client_secret>. "
+    "Socket.IO is not supported."
+)
 
 
 @app.get("/socket.io")
@@ -1568,6 +1572,23 @@ async def socketio_ws_mismatch(websocket: WebSocket):
     await websocket.accept()
     await websocket.send_text(_SOCKET_IO_MISMATCH_MESSAGE)
     await websocket.close(code=4400)
+
+
+@app.websocket("/{full_path:path}")
+async def websocket_path_mismatch(websocket: WebSocket, full_path: str):
+    if full_path == "ws/events":
+        await websocket.close(code=4404)
+        return
+    client_ip = _resolve_client_ip(
+        websocket.client.host if websocket.client else None,
+        websocket.headers.get("x-forwarded-for"),
+    )
+    if not _is_ip_allowed(client_ip):
+        await websocket.close(code=4403)
+        return
+    await websocket.accept()
+    await websocket.send_text(_WS_ENDPOINT_MISMATCH_MESSAGE)
+    await websocket.close(code=4404)
 
 
 def run() -> None:
