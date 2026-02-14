@@ -1,6 +1,7 @@
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import fs from "node:fs";
 
 import dotenv from "dotenv";
 import express from "express";
@@ -9,7 +10,9 @@ import WebSocket from "ws";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-dotenv.config({ path: path.join(__dirname, ".env") });
+const envTestPath = path.join(__dirname, ".env.test");
+const envPath = fs.existsSync(envTestPath) ? envTestPath : path.join(__dirname, ".env");
+dotenv.config({ path: envPath });
 
 const config = {
   port: Number.parseInt(process.env.TEST_APP_PORT ?? "9090", 10),

@@ -2,6 +2,10 @@
 __pycache__/
 *.pyc
 .env
+.env.test
+test-app/.env.test
+test-app/.run.err.log
+test-app/.run.out.log
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

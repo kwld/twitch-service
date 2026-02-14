@@ -76,6 +76,32 @@ logger = logging.getLogger("twitch-eventsub-service")
 TWITCH_WEBHOOK_PATH = "/webhooks/twitch/eventsub"
 
 
+def _normalize_broadcaster_id_or_login(raw: str) -> str:
+    """
+    Accept either a Twitch user id, a login, or a twitch.tv URL, and normalize to
+    a single token (id/login) without surrounding punctuation.
+    """
+    value = (raw or "").strip()
+    if not value:
+        return ""
+    if value.startswith(("http://", "https://")):
+        try:
+            split = urlsplit(value)
+            host = (split.netloc or "").lower()
+            if host.endswith("twitch.tv"):
+                path = (split.path or "").strip("/")
+                if path:
+                    value = path.split("/", 1)[0]
+        except Exception:
+            pass
+    value = value.strip().lstrip("@")
+    if "/" in value:
+        value = value.split("/", 1)[0]
+    if "?" in value:
+        value = value.split("?", 1)[0]
+    return value.strip()
+
+
 def _parse_allowed_ip_networks(raw: str) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
     values = [v.strip() for v in raw.split(",") if v.strip()]
     networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
@@ -1098,7 +1124,26 @@ async def create_interest(
     service: ServiceAccount = Depends(_service_auth),
 ):
     event_type = req.event_type.strip().lower()
-    broadcaster_user_id = req.broadcaster_user_id.strip()
+    raw_broadcaster = _normalize_broadcaster_id_or_login(req.broadcaster_user_id)
+    if not raw_broadcaster:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="broadcaster_user_id is required",
+        )
+    if raw_broadcaster.isdigit():
+        broadcaster_user_id = raw_broadcaster
+    else:
+        login = raw_broadcaster.lower()
+        try:
+            token = await twitch_client.app_access_token()
+            users = await twitch_client.get_users_by_query(token, logins=[login])
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Failed resolving broadcaster login: {exc}") from exc
+        if not users:
+            raise HTTPException(status_code=404, detail="Broadcaster login not found")
+        broadcaster_user_id = str(users[0].get("id", "")).strip()
+        if not broadcaster_user_id:
+            raise HTTPException(status_code=502, detail="Twitch user lookup returned empty id")
     webhook_url = str(req.webhook_url) if req.webhook_url else None
 
     if req.transport == "webhook" and not req.webhook_url:
@@ -1119,6 +1164,57 @@ async def create_interest(
         if not bot:
             raise HTTPException(status_code=404, detail="Bot not found")
         await _ensure_service_can_access_bot(session, service.id, req.bot_account_id)
+
+        # Best-effort: migrate any interests/channel state that previously stored a login/URL
+        # so the system doesn't stay permanently stale.
+        if raw_broadcaster != broadcaster_user_id:
+            legacy_id = raw_broadcaster
+            legacy_interests = list(
+                (
+                    await session.scalars(
+                        select(ServiceInterest).where(
+                            ServiceInterest.service_account_id == service.id,
+                            ServiceInterest.bot_account_id == req.bot_account_id,
+                            ServiceInterest.broadcaster_user_id == legacy_id,
+                        )
+                    )
+                ).all()
+            )
+            for legacy in legacy_interests:
+                dupe = await session.scalar(
+                    select(ServiceInterest).where(
+                        ServiceInterest.service_account_id == legacy.service_account_id,
+                        ServiceInterest.bot_account_id == legacy.bot_account_id,
+                        ServiceInterest.event_type == legacy.event_type,
+                        ServiceInterest.broadcaster_user_id == broadcaster_user_id,
+                        ServiceInterest.transport == legacy.transport,
+                        ServiceInterest.webhook_url == legacy.webhook_url,
+                    )
+                )
+                if dupe:
+                    await session.delete(legacy)
+                else:
+                    legacy.broadcaster_user_id = broadcaster_user_id
+
+            legacy_state = await session.scalar(
+                select(ChannelState).where(
+                    ChannelState.bot_account_id == req.bot_account_id,
+                    ChannelState.broadcaster_user_id == legacy_id,
+                )
+            )
+            if legacy_state:
+                dupe_state = await session.scalar(
+                    select(ChannelState).where(
+                        ChannelState.bot_account_id == req.bot_account_id,
+                        ChannelState.broadcaster_user_id == broadcaster_user_id,
+                    )
+                )
+                if dupe_state:
+                    await session.delete(legacy_state)
+                else:
+                    legacy_state.broadcaster_user_id = broadcaster_user_id
+            await session.commit()
+
         existing = await session.scalar(
             select(ServiceInterest).where(
                 ServiceInterest.service_account_id == service.id,
@@ -1292,7 +1388,10 @@ async def twitch_stream_status(
 
 
 @app.get("/v1/twitch/streams/status/interested")
-async def interested_stream_status(service: ServiceAccount = Depends(_service_auth)):
+async def interested_stream_status(
+    refresh: bool = False,
+    service: ServiceAccount = Depends(_service_auth),
+):
     async with session_factory() as session:
         interests = list(
             (
@@ -1302,6 +1401,50 @@ async def interested_stream_status(service: ServiceAccount = Depends(_service_au
             ).all()
         )
         pairs = {(i.bot_account_id, i.broadcaster_user_id) for i in interests}
+        if refresh and pairs:
+            token = await twitch_client.app_access_token()
+            unique_ids = sorted({str(uid) for _, uid in pairs if str(uid).isdigit()})
+            streams = await twitch_client.get_streams_by_user_ids(token, unique_ids) if unique_ids else []
+            live_by_id = {str(stream.get("user_id", "")): stream for stream in streams}
+            now = datetime.now(UTC)
+
+            for bot_id, broadcaster_user_id in pairs:
+                uid = str(broadcaster_user_id)
+                if not uid.isdigit():
+                    continue
+                stream = live_by_id.get(uid)
+                state = await session.scalar(
+                    select(ChannelState).where(
+                        ChannelState.bot_account_id == bot_id,
+                        ChannelState.broadcaster_user_id == uid,
+                    )
+                )
+                if not state:
+                    state = ChannelState(
+                        bot_account_id=bot_id,
+                        broadcaster_user_id=uid,
+                        is_live=False,
+                    )
+                    session.add(state)
+                if stream:
+                    state.is_live = True
+                    state.title = stream.get("title")
+                    state.game_name = stream.get("game_name")
+                    raw_started = stream.get("started_at")
+                    if raw_started:
+                        try:
+                            state.started_at = datetime.fromisoformat(raw_started.replace("Z", "+00:00"))
+                        except ValueError:
+                            state.started_at = None
+                    else:
+                        state.started_at = None
+                else:
+                    state.is_live = False
+                    state.title = None
+                    state.game_name = None
+                    state.started_at = None
+                state.last_checked_at = now
+            await session.commit()
         rows = []
         for bot_id, broadcaster_user_id in pairs:
             state = await session.scalar(
