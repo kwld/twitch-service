@@ -1570,6 +1570,56 @@ async def twitch_stream_live_test(
         }
 
 
+@app.get("/v1/twitch/streams/live-public")
+async def twitch_stream_live_public(
+    broadcaster: str,
+    service: ServiceAccount = Depends(_service_auth),
+):
+    """
+    Public live status check (no bot required).
+    Uses the app token to resolve the broadcaster and check Helix streams.
+    """
+    _ = service  # service auth required; value not otherwise used here.
+    token = await twitch_client.app_access_token()
+
+    raw = _normalize_broadcaster_id_or_login(broadcaster)
+    if not raw:
+        raise HTTPException(status_code=422, detail="Provide broadcaster (id/login/url)")
+
+    resolved_user_id = raw if raw.isdigit() else ""
+    resolved_login = "" if raw.isdigit() else raw.lower()
+
+    if resolved_login and not resolved_user_id:
+        users = await twitch_client.get_users_by_query(token, logins=[resolved_login])
+        if not users:
+            raise HTTPException(status_code=404, detail="Broadcaster login not found")
+        resolved_user_id = str(users[0].get("id", "")).strip()
+        if not resolved_user_id:
+            raise HTTPException(status_code=502, detail="Twitch user lookup returned empty id")
+        resolved_login = str(users[0].get("login", resolved_login)).strip().lower()
+
+    streams = await twitch_client.get_streams_by_user_ids(token, [resolved_user_id])
+    stream = streams[0] if streams else None
+
+    out: dict[str, object] = {
+        "broadcaster_user_id": resolved_user_id,
+        "broadcaster_login": resolved_login or None,
+        "is_live": bool(stream),
+        "source": "twitch",
+    }
+    if stream:
+        out.update(
+            {
+                "title": stream.get("title"),
+                "game_name": stream.get("game_name"),
+                "started_at": stream.get("started_at"),
+                "viewer_count": stream.get("viewer_count"),
+                "stream_id": stream.get("id"),
+            }
+        )
+    return out
+
+
 @app.post("/v1/twitch/chat/messages", response_model=SendChatMessageResponse)
 async def send_twitch_chat_message(
     req: SendChatMessageRequest,
