@@ -190,6 +190,12 @@ class EventSubManager:
         keys = await self.registry.keys()
         return any(self._transport_for_event(key.event_type) == "websocket" for key in keys)
 
+    async def _has_stream_state_interest(self) -> bool:
+        # stream.online/offline are used to keep ChannelState accurate even when no
+        # services are currently connected to this bridge.
+        keys = await self.registry.keys()
+        return any(key.event_type in {"stream.online", "stream.offline"} for key in keys)
+
     async def _run_single_connection(self, reconnect_url: str | None) -> None:
         target_url = reconnect_url or self.ws_url
         async with websockets.connect(target_url, max_size=4 * 1024 * 1024) as ws:
@@ -234,6 +240,10 @@ class EventSubManager:
                     continue
 
     async def _websocket_listener_cooldown_remaining(self) -> timedelta | None:
+        # Keep EventSub stream state subscriptions active even if no downstream services are connected.
+        if await self._has_stream_state_interest():
+            self._zero_listener_since = None
+            return None
         active_ws, latest_disconnect = await self._service_ws_listener_activity()
         if active_ws > 0:
             self._zero_listener_since = None
