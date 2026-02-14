@@ -223,6 +223,48 @@ class TwitchClient:
         }
         async with httpx.AsyncClient(timeout=20) as client:
             resp = await client.post(f"{HELIX_BASE}/eventsub/subscriptions", headers=headers, json=body)
+        if resp.status_code == 409:
+            # Twitch returns 409 Conflict with message "subscription already exists" when a subscription
+            # with the same type/condition/transport already exists. Treat as idempotent create.
+            def _cond_match(existing: dict[str, Any], desired: dict[str, str]) -> bool:
+                for k, v in desired.items():
+                    if str(existing.get(k, "")) != str(v):
+                        return False
+                return True
+
+            def _transport_match(existing: dict[str, Any], desired: dict[str, str]) -> bool:
+                if str(existing.get("method", "")) != str(desired.get("method", "")):
+                    return False
+                method = str(desired.get("method", ""))
+                if method == "websocket":
+                    # If we requested a specific session_id, require exact match.
+                    desired_session = str(desired.get("session_id", ""))
+                    if desired_session and str(existing.get("session_id", "")) != desired_session:
+                        return False
+                if method == "webhook":
+                    desired_callback = str(desired.get("callback", ""))
+                    if desired_callback and str(existing.get("callback", "")) != desired_callback:
+                        return False
+                return True
+
+            try:
+                subs = await self.list_eventsub_subscriptions(access_token=token)
+                for sub in subs:
+                    if str(sub.get("type", "")) != str(event_type):
+                        continue
+                    # version may be absent in some payloads; only enforce when present.
+                    sub_version = sub.get("version")
+                    if sub_version is not None and str(sub_version) != str(version):
+                        continue
+                    if not _cond_match(sub.get("condition", {}) or {}, condition):
+                        continue
+                    if not _transport_match(sub.get("transport", {}) or {}, transport):
+                        continue
+                    return sub
+            except Exception:
+                # Fall through to the normal error below.
+                pass
+            raise TwitchApiError(f"Failed creating subscription (409 already exists): {resp.text}")
         if resp.status_code >= 300:
             raise TwitchApiError(f"Failed creating subscription: {resp.text}")
         data = resp.json().get("data", [])
