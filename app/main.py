@@ -1543,6 +1543,33 @@ async def ws_events(websocket: WebSocket, client_id: str = Query(), client_secre
         await event_hub.disconnect(service.id, websocket)
 
 
+_SOCKET_IO_MISMATCH_MESSAGE = (
+    "Socket.IO is not supported by this service. Use plain WebSocket endpoint "
+    "/ws/events?client_id=<client_id>&client_secret=<client_secret>."
+)
+
+
+@app.get("/socket.io")
+@app.get("/socket.io/")
+async def socketio_http_mismatch() -> PlainTextResponse:
+    return PlainTextResponse(_SOCKET_IO_MISMATCH_MESSAGE, status_code=426)
+
+
+@app.websocket("/socket.io")
+@app.websocket("/socket.io/")
+async def socketio_ws_mismatch(websocket: WebSocket):
+    client_ip = _resolve_client_ip(
+        websocket.client.host if websocket.client else None,
+        websocket.headers.get("x-forwarded-for"),
+    )
+    if not _is_ip_allowed(client_ip):
+        await websocket.close(code=4403)
+        return
+    await websocket.accept()
+    await websocket.send_text(_SOCKET_IO_MISMATCH_MESSAGE)
+    await websocket.close(code=4400)
+
+
 def run() -> None:
     uvicorn.run(
         "app.main:app",
