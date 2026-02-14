@@ -249,6 +249,26 @@ Query:
 Response:
 - Includes `badges.global`, `badges.channel`, `emotes.global`, `emotes.channel` in the same shapes Twitch Helix returns.
 
+Notes / Mapping rules (aligned with Twitch docs):
+- EventSub chat payloads include:
+  - `event.badges[]` entries with `set_id` + `id` (badge version id).
+  - `event.message.fragments[]` entries of `type=emote` with `fragment.emote.id`.
+- To render badges:
+  - look up `set_id` + `id` in `badges.global.data[].versions[]` and `badges.channel.data[].versions[]`.
+- To render emotes:
+  - look up `fragment.emote.id` in `emotes.global.data[]` and `emotes.channel.data[]`.
+- Webhook and WebSocket EventSub notifications use the same `subscription` and `event` objects (only metadata differs).
+
+References (Twitch official docs):
+- Helix API reference: chat badges.
+  - `GET /helix/chat/badges/global` (Get Global Chat Badges): https://dev.twitch.tv/docs/api/reference#get-global-chat-badges
+  - `GET /helix/chat/badges?broadcaster_id=...` (Get Channel Chat Badges): https://dev.twitch.tv/docs/api/reference#get-channel-chat-badges
+- Helix API reference: emotes.
+  - `GET /helix/chat/emotes/global` (Get Global Emotes): https://dev.twitch.tv/docs/api/reference#get-global-emotes
+  - `GET /helix/chat/emotes?broadcaster_id=...` (Get Channel Emotes): https://dev.twitch.tv/docs/api/reference#get-channel-emotes
+- EventSub reference: chat message structure (badges + message fragments/emotes).
+  - `channel.chat.message`: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types/#channelchatmessage
+
 ### `GET /v1/twitch/streams/live-test`
 Purpose:
 - test if a single streamer is currently live for a connected service app.
