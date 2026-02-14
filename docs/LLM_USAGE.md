@@ -111,6 +111,11 @@ Validation behavior:
 - `event_type` must exist in known catalog.
 - `transport=webhook` requires `webhook_url`.
 - bot must exist and be accessible by service policy.
+- `broadcaster_user_id` may be:
+  - a numeric Twitch user id (preferred),
+  - a Twitch login (e.g. `rajskikwiat`),
+  - a Twitch channel URL (e.g. `https://www.twitch.tv/rajskikwiat`).
+  The API resolves logins/URLs to a numeric user id before persisting.
 - dedupe key:
   - `(service_account_id, bot_account_id, event_type, broadcaster_user_id, transport, webhook_url)`
 
@@ -227,6 +232,10 @@ Behavior:
 
 ### `GET /v1/twitch/streams/status/interested`
 Returns cached stream rows for pairs derived from current service interests.
+
+Optional query:
+- `refresh` (bool, default `false`)
+  - when `true`, the API refreshes stream state from Twitch Helix using the app token, updates `channel_states`, then returns the refreshed rows.
 
 ### `GET /v1/twitch/streams/live-test`
 Purpose:
@@ -388,17 +397,18 @@ LLM rule:
 
 ## 10) Strict LLM Playbook
 1. Authenticate once with `GET /v1/interests`.
-2. Fetch `GET /v1/bots/accessible`; choose only listed bot.
-3. Fetch catalog `GET /v1/eventsub/subscription-types`.
-4. If your product requires Twitch end-user login, run service user-auth (`/v1/user-auth/start` then poll `/v1/user-auth/session/{state}`).
-5. If target channel requires channel grant, start and complete broadcaster auth.
-6. Create interests.
-7. Open websocket and/or webhook receiver.
-8. Heartbeat interests while active.
-9. On each incoming webhook, verify it is still desired; if not desired, delete matching webhook interests immediately.
-10. Send chat with chosen `auth_mode`.
-11. Create clips with `POST /v1/twitch/clips` when needed.
-12. Delete interests when no longer needed.
+1. Fetch `GET /v1/bots/accessible`; choose only listed bot.
+1. Fetch catalog `GET /v1/eventsub/subscription-types`.
+1. If your product requires Twitch end-user login, run service user-auth (`/v1/user-auth/start` then poll `/v1/user-auth/session/{state}`).
+1. If target channel requires channel grant, start and complete broadcaster auth.
+1. Create interests.
+1. If you need authoritative live status for interested channels, call `GET /v1/twitch/streams/status/interested?refresh=true` (or use `/v1/twitch/streams/live-test` for a single channel).
+1. Open websocket and/or webhook receiver.
+1. Heartbeat interests while active.
+1. On each incoming webhook, verify it is still desired; if not desired, delete matching webhook interests immediately.
+1. Send chat with chosen `auth_mode`.
+1. Create clips with `POST /v1/twitch/clips` when needed.
+1. Delete interests when no longer needed.
 
 ## 11) Non-Service Endpoints (Admin/Operator)
 For completeness:

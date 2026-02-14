@@ -14,6 +14,7 @@ What it can test:
 
 ## 1) Setup
 1. Copy `.env.example` to `.env`.
+   - If you prefer to keep secrets separate, create `.env.test` instead. If `.env.test` exists, the test app loads it first.
 2. Fill required fields:
    - `SERVICE_BASE_URL`
    - `SERVICE_CLIENT_ID`

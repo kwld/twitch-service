@@ -9,7 +9,7 @@ This guide walks through a complete local run:
 
 ## 1) Prerequisites
 - Python 3.11+
-- Node.js 18+
+- Node.js 20+ (required by `test-app/package.json`)
 - Docker Desktop or Podman Desktop (for local PostgreSQL)
 - Twitch app credentials (`TWITCH_CLIENT_ID`, `TWITCH_CLIENT_SECRET`)
 
@@ -107,6 +107,9 @@ Set in `test-app/.env`:
 - `SERVICE_CLIENT_SECRET=<value from step 6>`
 - optional: `TEST_WEBHOOK_PUBLIC_URL=<public url ending with /service-webhook>`
 
+Alternative (recommended for local secrets you never want to commit):
+- create `test-app/.env.test` instead of `test-app/.env` (the test app loads `.env.test` first when present).
+
 ## 9) Install And Start Test App
 From `test-app/`:
 
@@ -122,12 +125,16 @@ Open:
 In the test app UI:
 1. Click refresh/status to verify service auth works.
 2. Load/select an accessible bot.
-3. Enter broadcaster ID (or resolve username to ID).
+3. Enter broadcaster user id, login, or full Twitch URL (or resolve username to ID).
 4. Optional but recommended for channel bot actions: start broadcaster grant and complete Twitch consent.
 5. Connect service websocket.
 6. Create interest (example: `channel.chat.message`, transport `websocket`).
 7. Trigger an event (send a chat message or go live/offline depending on selected event type).
 8. Confirm incoming envelope appears in live log.
+
+Live status note:
+- `GET /v1/twitch/streams/status/interested` returns cached `ChannelState`.
+- Use `GET /v1/twitch/streams/status/interested?refresh=true` to force-refresh from Twitch Helix.
 
 Expected envelope fields include:
 - `id`

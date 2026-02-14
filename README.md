@@ -127,10 +127,15 @@ bash ./scripts/run-dev.sh 8080
 - `GET /v1/twitch/profiles?bot_account_id=...&user_ids=...&logins=...` (service)
 - `GET /v1/twitch/streams/status?bot_account_id=...&broadcaster_user_ids=...` (service)
 - `GET /v1/twitch/streams/status/interested` (service)
+- `GET /v1/twitch/streams/status/interested?refresh=true` (service)
 - `GET /v1/twitch/streams/live-test?bot_account_id=...&broadcaster_user_id=...` (service)
 - `POST /v1/twitch/chat/messages` (service)
 - `POST /v1/twitch/clips` (service)
 - `WS /ws/events?client_id=...&client_secret=...` (service)
+
+Note on live status:
+- `GET /v1/twitch/streams/status/interested` returns cached `ChannelState`.
+- Use `GET /v1/twitch/streams/status/interested?refresh=true` to force-refresh from Twitch Helix.
 
 ### Service Event Envelope
 Events delivered via service websocket (`/ws/events`) and service webhooks include:
@@ -171,6 +176,12 @@ For `transport=webhook`, `webhook_url` is required.
 `POST /v1/interests` also:
 - validates `event_type` against the known Twitch EventSub catalog,
 - deduplicates per-service interests (same service + bot + event_type + broadcaster + transport + webhook_url).
+
+`broadcaster_user_id` input:
+- preferred: numeric Twitch user id (string).
+- also accepted: Twitch login (e.g. `rajskikwiat`) or a Twitch channel URL (e.g. `https://www.twitch.tv/rajskikwiat`).
+  - the API resolves logins/URLs to numeric user ids before persisting.
+  - best-effort migration: if older interests/channel state rows stored a login/URL, the API will migrate them to the resolved numeric id.
 
 Interests should be heartbeated periodically by client services:
 - call `POST /v1/interests/{interest_id}/heartbeat`
