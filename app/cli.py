@@ -20,6 +20,7 @@ from app.models import (
     Base,
     BotAccount,
     BroadcasterAuthorization,
+    ChannelState,
     OAuthCallback,
     ServiceAccount,
     ServiceBotAccess,
@@ -1203,6 +1204,55 @@ async def list_broadcaster_authorizations_menu(session_factory) -> None:
         )
 
 
+async def list_tracked_channels_menu(session: PromptSession, session_factory) -> None:
+    only_live = await ask_yes_no(session, "Show only live channels?", default_yes=False)
+    raw_limit = (await session.prompt_async("Limit [200]: ")).strip()
+    try:
+        limit = int(raw_limit) if raw_limit else 200
+    except ValueError:
+        print("Invalid limit; using 200.")
+        limit = 200
+    limit = max(1, min(limit, 5000))
+
+    async with session_factory() as db:
+        bots = list((await db.scalars(select(BotAccount))).all())
+        bot_name_by_id = {b.id: b.name for b in bots}
+        states = list((await db.scalars(select(ChannelState))).all())
+
+    if only_live:
+        states = [s for s in states if s.is_live]
+
+    def _sort_key(row: ChannelState):
+        # live first; then latest checked first (None last)
+        ts = row.last_checked_at.timestamp() if row.last_checked_at else 0.0
+        return (not row.is_live, -ts, str(row.bot_account_id), row.broadcaster_user_id)
+
+    states = sorted(states, key=_sort_key)[:limit]
+    live_count = sum(1 for s in states if s.is_live)
+
+    print(
+        f"\nTracked channels (channel_states): showing={len(states)} live={live_count} "
+        f"filter={'live_only' if only_live else 'all'}"
+    )
+    if not states:
+        return
+    for s in states:
+        bot_name = bot_name_by_id.get(s.bot_account_id, str(s.bot_account_id))
+        started = s.started_at.isoformat() if s.started_at else "-"
+        checked = s.last_checked_at.isoformat() if s.last_checked_at else "-"
+        title = (s.title or "").replace("\n", " ").strip()
+        game = (s.game_name or "").replace("\n", " ").strip()
+        if title:
+            title = title[:120]
+        if game:
+            game = game[:60]
+        print(
+            f"- bot={bot_name} broadcaster={s.broadcaster_user_id} live={s.is_live} "
+            f"started_at={started} last_checked_at={checked} "
+            f"title={title or '-'} game={game or '-'}"
+        )
+
+
 async def menu_loop() -> None:
     settings, engine, session_factory = await init_db()
     twitch = TwitchClient(
@@ -1229,7 +1279,8 @@ async def menu_loop() -> None:
             "10) View service status and usage\n"
             "11) View broadcaster authorizations\n"
             "12) Create clip\n"
-            "13) Exit\n"
+            "13) View tracked channels (online/offline)\n"
+            "14) Exit\n"
         )
         choice = (await session.prompt_async("Select option: ")).strip()
 
@@ -1323,6 +1374,9 @@ async def menu_loop() -> None:
             await create_clip_menu(session, session_factory, twitch)
 
         elif choice == "13":
+            await list_tracked_channels_menu(session, session_factory)
+
+        elif choice == "14":
             break
 
         else:
