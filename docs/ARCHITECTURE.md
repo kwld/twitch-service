@@ -21,6 +21,7 @@ At app startup (`lifespan` in `app/main.py`):
    - fetch current Twitch EventSub subscriptions and reconcile local DB subscription rows,
    - ensure `user.authorization.revoke` webhook subscription exists,
    - ensure configured webhook-routed event subscriptions exist,
+   - refresh stream states for channels represented by active `stream.online`/`stream.offline` EventSub subscriptions (Helix confirmation),
    - refresh stream states for channels currently represented by interests.
 3. Start EventSub manager loop tasks:
    - websocket manager loop (upstream Twitch EventSub),

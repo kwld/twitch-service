@@ -69,6 +69,7 @@ class EventSubManager:
         await self._sync_from_twitch_and_reconcile()
         await self._ensure_authorization_revoke_subscription()
         await self._ensure_webhook_subscriptions()
+        await self._refresh_stream_states_for_active_subscriptions()
         await self._refresh_stream_states_for_interested_channels()
         self._task = asyncio.create_task(self._run(), name="eventsub-manager")
         self._cleanup_task = asyncio.create_task(
@@ -215,6 +216,7 @@ class EventSubManager:
                     self._session_id = payload["session"]["id"]
                     await self._sync_from_twitch_and_reconcile()
                     await self._ensure_all_subscriptions()
+                    await self._refresh_stream_states_for_active_subscriptions()
                     await self._refresh_stream_states_for_interested_channels()
                     continue
                 if msg_type == "session_reconnect":
@@ -275,6 +277,10 @@ class EventSubManager:
     async def _sync_from_twitch_and_reconcile(self) -> None:
         subs = await self.twitch.list_eventsub_subscriptions()
         async with self.session_factory() as session:
+            previous_sub_owner = {
+                row.twitch_subscription_id: row.bot_account_id
+                for row in list((await session.scalars(select(TwitchSubscription))).all())
+            }
             await session.execute(delete(TwitchSubscription))
             for sub in subs:
                 condition = sub.get("condition", {})
@@ -300,9 +306,12 @@ class EventSubManager:
                         select(BotAccount).where(BotAccount.twitch_user_id == bot_user_id)
                     )
                 else:
-                    bot = await session.scalar(
-                        select(BotAccount).where(BotAccount.twitch_user_id == broadcaster_user_id)
-                    )
+                    previous_bot_id = previous_sub_owner.get(sub_id)
+                    bot = await session.get(BotAccount, previous_bot_id) if previous_bot_id else None
+                    if not bot:
+                        bot = await session.scalar(
+                            select(BotAccount).where(BotAccount.twitch_user_id == broadcaster_user_id)
+                        )
                 if not bot:
                     continue
                 if (
@@ -567,27 +576,22 @@ class EventSubManager:
             return datetime.fromisoformat(raw.replace("Z", "+00:00"))
         return None
 
-    async def _refresh_stream_states_for_interested_channels(self) -> None:
-        keys = await self.registry.keys()
-        per_bot: dict = {}
-        for key in keys:
-            if key.event_type == "user.authorization.revoke":
-                continue
-            per_bot.setdefault(key.bot_account_id, set()).add(key.broadcaster_user_id)
+    async def _refresh_stream_states_for_bot_targets(self, per_bot: dict) -> None:
         if not per_bot:
             return
+        # Stream online/offline state should reflect real Twitch state even if bot tokens are stale/disabled,
+        # so use app token for Helix streams lookup.
+        token = await self.twitch.app_access_token()
         async with self.session_factory() as session:
             for bot_id, broadcaster_ids in per_bot.items():
-                bot = await session.get(BotAccount, bot_id)
-                if not bot or not bot.enabled:
+                if not broadcaster_ids:
                     continue
                 try:
-                    bot_token = await ensure_bot_access_token(session, self.twitch, bot)
-                    live_streams = []
+                    live_streams: list[dict] = []
                     broadcaster_list = list(broadcaster_ids)
                     for idx in range(0, len(broadcaster_list), 100):
                         chunk = broadcaster_list[idx : idx + 100]
-                        live_streams.extend(await self.twitch.get_streams_by_user_ids(bot_token, chunk))
+                        live_streams.extend(await self.twitch.get_streams_by_user_ids(token, chunk))
                 except Exception as exc:
                     logger.warning("Failed refreshing stream states for bot %s: %s", bot_id, exc)
                     continue
@@ -619,3 +623,35 @@ class EventSubManager:
                         state.started_at = None
                     state.last_checked_at = datetime.now(UTC)
             await session.commit()
+
+    async def _refresh_stream_states_for_active_subscriptions(self) -> None:
+        per_bot: dict = {}
+        async with self.session_factory() as session:
+            stream_subs = list(
+                (
+                    await session.scalars(
+                        select(TwitchSubscription).where(
+                            TwitchSubscription.event_type.in_(("stream.online", "stream.offline"))
+                        )
+                    )
+                ).all()
+            )
+        for sub in stream_subs:
+            per_bot.setdefault(sub.bot_account_id, set()).add(sub.broadcaster_user_id)
+        if per_bot:
+            total = sum(len(v) for v in per_bot.values())
+            logger.info(
+                "Refreshing stream state from active subscriptions: bots=%d targets=%d",
+                len(per_bot),
+                total,
+            )
+        await self._refresh_stream_states_for_bot_targets(per_bot)
+
+    async def _refresh_stream_states_for_interested_channels(self) -> None:
+        keys = await self.registry.keys()
+        per_bot: dict = {}
+        for key in keys:
+            if key.event_type == "user.authorization.revoke":
+                continue
+            per_bot.setdefault(key.bot_account_id, set()).add(key.broadcaster_user_id)
+        await self._refresh_stream_states_for_bot_targets(per_bot)
