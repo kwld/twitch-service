@@ -70,6 +70,7 @@ from app.schemas import (
     UserAuthorizationSessionResponse,
 )
 from app.twitch import TwitchClient
+from app.twitch_chat_assets import TwitchChatAssetCache
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("twitch-eventsub-service")
@@ -132,6 +133,7 @@ twitch_client = TwitchClient(
     scopes=settings.twitch_scopes,
     eventsub_ws_url=settings.twitch_eventsub_ws_url,
 )
+chat_assets = TwitchChatAssetCache(twitch_client)
 interest_registry = InterestRegistry()
 event_hub = LocalEventHub()
 eventsub_manager = EventSubManager(
@@ -139,6 +141,7 @@ eventsub_manager = EventSubManager(
     session_factory,
     interest_registry,
     event_hub,
+    chat_assets=chat_assets,
     webhook_event_types={
         x.strip()
         for x in settings.twitch_eventsub_webhook_event_types.split(",")
@@ -1618,6 +1621,52 @@ async def twitch_stream_live_public(
             }
         )
     return out
+
+
+@app.get("/v1/twitch/chat/assets")
+async def twitch_chat_assets(
+    broadcaster: str,
+    refresh: bool = False,
+    service: ServiceAccount = Depends(_service_auth),
+):
+    """
+    Returns Twitch chat rendering assets for a broadcaster:
+    - global + channel badges
+    - global + channel emotes
+
+    Intended to help services render incoming `channel.chat.*` notifications.
+    """
+    _ = service
+    token = await twitch_client.app_access_token()
+
+    raw = _normalize_broadcaster_id_or_login(broadcaster)
+    if not raw:
+        raise HTTPException(status_code=422, detail="Provide broadcaster (id/login/url)")
+
+    if raw.isdigit():
+        broadcaster_user_id = raw
+        broadcaster_login = None
+    else:
+        login = raw.lower()
+        users = await twitch_client.get_users_by_query(token, logins=[login])
+        if not users:
+            raise HTTPException(status_code=404, detail="Broadcaster login not found")
+        broadcaster_user_id = str(users[0].get("id", "")).strip()
+        broadcaster_login = str(users[0].get("login", login)).strip().lower()
+        if not broadcaster_user_id:
+            raise HTTPException(status_code=502, detail="Twitch user lookup returned empty id")
+
+    if refresh:
+        await chat_assets.refresh(broadcaster_user_id)
+    else:
+        await chat_assets.prefetch(broadcaster_user_id)
+
+    snapshot = await chat_assets.snapshot(broadcaster_user_id)
+    return {
+        "broadcaster_user_id": broadcaster_user_id,
+        "broadcaster_login": broadcaster_login,
+        **snapshot,
+    }
 
 
 @app.post("/v1/twitch/chat/messages", response_model=SendChatMessageResponse)

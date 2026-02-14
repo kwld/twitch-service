@@ -79,6 +79,7 @@ LLM rule:
 - `GET /v1/twitch/streams/status`
 - `GET /v1/twitch/streams/status/interested`
 - `GET /v1/twitch/streams/live-test`
+- `GET /v1/twitch/chat/assets`
 
 ### Chat send
 - `POST /v1/twitch/chat/messages`
@@ -237,6 +238,17 @@ Optional query:
 - `refresh` (bool, default `false`)
   - when `true`, the API refreshes stream state from Twitch Helix using the app token, updates `channel_states`, then returns the refreshed rows.
 
+### `GET /v1/twitch/chat/assets`
+Purpose:
+- Fetch chat rendering assets (badges + emotes) for a broadcaster, to render incoming `channel.chat.*` notifications.
+
+Query:
+- `broadcaster` (required): numeric id, login, or Twitch channel URL.
+- `refresh` (optional, default `false`): when `true`, force-refreshes the in-service cache from Twitch before returning.
+
+Response:
+- Includes `badges.global`, `badges.channel`, `emotes.global`, `emotes.channel` in the same shapes Twitch Helix returns.
+
 ### `GET /v1/twitch/streams/live-test`
 Purpose:
 - test if a single streamer is currently live for a connected service app.
@@ -364,6 +376,11 @@ Envelope shape emitted by local hub:
   "event": {}
 }
 ```
+
+Optional enrichment (backward compatible):
+- For `type` starting with `channel.chat.` the envelope may include:
+  - `twitch_chat_assets`: best-effort lookup payload containing badge/emote image metadata referenced by the message.
+  - Old clients should ignore unknown top-level keys.
 
 ## 8) Upstream Twitch EventSub Routing
 Routing to Twitch transport is decided by manager:

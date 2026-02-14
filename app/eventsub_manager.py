@@ -22,6 +22,7 @@ from app.models import (
     TwitchSubscription,
 )
 from app.twitch import TwitchApiError, TwitchClient
+from app.twitch_chat_assets import TwitchChatAssetCache
 
 logger = logging.getLogger(__name__)
 WS_LISTENER_COOLDOWN = timedelta(minutes=5)
@@ -34,6 +35,7 @@ class EventSubManager:
         session_factory: async_sessionmaker,
         registry: InterestRegistry,
         event_hub: LocalEventHub,
+        chat_assets: TwitchChatAssetCache | None = None,
         webhook_event_types: set[str] | None = None,
         webhook_callback_url: str | None = None,
         webhook_secret: str | None = None,
@@ -43,6 +45,7 @@ class EventSubManager:
         self.session_factory = session_factory
         self.registry = registry
         self.event_hub = event_hub
+        self.chat_assets = chat_assets
         self.webhook_event_types = {event.strip() for event in (webhook_event_types or set()) if event.strip()}
         self.webhook_callback_url = webhook_callback_url
         self.webhook_secret = webhook_secret
@@ -89,6 +92,9 @@ class EventSubManager:
 
     async def on_interest_added(self, key: InterestKey) -> None:
         await self._ensure_subscription(key)
+        if self.chat_assets and key.event_type.startswith("channel.chat."):
+            # Prefetch badges/emotes for faster first-message rendering downstream.
+            self.chat_assets.prefetch(key.broadcaster_user_id)
 
     async def on_interest_removed(self, key: InterestKey, still_used: bool) -> None:
         if still_used:
@@ -511,6 +517,11 @@ class EventSubManager:
             event_type=event_type,
             event=event,
         )
+        if self.chat_assets and str(event_type).startswith("channel.chat."):
+            # Optional enrichment; old clients ignore unknown keys.
+            enriched = await self.chat_assets.enrich_chat_event(broadcaster_user_id, event)
+            if enriched:
+                envelope["twitch_chat_assets"] = enriched
         await self._update_channel_state_from_event(bot.id, event_type, broadcaster_user_id, event)
         for interest in interests:
             if interest.transport == "webhook" and interest.webhook_url:

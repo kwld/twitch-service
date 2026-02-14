@@ -357,3 +357,47 @@ class TwitchClient:
         if resp.status_code >= 300:
             raise TwitchApiError(f"Failed getting clips: {resp.text}")
         return resp.json().get("data", [])
+
+    async def get_global_chat_badges(self, access_token: str | None = None) -> dict[str, Any]:
+        token = access_token or await self.app_access_token()
+        headers = {"Authorization": f"Bearer {token}", "Client-Id": self.client_id}
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(f"{HELIX_BASE}/chat/badges/global", headers=headers)
+        if resp.status_code >= 300:
+            raise TwitchApiError(f"Failed getting global chat badges: {resp.text}")
+        return resp.json()
+
+    async def get_channel_chat_badges(self, broadcaster_id: str, access_token: str | None = None) -> dict[str, Any]:
+        token = access_token or await self.app_access_token()
+        headers = {"Authorization": f"Bearer {token}", "Client-Id": self.client_id}
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(
+                f"{HELIX_BASE}/chat/badges",
+                headers=headers,
+                params={"broadcaster_id": broadcaster_id},
+            )
+        if resp.status_code >= 300:
+            raise TwitchApiError(f"Failed getting channel chat badges: {resp.text}")
+        return resp.json()
+
+    async def get_global_emotes(self, access_token: str | None = None) -> dict[str, Any]:
+        token = access_token or await self.app_access_token()
+        headers = {"Authorization": f"Bearer {token}", "Client-Id": self.client_id}
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(f"{HELIX_BASE}/chat/emotes/global", headers=headers)
+        if resp.status_code >= 300:
+            raise TwitchApiError(f"Failed getting global emotes: {resp.text}")
+        return resp.json()
+
+    async def get_channel_emotes(self, broadcaster_id: str, access_token: str | None = None) -> dict[str, Any]:
+        token = access_token or await self.app_access_token()
+        headers = {"Authorization": f"Bearer {token}", "Client-Id": self.client_id}
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(
+                f"{HELIX_BASE}/chat/emotes",
+                headers=headers,
+                params={"broadcaster_id": broadcaster_id},
+            )
+        if resp.status_code >= 300:
+            raise TwitchApiError(f"Failed getting channel emotes: {resp.text}")
+        return resp.json()

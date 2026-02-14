@@ -129,6 +129,7 @@ bash ./scripts/run-dev.sh 8080
 - `GET /v1/twitch/streams/status/interested` (service)
 - `GET /v1/twitch/streams/status/interested?refresh=true` (service)
 - `GET /v1/twitch/streams/live-test?bot_account_id=...&broadcaster_user_id=...` (service)
+- `GET /v1/twitch/chat/assets?broadcaster=...&refresh=false` (service)
 - `POST /v1/twitch/chat/messages` (service)
 - `POST /v1/twitch/clips` (service)
 - `WS /ws/events?client_id=...&client_secret=...` (service)
@@ -148,6 +149,10 @@ Events delivered via service websocket (`/ws/events`) and service webhooks inclu
   "event": {}
 }
 ```
+
+Optional enrichment (backward compatible):
+- For `type` starting with `channel.chat.` the service may include `twitch_chat_assets` in the envelope.
+- Old clients should ignore unknown top-level keys.
 
 ### Service Bot Access Policy
 - Services can be restricted to a subset of bots.
