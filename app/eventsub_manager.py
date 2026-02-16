@@ -290,8 +290,31 @@ class EventSubManager:
                 await session.delete(db_sub)
             await session.commit()
 
+    @staticmethod
+    def _is_subscription_not_found_error(exc: TwitchApiError) -> bool:
+        message = str(exc).lower()
+        return "not found" in message or "does not exist" in message
+
+    async def _list_eventsub_subscriptions_all_tokens(self) -> list[dict]:
+        merged: dict[str, dict] = {}
+        with suppress(TwitchApiError):
+            for sub in await self.twitch.list_eventsub_subscriptions():
+                sub_id = str(sub.get("id", ""))
+                if sub_id:
+                    merged[sub_id] = sub
+        async with self.session_factory() as session:
+            bots = list((await session.scalars(select(BotAccount).where(BotAccount.enabled.is_(True)))).all())
+            for bot in bots:
+                with suppress(Exception):
+                    token = await ensure_bot_access_token(session, self.twitch, bot)
+                    for sub in await self.twitch.list_eventsub_subscriptions(access_token=token):
+                        sub_id = str(sub.get("id", ""))
+                        if sub_id:
+                            merged[sub_id] = sub
+        return list(merged.values())
+
     async def _sync_from_twitch_and_reconcile(self) -> None:
-        subs = await self.twitch.list_eventsub_subscriptions()
+        subs = await self._list_eventsub_subscriptions_all_tokens()
         async with self.session_factory() as session:
             previous_sub_owner = {
                 row.twitch_subscription_id: row.bot_account_id
@@ -417,16 +440,26 @@ class EventSubManager:
                 if upstream_transport == "websocket" and db_sub.session_id == self._session_id:
                     return
             if db_sub and db_sub.twitch_subscription_id:
-                with suppress(TwitchApiError):
-                    delete_access_token: str | None = None
-                    if key.event_type.startswith("channel.chat."):
-                        bot = await session.get(BotAccount, key.bot_account_id)
-                        if bot and bot.enabled:
-                            with suppress(Exception):
-                                delete_access_token = await ensure_bot_access_token(session, self.twitch, bot)
+                delete_access_token: str | None = None
+                if key.event_type.startswith("channel.chat."):
+                    bot = await session.get(BotAccount, key.bot_account_id)
+                    if bot and bot.enabled:
+                        with suppress(Exception):
+                            delete_access_token = await ensure_bot_access_token(session, self.twitch, bot)
+                try:
                     await self.twitch.delete_eventsub_subscription(
                         db_sub.twitch_subscription_id, access_token=delete_access_token
                     )
+                except TwitchApiError as exc:
+                    if not self._is_subscription_not_found_error(exc):
+                        logger.warning(
+                            "Cannot rotate EventSub subscription %s for %s/%s: %s",
+                            db_sub.twitch_subscription_id,
+                            key.event_type,
+                            key.broadcaster_user_id,
+                            exc,
+                        )
+                        return
                 await session.delete(db_sub)
                 await session.flush()
             if upstream_transport == "webhook":
