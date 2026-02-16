@@ -106,6 +106,10 @@ class LocalEventHub:
         if self.on_service_disconnect:
             await self.on_service_disconnect(service_account_id)
 
+    async def active_connections(self, service_account_id: uuid.UUID) -> int:
+        async with self._lock:
+            return len(self._clients.get(service_account_id, set()))
+
     async def publish_to_service(self, service_account_id: uuid.UUID, payload: dict) -> None:
         async with self._lock:
             sockets = list(self._clients.get(service_account_id, set()))

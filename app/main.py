@@ -25,6 +25,7 @@ from fastapi import (
 )
 from fastapi.responses import PlainTextResponse, RedirectResponse, Response
 from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 
 from app.auth import authenticate_service, generate_client_id, generate_client_secret, hash_secret
 from app.bot_auth import ensure_bot_access_token
@@ -212,12 +213,25 @@ async def _service_auth(
 
 async def _update_runtime_stats(service_account_id: uuid.UUID, mutator) -> None:
     async with session_factory() as session:
+        service_exists = await session.scalar(
+            select(ServiceAccount.id).where(ServiceAccount.id == service_account_id)
+        )
+        if not service_exists:
+            logger.info("Skipping runtime stats update for missing service account %s", service_account_id)
+            return
         stats = await session.get(ServiceRuntimeStats, service_account_id)
         if not stats:
             stats = ServiceRuntimeStats(service_account_id=service_account_id)
             session.add(stats)
         mutator(stats)
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError:
+            await session.rollback()
+            logger.warning(
+                "Runtime stats update failed due to FK race for service account %s",
+                service_account_id,
+            )
 
 
 async def _on_service_connect(service_account_id: uuid.UUID) -> None:
@@ -230,6 +244,8 @@ async def _on_service_connect(service_account_id: uuid.UUID) -> None:
         stats.last_connected_at = now
 
     await _update_runtime_stats(service_account_id, _mutator)
+    active = await event_hub.active_connections(service_account_id)
+    logger.info("Service websocket connected: service_id=%s active_connections=%d", service_account_id, active)
 
 
 async def _on_service_disconnect(service_account_id: uuid.UUID) -> None:
@@ -241,6 +257,8 @@ async def _on_service_disconnect(service_account_id: uuid.UUID) -> None:
         stats.last_disconnected_at = now
 
     await _update_runtime_stats(service_account_id, _mutator)
+    active = await event_hub.active_connections(service_account_id)
+    logger.info("Service websocket disconnected: service_id=%s active_connections=%d", service_account_id, active)
 
 
 async def _on_service_ws_event(service_account_id: uuid.UUID) -> None:
@@ -1864,6 +1882,7 @@ async def ws_events(websocket: WebSocket, client_id: str = Query(), client_secre
     except HTTPException:
         await websocket.close(code=4401)
         return
+    logger.info("Incoming /ws/events connection accepted for service_id=%s", service.id)
     await event_hub.connect(service.id, websocket)
     try:
         while True:
