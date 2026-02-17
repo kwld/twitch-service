@@ -72,6 +72,11 @@ class EventSubManager:
         self._active_subscriptions_cache_lock = asyncio.Lock()
         self._active_subscriptions_cached_at: datetime | None = None
         self._active_subscriptions_cache: list[dict] = []
+        self._name_cache_ttl = timedelta(minutes=15)
+        self._name_cache_lock = asyncio.Lock()
+        self._service_name_cache: dict[uuid.UUID, tuple[str, datetime]] = {}
+        self._bot_name_cache: dict[uuid.UUID, tuple[str, datetime]] = {}
+        self._broadcaster_name_cache: dict[str, tuple[str, datetime]] = {}
 
     def _transport_for_event(self, event_type: str) -> Literal["websocket", "webhook"]:
         transport, _ = best_transport_for_service(
@@ -722,7 +727,7 @@ class EventSubManager:
                     "upstream_transport": upstream_transport,
                 },
             }
-            self._audit_log(
+            await self._audit_log(
                 level="error",
                 payload={
                     "kind": "eventsub_subscription_error",
@@ -823,10 +828,11 @@ class EventSubManager:
                 "subscription": subscription,
                 "event": event,
             }
-            self._audit_log(
+            await self._audit_log(
                 level="info",
                 payload={
                     "kind": "eventsub_incoming",
+                    "bot_account_id": str(bot.id),
                     "event_type": event_type,
                     "broadcaster_user_id": broadcaster_user_id,
                     "message_id": message_id,
@@ -858,7 +864,7 @@ class EventSubManager:
                 envelope["twitch_chat_assets"] = enriched
         await self._update_channel_state_from_event(bot.id, event_type, broadcaster_user_id, event)
         for interest in interests:
-            self._audit_log(
+            await self._audit_log(
                 level="info",
                 payload={
                     "kind": "eventsub_outgoing",
@@ -890,8 +896,9 @@ class EventSubManager:
             else:
                 await self.event_hub.publish_to_service(interest.service_account_id, envelope)
 
-    def _audit_log(self, level: str, payload: dict) -> None:
-        record = self._redact_payload(payload)
+    async def _audit_log(self, level: str, payload: dict) -> None:
+        enriched_payload = await self._enrich_audit_payload(payload)
+        record = self._redact_payload(enriched_payload)
         if isinstance(record, dict):
             record.setdefault("timestamp", datetime.now(UTC).isoformat())
             record.setdefault("level", level)
@@ -904,6 +911,116 @@ class EventSubManager:
             eventsub_audit_logger.warning(text)
         else:
             eventsub_audit_logger.info(text)
+
+    async def _enrich_audit_payload(self, payload: dict) -> dict:
+        enriched = dict(payload)
+        service_name = await self._resolve_service_name(enriched.get("service_account_id"))
+        if service_name:
+            enriched.setdefault("service_name", service_name)
+        bot_name = await self._resolve_bot_name(enriched.get("bot_account_id"))
+        if bot_name:
+            enriched.setdefault("bot_name", bot_name)
+        broadcaster_name = await self._resolve_broadcaster_name(
+            enriched.get("broadcaster_user_id"),
+            enriched.get("broadcaster_name") or enriched.get("broadcaster_login"),
+        )
+        if broadcaster_name:
+            enriched.setdefault("broadcaster_name", broadcaster_name)
+        return enriched
+
+    def _cached_name(self, cache: dict, key: object) -> str | None:
+        if key is None:
+            return None
+        item = cache.get(key)
+        if not item:
+            return None
+        value, cached_at = item
+        if datetime.now(UTC) - cached_at > self._name_cache_ttl:
+            cache.pop(key, None)
+            return None
+        return value
+
+    async def _resolve_service_name(self, raw_service_id: object) -> str | None:
+        if raw_service_id is None:
+            return None
+        try:
+            service_id = raw_service_id if isinstance(raw_service_id, uuid.UUID) else uuid.UUID(str(raw_service_id))
+        except Exception:
+            return None
+        async with self._name_cache_lock:
+            cached = self._cached_name(self._service_name_cache, service_id)
+            if cached:
+                return cached
+        name: str | None = None
+        try:
+            async with self.session_factory() as session:
+                service = await session.get(ServiceAccount, service_id)
+                if service and service.name:
+                    name = service.name
+        except Exception:
+            return None
+        if name:
+            async with self._name_cache_lock:
+                self._service_name_cache[service_id] = (name, datetime.now(UTC))
+        return name
+
+    async def _resolve_bot_name(self, raw_bot_id: object) -> str | None:
+        if raw_bot_id is None:
+            return None
+        try:
+            bot_id = raw_bot_id if isinstance(raw_bot_id, uuid.UUID) else uuid.UUID(str(raw_bot_id))
+        except Exception:
+            return None
+        async with self._name_cache_lock:
+            cached = self._cached_name(self._bot_name_cache, bot_id)
+            if cached:
+                return cached
+        name: str | None = None
+        try:
+            async with self.session_factory() as session:
+                bot = await session.get(BotAccount, bot_id)
+                if bot and bot.name:
+                    name = bot.name
+        except Exception:
+            return None
+        if name:
+            async with self._name_cache_lock:
+                self._bot_name_cache[bot_id] = (name, datetime.now(UTC))
+        return name
+
+    async def _resolve_broadcaster_name(
+        self,
+        raw_broadcaster_user_id: object,
+        provided_name: object,
+    ) -> str | None:
+        if raw_broadcaster_user_id is None:
+            return None
+        broadcaster_user_id = str(raw_broadcaster_user_id).strip()
+        if not broadcaster_user_id:
+            return None
+        if provided_name:
+            name = str(provided_name).strip()
+            if name:
+                async with self._name_cache_lock:
+                    self._broadcaster_name_cache[broadcaster_user_id] = (name, datetime.now(UTC))
+                return name
+        async with self._name_cache_lock:
+            cached = self._cached_name(self._broadcaster_name_cache, broadcaster_user_id)
+            if cached:
+                return cached
+        name: str | None = None
+        try:
+            user = await self.twitch.get_user_by_id_app(broadcaster_user_id)
+            if user:
+                login = str(user.get("login", "")).strip()
+                display_name = str(user.get("display_name", "")).strip()
+                name = display_name or login
+        except Exception:
+            return None
+        if name:
+            async with self._name_cache_lock:
+                self._broadcaster_name_cache[broadcaster_user_id] = (name, datetime.now(UTC))
+        return name
 
     @staticmethod
     def _is_sensitive_key(key: str) -> bool:
@@ -1005,7 +1122,7 @@ class EventSubManager:
         twitch_id = sub.get("id")
         if not twitch_id:
             return
-        self._audit_log(
+        await self._audit_log(
             level="warning",
             payload={
                 "kind": "eventsub_revocation",
@@ -1027,7 +1144,7 @@ class EventSubManager:
         revoked_user_id = event.get("user_id")
         if not revoked_user_id:
             return
-        self._audit_log(
+        await self._audit_log(
             level="warning",
             payload={
                 "kind": "eventsub_user_authorization_revoke",

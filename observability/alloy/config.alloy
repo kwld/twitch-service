@@ -21,7 +21,11 @@ loki.process "eventsub_audit" {
       direction    = "direction",
       transport    = "transport",
       service_id   = "service_account_id",
+      service_name = "service_name",
+      bot_id       = "bot_account_id",
+      bot_name     = "bot_name",
       broadcaster  = "broadcaster_user_id",
+      broadcaster_name = "broadcaster_name",
     }
   }
 
@@ -33,7 +37,11 @@ loki.process "eventsub_audit" {
       direction  = "direction",
       transport  = "transport",
       service_id = "service_id",
+      service_name = "service_name",
+      bot_id = "bot_id",
+      bot_name = "bot_name",
       broadcaster = "broadcaster",
+      broadcaster_name = "broadcaster_name",
       job        = "job",
     }
   }

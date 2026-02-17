@@ -656,3 +656,11 @@ Redaction policy:
 - EventSub audit logs are written to `APP_EVENTSUB_LOG_PATH` (default `./logs/eventsub.log`).
 - If `.env` defines both `LOKI_HOST` and `LOKI_PORT`, run/install scripts also start Grafana Alloy and Alloy ships EventSub audit logs to Loki.
 - If either value is missing, Alloy is not started and logs remain local.
+- Loki labels include:
+  - `level`, `kind`, `event_type`, `direction`, `transport`
+  - `service_id`, `service_name`
+  - `bot_id`, `bot_name`
+  - `broadcaster` (Twitch user id), `broadcaster_name`
+- Name labels are resolved in-memory with cache:
+  - `service_name` and `bot_name` from local DB ids.
+  - `broadcaster_name` from payload (when present) or Twitch user lookup by broadcaster id.

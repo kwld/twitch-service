@@ -275,6 +275,12 @@ If either is missing, Alloy is skipped.
 Redaction:
 - sensitive fields (tokens/secrets/auth/api keys/passwords) are masked as `***` + last 4 characters.
 
+Loki labels:
+- `level`, `kind`, `event_type`, `direction`, `transport`
+- `service_id`, `service_name`
+- `bot_id`, `bot_name`
+- `broadcaster` (id), `broadcaster_name`
+
 ### Send Chat Message Payload
 ```json
 {
