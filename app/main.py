@@ -155,6 +155,12 @@ runtime_state = RuntimeState(settings=settings)
 DEFAULT_STREAM_EVENTS = ("stream.online", "stream.offline")
 BROADCASTER_AUTH_SCOPES = ("channel:bot",)
 SERVICE_USER_AUTH_SCOPES = ("user:read:email",)
+WS_TOKEN_TTL = timedelta(minutes=2)
+EVENTSUB_MESSAGE_DEDUP_TTL = timedelta(minutes=10)
+_ws_tokens: dict[str, tuple[uuid.UUID, datetime]] = {}
+_ws_tokens_lock = asyncio.Lock()
+_eventsub_seen_message_ids: dict[str, datetime] = {}
+_eventsub_seen_lock = asyncio.Lock()
 
 
 def _counter(value: int | None) -> int:
@@ -187,6 +193,48 @@ def _is_ip_allowed(client_ip: str | None) -> bool:
     except ValueError:
         return False
     return any(parsed_ip in network for network in allowed_ip_networks)
+
+
+async def _issue_ws_token(service_account_id: uuid.UUID) -> tuple[str, int]:
+    token = secrets.token_urlsafe(32)
+    expires_at = datetime.now(UTC) + WS_TOKEN_TTL
+    async with _ws_tokens_lock:
+        now = datetime.now(UTC)
+        expired = [k for k, (_, exp) in _ws_tokens.items() if exp <= now]
+        for key in expired:
+            _ws_tokens.pop(key, None)
+        _ws_tokens[token] = (service_account_id, expires_at)
+    return token, int(WS_TOKEN_TTL.total_seconds())
+
+
+async def _consume_ws_token(token: str) -> uuid.UUID | None:
+    now = datetime.now(UTC)
+    async with _ws_tokens_lock:
+        expired = [k for k, (_, exp) in _ws_tokens.items() if exp <= now]
+        for key in expired:
+            _ws_tokens.pop(key, None)
+        payload = _ws_tokens.pop(token, None)
+    if not payload:
+        return None
+    service_account_id, expires_at = payload
+    if expires_at <= now:
+        return None
+    return service_account_id
+
+
+async def _is_new_eventsub_message_id(message_id: str) -> bool:
+    if not message_id:
+        return False
+    now = datetime.now(UTC)
+    async with _eventsub_seen_lock:
+        threshold = now - EVENTSUB_MESSAGE_DEDUP_TTL
+        expired = [k for k, seen_at in _eventsub_seen_message_ids.items() if seen_at < threshold]
+        for key in expired:
+            _eventsub_seen_message_ids.pop(key, None)
+        if message_id in _eventsub_seen_message_ids:
+            return False
+        _eventsub_seen_message_ids[message_id] = now
+        return True
 
 
 async def _require_admin(x_admin_key: str = Header(default="")) -> None:
@@ -355,10 +403,13 @@ async def _ensure_default_stream_interests(
                 webhook_url=None,
             )
             session.add(interest)
-            created.append(interest)
-        await session.commit()
-        for interest in created:
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                continue
             await session.refresh(interest)
+            created.append(interest)
     return created
 
 
@@ -838,9 +889,14 @@ async def twitch_eventsub_webhook(request: Request):
     raw_body = await request.body()
     if not _verify_twitch_signature(request, raw_body):
         raise HTTPException(status_code=403, detail="Invalid Twitch signature")
-
+    message_id = request.headers.get("Twitch-Eventsub-Message-Id", "")
     message_type = request.headers.get("Twitch-Eventsub-Message-Type", "").lower()
     payload = await request.json()
+    if not await _is_new_eventsub_message_id(message_id):
+        if message_type == "webhook_callback_verification":
+            challenge = payload.get("challenge", "")
+            return PlainTextResponse(content=challenge, status_code=200)
+        return Response(status_code=204)
 
     if message_type == "webhook_callback_verification":
         challenge = payload.get("challenge", "")
@@ -849,7 +905,7 @@ async def twitch_eventsub_webhook(request: Request):
     if message_type == "notification":
         asyncio.create_task(
             eventsub_manager.handle_webhook_notification(
-                payload, request.headers.get("Twitch-Eventsub-Message-Id", "")
+                payload, message_id
             )
         )
         return Response(status_code=204)
@@ -955,6 +1011,15 @@ async def regenerate_service_secret(client_id: str, _: None = Depends(_require_a
         account.client_secret_hash = hash_secret(new_secret)
         await session.commit()
     return {"client_id": client_id, "client_secret": new_secret}
+
+
+@app.post("/v1/ws-token")
+async def create_service_ws_token(service: ServiceAccount = Depends(_service_auth)):
+    ws_token, expires_in_seconds = await _issue_ws_token(service.id)
+    return {
+        "ws_token": ws_token,
+        "expires_in_seconds": expires_in_seconds,
+    }
 
 
 @app.post("/v1/user-auth/start", response_model=StartUserAuthorizationResponse)
@@ -1258,8 +1323,24 @@ async def create_interest(
                 webhook_url=webhook_url,
             )
             session.add(interest)
-            await session.commit()
-            await session.refresh(interest)
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                interest = await session.scalar(
+                    select(ServiceInterest).where(
+                        ServiceInterest.service_account_id == service.id,
+                        ServiceInterest.bot_account_id == req.bot_account_id,
+                        ServiceInterest.event_type == event_type,
+                        ServiceInterest.broadcaster_user_id == broadcaster_user_id,
+                        ServiceInterest.transport == req.transport,
+                        ServiceInterest.webhook_url == webhook_url,
+                    )
+                )
+                if interest is None:
+                    raise HTTPException(status_code=409, detail="Interest already exists") from None
+            else:
+                await session.refresh(interest)
 
     key = await interest_registry.add(interest)
     await eventsub_manager.on_interest_added(key)
@@ -1867,7 +1948,12 @@ async def create_twitch_clip(
 
 
 @app.websocket("/ws/events")
-async def ws_events(websocket: WebSocket, client_id: str = Query(), client_secret: str = Query()):
+async def ws_events(
+    websocket: WebSocket,
+    client_id: str | None = Query(default=None),
+    client_secret: str | None = Query(default=None),
+    ws_token: str | None = Query(default=None),
+):
     client_ip = _resolve_client_ip(
         websocket.client.host if websocket.client else None,
         websocket.headers.get("x-forwarded-for"),
@@ -1876,12 +1962,31 @@ async def ws_events(websocket: WebSocket, client_id: str = Query(), client_secre
         logger.warning("Blocked WebSocket connection from IP %s", client_ip or "unknown")
         await websocket.close(code=4403)
         return
-    try:
-        async with session_factory() as session:
-            service = await authenticate_service(session, client_id, client_secret)
-    except HTTPException:
-        await websocket.close(code=4401)
-        return
+    service: ServiceAccount | None = None
+    if ws_token:
+        service_account_id = await _consume_ws_token(ws_token)
+        if service_account_id:
+            async with session_factory() as session:
+                service = await session.get(ServiceAccount, service_account_id)
+                if not service or not service.enabled:
+                    service = None
+        if service is None:
+            await websocket.close(code=4401)
+            return
+    else:
+        header_client_id = websocket.headers.get("x-client-id", "")
+        header_client_secret = websocket.headers.get("x-client-secret", "")
+        auth_client_id = (client_id or "").strip() or header_client_id.strip()
+        auth_client_secret = (client_secret or "").strip() or header_client_secret.strip()
+        if not auth_client_id or not auth_client_secret:
+            await websocket.close(code=4401)
+            return
+        try:
+            async with session_factory() as session:
+                service = await authenticate_service(session, auth_client_id, auth_client_secret)
+        except HTTPException:
+            await websocket.close(code=4401)
+            return
     logger.info("Incoming /ws/events connection accepted for service_id=%s", service.id)
     await event_hub.connect(service.id, websocket)
     try:
@@ -1896,10 +2001,10 @@ async def ws_events(websocket: WebSocket, client_id: str = Query(), client_secre
 
 _SOCKET_IO_MISMATCH_MESSAGE = (
     "Socket.IO is not supported by this service. Use plain WebSocket endpoint "
-    "/ws/events?client_id=<client_id>&client_secret=<client_secret>."
+    "/ws/events?ws_token=<short_lived_token>."
 )
 _WS_ENDPOINT_MISMATCH_MESSAGE = (
-    "Invalid WebSocket endpoint. Use /ws/events?client_id=<client_id>&client_secret=<client_secret>. "
+    "Invalid WebSocket endpoint. Use /ws/events?ws_token=<short_lived_token>. "
     "Socket.IO is not supported."
 )
 

@@ -547,6 +547,7 @@ class EventSubManager:
         subscription = payload.get("subscription", {})
         event = payload.get("event", {})
         event_type = subscription.get("type")
+        subscription_id = str(subscription.get("id", "")).strip()
         if event_type == "user.authorization.revoke":
             await self._handle_user_authorization_revoke(event)
             return
@@ -556,16 +557,26 @@ class EventSubManager:
         )
         if not event_type or not broadcaster_user_id:
             return
-        condition = subscription.get("condition", {})
-        bot_lookup_user_id = (
-            condition.get("user_id")
-            if str(event_type).startswith("channel.chat.")
-            else broadcaster_user_id
-        )
         async with self.session_factory() as session:
-            bot = await session.scalar(
-                select(BotAccount).where(BotAccount.twitch_user_id == str(bot_lookup_user_id))
-            )
+            bot = None
+            if subscription_id:
+                db_sub = await session.scalar(
+                    select(TwitchSubscription).where(
+                        TwitchSubscription.twitch_subscription_id == subscription_id
+                    )
+                )
+                if db_sub:
+                    bot = await session.get(BotAccount, db_sub.bot_account_id)
+            if not bot:
+                condition = subscription.get("condition", {})
+                bot_lookup_user_id = (
+                    condition.get("user_id")
+                    if str(event_type).startswith("channel.chat.")
+                    else broadcaster_user_id
+                )
+                bot = await session.scalar(
+                    select(BotAccount).where(BotAccount.twitch_user_id == str(bot_lookup_user_id))
+                )
             if not bot:
                 return
         key = InterestKey(

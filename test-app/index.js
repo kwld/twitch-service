@@ -101,14 +101,14 @@ function pushEvent(kind, payload) {
   }
 }
 
-function connectServiceWs() {
+async function connectServiceWs() {
   if (serviceWs) {
     return;
   }
   wsState = "connecting";
+  const tokenPayload = await serviceFetch("/v1/ws-token", { method: "POST" });
   const wsUrl = new URL(`${toWsUrl(config.serviceBaseUrl)}/ws/events`);
-  wsUrl.searchParams.set("client_id", config.serviceClientId);
-  wsUrl.searchParams.set("client_secret", config.serviceClientSecret);
+  wsUrl.searchParams.set("ws_token", String(tokenPayload.ws_token ?? ""));
 
   serviceWs = new WebSocket(wsUrl.toString());
   serviceWs.on("open", () => {
@@ -131,7 +131,12 @@ function connectServiceWs() {
       pushEvent("system", { message: "Reconnecting service websocket in 1s" });
       setTimeout(() => {
         if (shouldKeepWsConnected) {
-          connectServiceWs();
+          connectServiceWs().catch((error) => {
+            pushEvent("system", {
+              message: "Service websocket reconnect failed",
+              error: error.message,
+            });
+          });
         }
       }, 1000);
     }
@@ -361,8 +366,14 @@ app.post("/api/clips", async (req, res) => {
 
 app.post("/api/events/connect", (_req, res) => {
   shouldKeepWsConnected = true;
-  connectServiceWs();
-  res.json({ ok: true, ws_state: wsState });
+  connectServiceWs()
+    .then(() => {
+      res.json({ ok: true, ws_state: wsState });
+    })
+    .catch((error) => {
+      shouldKeepWsConnected = false;
+      sendError(res, error);
+    });
 });
 
 app.post("/api/events/disconnect", (_req, res) => {

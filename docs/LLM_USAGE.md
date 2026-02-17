@@ -11,7 +11,11 @@ Service endpoints require both headers on every request:
 Admin endpoints require:
 - `X-Admin-Key: <admin_api_key>`
 
-Service websocket requires query params:
+Service websocket (preferred):
+- request short-lived token: `POST /v1/ws-token`
+- connect: `WS /ws/events?ws_token=<token>`
+
+Service websocket (legacy compatibility):
 - `WS /ws/events?client_id=<id>&client_secret=<secret>`
 
 ## 2) Identity Model
@@ -73,6 +77,9 @@ LLM rule:
 ### Service user authentication (Twitch user login)
 - `POST /v1/user-auth/start`
 - `GET /v1/user-auth/session/{state}`
+
+### Service websocket token
+- `POST /v1/ws-token`
 
 ### Twitch helper reads
 - `GET /v1/twitch/profiles`
@@ -373,13 +380,15 @@ For broadcaster auth requests:
 ## 7) Event Delivery Semantics
 
 ### Service websocket (`WS /ws/events`)
-- authenticate with query credentials.
+- preferred auth: short-lived token from `POST /v1/ws-token`.
+- legacy auth: direct query/header credentials (still accepted for compatibility).
 - server accepts connection, tracks runtime stats.
 - incoming client text messages are ignored (used as keepalive).
 - server pushes event envelopes when matching interests fire.
 
 ### Service webhook delivery
 - if interest transport is `webhook`, service posts envelope JSON to `webhook_url`.
+- EventSub webhook callback requests are replay-protected by message-id dedupe (10 minute in-memory window).
 - if your service receives a webhook event that it is no longer interested in, treat it as stale delivery and unsubscribe immediately by deleting matching interest rows.
 - matching rule for unsubscribe:
   - compare incoming envelope `type` + `event.broadcaster_user_id` to your current desired subscriptions for the same bot/service context.

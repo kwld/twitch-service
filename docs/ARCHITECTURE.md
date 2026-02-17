@@ -52,6 +52,9 @@ Main tables:
 - Service endpoints:
   - `X-Client-Id`
   - `X-Client-Secret`
+- Service websocket:
+  - preferred: `POST /v1/ws-token` then `WS /ws/events?ws_token=<token>`,
+  - compatibility mode: direct `client_id/client_secret` websocket auth (legacy).
 - Service secrets are hashed with PBKDF2-SHA256 format:
   - `pbkdf2_sha256$<iterations>$<salt_b64>$<digest_b64>`
 - Legacy bcrypt hashes are still verifiable for backward compatibility.
@@ -82,7 +85,7 @@ Interest transport in `service_interests` is independent and controls service de
 
 ## 7) Event Delivery Path
 1. Twitch event arrives via upstream websocket or webhook callback.
-2. Manager builds `InterestKey(bot_account_id, event_type, broadcaster_user_id)`.
+2. Manager resolves bot ownership using `payload.subscription.id` against `twitch_subscriptions` (with fallback lookup for compatibility), then builds `InterestKey(bot_account_id, event_type, broadcaster_user_id)`.
 3. Registry resolves matching interests.
 4. Manager emits envelope:
    - to service websocket clients (per service ID), or
@@ -160,3 +163,14 @@ Endpoint: `POST /v1/twitch/clips`
 - runtime/service usage status inspection,
 - broadcaster authorization listing,
 - live chat mode for bot own channel or target channel.
+
+## 14) Webhook Replay Protection
+- Incoming Twitch webhook requests are validated by:
+  - signature (`message_id + timestamp + raw_body`),
+  - timestamp freshness window.
+- `Twitch-Eventsub-Message-Id` values are deduplicated in-memory for 10 minutes.
+- Duplicate message IDs are acknowledged but ignored (no second processing/fanout).
+
+## 15) Interest Creation Concurrency
+- `service_interests` has a DB uniqueness constraint for dedupe dimensions.
+- API creation paths (`POST /v1/interests` and automatic default stream interests) handle concurrent insert races by catching integrity conflicts and reusing existing rows.

@@ -120,6 +120,7 @@ bash ./scripts/run-dev.sh 8080
 - `GET /v1/broadcaster-authorizations` (service)
 - `POST /v1/user-auth/start` (service)
 - `GET /v1/user-auth/session/{state}` (service)
+- `POST /v1/ws-token` (service)
 - `GET /v1/eventsub/subscription-types` (service)
 - `POST /v1/interests` (service)
 - `DELETE /v1/interests/{interest_id}` (service)
@@ -132,7 +133,7 @@ bash ./scripts/run-dev.sh 8080
 - `GET /v1/twitch/chat/assets?broadcaster=...&refresh=false` (service)
 - `POST /v1/twitch/chat/messages` (service)
 - `POST /v1/twitch/clips` (service)
-- `WS /ws/events?client_id=...&client_secret=...` (service)
+- `WS /ws/events?ws_token=...` (service)
 
 Note on live status:
 - `GET /v1/twitch/streams/status/interested` returns cached `ChannelState`.
@@ -164,6 +165,13 @@ Optional enrichment (backward compatible):
 ### Service Secret Hashing
 - Service account secrets are hashed with PBKDF2-SHA256 (`pbkdf2_sha256$...`) to avoid bcrypt backend/runtime issues and length limits.
 - Legacy bcrypt hashes remain verifiable for backward compatibility.
+
+### Service WebSocket Auth
+- Preferred flow:
+  1. call `POST /v1/ws-token` with service headers,
+  2. connect `WS /ws/events?ws_token=<token>`.
+- WS tokens are short-lived and single-use.
+- Backward compatibility: `client_id` + `client_secret` are still accepted on websocket query/header auth, but should be treated as legacy.
 
 ### Create Interest Payload
 ```json
@@ -323,6 +331,7 @@ Twitch references:
 Handler behavior:
 - verifies `Twitch-Eventsub-Message-Signature` using HMAC-SHA256 over:
   `message_id + timestamp + raw_body`,
+- deduplicates webhook `message_id` values in-memory (10 minute window) to reject replayed notifications/challenges/revocations,
 - handles `webhook_callback_verification` (returns raw challenge),
 - handles `notification` and `revocation` with fast `2XX` responses.
 

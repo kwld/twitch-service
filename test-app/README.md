@@ -45,6 +45,7 @@ Open:
    - the app sends `redirect_url` and receives callback result back to the same UI.
    - on success, broadcaster id/login fields are auto-filled from callback query params.
 5. Connect service websocket.
+   - the test backend first requests `POST /v1/ws-token`, then connects `WS /ws/events?ws_token=...`.
 6. Create interest `channel.chat.message` with `websocket`.
 7. Send chat message.
 8. Watch incoming chat/events in the live log.
