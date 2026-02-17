@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import hmac
 import ipaddress
+import json
 import logging
 import secrets
 import uuid
@@ -50,6 +51,7 @@ from app.models import (
     OAuthCallback,
     ServiceAccount,
     ServiceBotAccess,
+    ServiceEventTrace,
     ServiceInterest,
     ServiceRuntimeStats,
     ServiceUserAuthRequest,
@@ -347,6 +349,75 @@ def _append_query(url: str, params: dict[str, str]) -> str:
     return urlunsplit(
         (split.scheme, split.netloc, split.path, urlencode(query), split.fragment)
     )
+
+
+def _is_sensitive_key(key: str) -> bool:
+    normalized = key.strip().lower().replace("-", "_")
+    return any(
+        token in normalized
+        for token in (
+            "secret",
+            "token",
+            "authorization",
+            "api_key",
+            "password",
+            "client_secret",
+            "x_client_secret",
+            "ws_token",
+        )
+    )
+
+
+def _mask_secret(value: object) -> str:
+    raw = str(value)
+    if not raw or len(raw) <= 4:
+        return "***"
+    return "***" + raw[-4:]
+
+
+def _redact_trace_payload(payload: object) -> object:
+    if isinstance(payload, dict):
+        out: dict[str, object] = {}
+        for key, value in payload.items():
+            if _is_sensitive_key(str(key)):
+                out[str(key)] = _mask_secret(value)
+            else:
+                out[str(key)] = _redact_trace_payload(value)
+        return out
+    if isinstance(payload, list):
+        return [_redact_trace_payload(item) for item in payload]
+    return payload
+
+
+async def _record_service_trace(
+    service_account_id: uuid.UUID,
+    direction: str,
+    local_transport: str,
+    event_type: str,
+    target: str | None,
+    payload: object,
+) -> None:
+    try:
+        payload_json = json.dumps(_redact_trace_payload(payload), default=str)
+        if len(payload_json) > 12000:
+            payload_json = payload_json[:12000] + "... [truncated]"
+        async with session_factory() as session:
+            service = await session.get(ServiceAccount, service_account_id)
+            if not service:
+                return
+            session.add(
+                ServiceEventTrace(
+                    service_account_id=service_account_id,
+                    direction=direction,
+                    local_transport=local_transport,
+                    event_type=event_type,
+                    target=target,
+                    payload_json=payload_json,
+                )
+            )
+            await session.commit()
+    except Exception:
+        return
 
 
 async def _service_allowed_bot_ids(session, service_account_id: uuid.UUID) -> set[uuid.UUID]:
@@ -1021,10 +1092,21 @@ async def regenerate_service_secret(client_id: str, _: None = Depends(_require_a
 @app.post("/v1/ws-token")
 async def create_service_ws_token(service: ServiceAccount = Depends(_service_auth)):
     ws_token, expires_in_seconds = await _issue_ws_token(service.id)
-    return {
+    payload = {
         "ws_token": ws_token,
+        "token": ws_token,
+        "wsToken": ws_token,
         "expires_in_seconds": expires_in_seconds,
     }
+    await _record_service_trace(
+        service_account_id=service.id,
+        direction="outgoing",
+        local_transport="http",
+        event_type="service.ws_token.issued",
+        target="/v1/ws-token",
+        payload=payload,
+    )
+    return payload
 
 
 @app.post("/v1/user-auth/start", response_model=StartUserAuthorizationResponse)
@@ -2034,17 +2116,16 @@ async def ws_events(
         await websocket.close(code=4403)
         return
     service: ServiceAccount | None = None
-    if ws_token:
-        service_account_id = await _consume_ws_token(ws_token)
+    raw_ws_token = (ws_token or "").strip()
+    token_value = raw_ws_token if raw_ws_token and raw_ws_token.lower() not in {"undefined", "null"} else ""
+    if token_value:
+        service_account_id = await _consume_ws_token(token_value)
         if service_account_id:
             async with session_factory() as session:
                 service = await session.get(ServiceAccount, service_account_id)
                 if not service or not service.enabled:
                     service = None
-        if service is None:
-            await websocket.close(code=4401)
-            return
-    else:
+    if service is None:
         header_client_id = websocket.headers.get("x-client-id", "")
         header_client_secret = websocket.headers.get("x-client-secret", "")
         auth_client_id = (client_id or "").strip() or header_client_id.strip()
@@ -2059,6 +2140,18 @@ async def ws_events(
             await websocket.close(code=4401)
             return
     logger.info("Incoming /ws/events connection accepted for service_id=%s", service.id)
+    await _record_service_trace(
+        service_account_id=service.id,
+        direction="incoming",
+        local_transport="websocket",
+        event_type="service.ws.connect",
+        target="/ws/events",
+        payload={
+            "ws_token_present": bool(token_value),
+            "auth_mode": "ws_token" if token_value else "credentials",
+            "client_ip": client_ip,
+        },
+    )
     await event_hub.connect(service.id, websocket)
     try:
         while True:
@@ -2068,6 +2161,14 @@ async def ws_events(
         pass
     finally:
         await event_hub.disconnect(service.id, websocket)
+        await _record_service_trace(
+            service_account_id=service.id,
+            direction="incoming",
+            local_transport="websocket",
+            event_type="service.ws.disconnect",
+            target="/ws/events",
+            payload={"client_ip": client_ip},
+        )
 
 
 _SOCKET_IO_MISMATCH_MESSAGE = (

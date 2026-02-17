@@ -14,6 +14,7 @@ Admin endpoints require:
 Service websocket (preferred):
 - request short-lived token: `POST /v1/ws-token`
 - connect: `WS /ws/events?ws_token=<token>`
+- token response includes compatibility aliases (`ws_token`, `token`, `wsToken`).
 
 Service websocket (legacy compatibility):
 - `WS /ws/events?client_id=<id>&client_secret=<secret>`
@@ -597,6 +598,7 @@ Behavior:
 - shows both:
   - incoming events from Twitch into the bridge (per interested service),
   - outgoing events from bridge to service local transport (`websocket`/`webhook`),
+  - websocket control events and token issuance (`service.ws_token.issued`, `service.ws.connect`, `service.ws.disconnect`),
 - prints details:
   - direction,
   - local transport,
