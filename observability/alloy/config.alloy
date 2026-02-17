@@ -1,0 +1,52 @@
+local.file_match "eventsub_audit" {
+  path_targets = [
+    {
+      __path__ = "/var/log/twitch-service/eventsub.log",
+      job      = "twitch-eventsub-service",
+    },
+  ]
+}
+
+loki.source.file "eventsub_audit" {
+  targets    = local.file_match.eventsub_audit.targets
+  forward_to = [loki.process.eventsub_audit.receiver]
+}
+
+loki.process "eventsub_audit" {
+  stage.json {
+    expressions = {
+      level        = "level",
+      kind         = "kind",
+      event_type   = "event_type",
+      direction    = "direction",
+      transport    = "transport",
+      service_id   = "service_account_id",
+      broadcaster  = "broadcaster_user_id",
+    }
+  }
+
+  stage.labels {
+    values = {
+      level      = "level",
+      kind       = "kind",
+      event_type = "event_type",
+      direction  = "direction",
+      transport  = "transport",
+      service_id = "service_id",
+      broadcaster = "broadcaster",
+      job        = "job",
+    }
+  }
+
+  forward_to = [loki.write.remote.receiver]
+}
+
+loki.write "remote" {
+  endpoint {
+    url = format("http://%s:%s/loki/api/v1/push", env("LOKI_HOST"), env("LOKI_PORT"))
+  }
+
+  external_labels = {
+    service = "twitch-eventsub-service",
+  }
+}

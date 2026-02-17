@@ -10,6 +10,7 @@ import secrets
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import uvicorn
@@ -82,6 +83,7 @@ from app.twitch_chat_assets import TwitchChatAssetCache
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("twitch-eventsub-service")
+eventsub_audit_logger = logging.getLogger("eventsub.audit")
 TWITCH_WEBHOOK_PATH = "/webhooks/twitch/eventsub"
 
 
@@ -130,6 +132,15 @@ def _parse_allowed_ip_networks(raw: str) -> list[ipaddress.IPv4Network | ipaddre
 
 
 settings = load_settings()
+_eventsub_log_path = Path(settings.app_eventsub_log_path)
+_eventsub_log_path.parent.mkdir(parents=True, exist_ok=True)
+if not any(isinstance(h, logging.FileHandler) for h in eventsub_audit_logger.handlers):
+    _eventsub_audit_file_handler = logging.FileHandler(_eventsub_log_path, encoding="utf-8")
+    _eventsub_audit_file_handler.setFormatter(logging.Formatter("%(message)s"))
+    eventsub_audit_logger.addHandler(_eventsub_audit_file_handler)
+eventsub_audit_logger.setLevel(logging.INFO)
+eventsub_audit_logger.propagate = False
+
 allowed_ip_networks = _parse_allowed_ip_networks(settings.app_allowed_ips)
 if allowed_ip_networks:
     logger.info("IP allowlist enabled with %d entries", len(allowed_ip_networks))

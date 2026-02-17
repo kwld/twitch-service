@@ -611,3 +611,8 @@ Redaction policy:
 - sensitive payload fields are masked (e.g. keys containing `secret`, `token`, `authorization`, `api_key`, `password`),
 - sensitive values are shown as `***` + last 4 characters,
 - target URLs with sensitive query params are masked using the same rule.
+
+### Optional Loki Export (Operator)
+- EventSub audit logs are written to `APP_EVENTSUB_LOG_PATH` (default `./logs/eventsub.log`).
+- If `.env` defines both `LOKI_HOST` and `LOKI_PORT`, run/install scripts also start Grafana Alloy and Alloy ships EventSub audit logs to Loki.
+- If either value is missing, Alloy is not started and logs remain local.

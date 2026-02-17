@@ -9,3 +9,4 @@ test-app/.run.out.log
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+logs/

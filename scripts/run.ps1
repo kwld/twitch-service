@@ -36,6 +36,14 @@ function Test-MissingOrPlaceholder {
   return $Value -match "^replace_me"
 }
 
+function Test-LokiEnabled {
+  $hostValue = Get-EnvValue -Key "LOKI_HOST"
+  $portValue = Get-EnvValue -Key "LOKI_PORT"
+  if (Test-MissingOrPlaceholder -Value $hostValue) { return $false }
+  if (Test-MissingOrPlaceholder -Value $portValue) { return $false }
+  return $true
+}
+
 if (!(Test-Path $envPath)) {
   Write-Error "Missing $envPath. Copy $envExamplePath to $envPath and fill required values."
   exit 1
@@ -54,7 +62,15 @@ if ($missing.Count -gt 0) {
   exit 1
 }
 
-docker compose up -d db
+if (Test-LokiEnabled) {
+  if (!(Test-Path "logs")) {
+    New-Item -ItemType Directory -Path "logs" | Out-Null
+  }
+  docker compose up -d db alloy
+}
+else {
+  docker compose up -d db
+}
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 twitch-eventsub-api

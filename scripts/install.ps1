@@ -41,6 +41,14 @@ function Test-MissingOrPlaceholder {
   return $Value -match "^replace_me"
 }
 
+function Test-LokiEnabled {
+  $hostValue = Get-EnvValue -Key "LOKI_HOST"
+  $portValue = Get-EnvValue -Key "LOKI_PORT"
+  if (Test-MissingOrPlaceholder -Value $hostValue) { return $false }
+  if (Test-MissingOrPlaceholder -Value $portValue) { return $false }
+  return $true
+}
+
 if (!(Test-Path $envPath)) {
   if (!(Test-Path $envExamplePath)) {
     Write-Error "Missing $envExamplePath; cannot bootstrap $envPath."
@@ -80,3 +88,11 @@ if (Test-Path "test-app/package.json") {
 }
 
 Write-Host "Install complete."
+
+if (Get-Command docker -ErrorAction SilentlyContinue) {
+  if (Test-LokiEnabled) {
+    Write-Host "Loki config detected. Pulling Alloy image..."
+    docker compose -f docker-compose.yml pull alloy
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  }
+}

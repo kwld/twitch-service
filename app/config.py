@@ -23,8 +23,11 @@ class Settings(BaseSettings):
     app_host: str = Field(default="0.0.0.0", alias="APP_HOST")
     app_port: int = Field(default=8080, alias="APP_PORT")
     app_log_level: str = Field(default="info", alias="APP_LOG_LEVEL")
+    app_eventsub_log_path: str = Field(default="./logs/eventsub.log", alias="APP_EVENTSUB_LOG_PATH")
     app_allowed_ips: str = Field(default="", alias="APP_ALLOWED_IPS")
     app_trust_x_forwarded_for: bool = Field(default=False, alias="APP_TRUST_X_FORWARDED_FOR")
+    loki_host: Optional[str] = Field(default=None, alias="LOKI_HOST")
+    loki_port: Optional[int] = Field(default=None, alias="LOKI_PORT")
 
     database_url: str = Field(alias="DATABASE_URL")
 

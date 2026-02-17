@@ -260,6 +260,20 @@ Twitch webhook callback:
 Catalog source for `GET /v1/eventsub/subscription-types`:
 - https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types/
 
+## Loki EventSub Logging (Optional)
+The service writes structured, redacted EventSub audit logs to:
+- `APP_EVENTSUB_LOG_PATH` (default `./logs/eventsub.log`)
+
+Optional env vars:
+- `LOKI_HOST`
+- `LOKI_PORT`
+
+When both `LOKI_HOST` and `LOKI_PORT` are defined in `.env`, helper scripts start Grafana Alloy and Alloy pushes `eventsub.log` to Loki (`http://LOKI_HOST:LOKI_PORT/loki/api/v1/push`).
+If either is missing, Alloy is skipped.
+
+Redaction:
+- sensitive fields (tokens/secrets/auth/api keys/passwords) are masked as `***` + last 4 characters.
+
 ### Send Chat Message Payload
 ```json
 {

@@ -29,6 +29,16 @@ is_missing_or_placeholder() {
   return 1
 }
 
+is_loki_enabled() {
+  local host port
+  host="$(get_env_value "LOKI_HOST")"
+  port="$(get_env_value "LOKI_PORT")"
+  if is_missing_or_placeholder "${host}" || is_missing_or_placeholder "${port}"; then
+    return 1
+  fi
+  return 0
+}
+
 if [[ ! -f "${ENV_FILE}" ]]; then
   echo "Missing ${ENV_FILE}."
   echo "Copy ${ENV_EXAMPLE_FILE} to ${ENV_FILE} and fill required values."
@@ -57,7 +67,12 @@ if [[ -z "${ngrok_token}" ]]; then
   echo "Warning: NGROK_AUTHTOKEN is empty; ngrok tunnel will not be started."
 fi
 
-docker compose up -d db
+if is_loki_enabled; then
+  mkdir -p logs
+  docker compose up -d db alloy
+else
+  docker compose up -d db
+fi
 
 if [[ -n "${ngrok_token}" ]]; then
   nohup ngrok http "${PORT}" >/tmp/ngrok.log 2>&1 &

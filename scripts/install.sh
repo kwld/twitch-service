@@ -33,6 +33,16 @@ is_missing_or_placeholder() {
   return 1
 }
 
+is_loki_enabled() {
+  local host port
+  host="$(get_env_value "LOKI_HOST")"
+  port="$(get_env_value "LOKI_PORT")"
+  if is_missing_or_placeholder "${host}" || is_missing_or_placeholder "${port}"; then
+    return 1
+  fi
+  return 0
+}
+
 print_env_guidance() {
   local missing_keys=("$@")
   echo "Environment setup required in ${ENV_FILE}:"
@@ -75,6 +85,12 @@ fi
 
 echo "Pulling base images..."
 docker compose -f docker-compose.yml pull db
+if is_loki_enabled; then
+  echo "Loki config detected. Pulling Alloy image..."
+  docker compose -f docker-compose.yml pull alloy
+else
+  echo "Loki config not set (LOKI_HOST/LOKI_PORT). Skipping Alloy image pull."
+fi
 
 echo "Building app image..."
 docker compose -f docker-compose.yml build app

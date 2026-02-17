@@ -30,6 +30,7 @@ from app.twitch import TwitchApiError, TwitchClient
 from app.twitch_chat_assets import TwitchChatAssetCache
 
 logger = logging.getLogger(__name__)
+eventsub_audit_logger = logging.getLogger("eventsub.audit")
 WS_LISTENER_COOLDOWN = timedelta(minutes=5)
 
 
@@ -66,6 +67,7 @@ class EventSubManager:
         ] = {}
         self._subscription_error_lock = asyncio.Lock()
         self._trace_payload_max_chars = 12000
+        self._audit_payload_max_chars = 8000
 
     def _transport_for_event(self, event_type: str) -> Literal["websocket", "webhook"]:
         transport, _ = best_transport_for_service(
@@ -647,6 +649,21 @@ class EventSubManager:
                     "upstream_transport": upstream_transport,
                 },
             }
+            self._audit_log(
+                level="error",
+                payload={
+                    "kind": "eventsub_subscription_error",
+                    "service_account_id": str(interest.service_account_id),
+                    "bot_account_id": str(key.bot_account_id),
+                    "event_type": key.event_type,
+                    "broadcaster_user_id": key.broadcaster_user_id,
+                    "direction": "outgoing",
+                    "transport": interest.transport,
+                    "target": interest.webhook_url if interest.transport == "webhook" else "/ws/events",
+                    "error_code": error_code,
+                    "reason": reason,
+                },
+            )
             await self._record_service_trace(
                 service_account_id=interest.service_account_id,
                 direction="outgoing",
@@ -733,6 +750,19 @@ class EventSubManager:
                 "subscription": subscription,
                 "event": event,
             }
+            self._audit_log(
+                level="info",
+                payload={
+                    "kind": "eventsub_incoming",
+                    "event_type": event_type,
+                    "broadcaster_user_id": broadcaster_user_id,
+                    "message_id": message_id,
+                    "direction": "incoming",
+                    "transport": incoming_transport,
+                    "matched_services": len({interest.service_account_id for interest in interests}),
+                    "payload": source_payload,
+                },
+            )
             source_target = "twitch:eventsub"
             for service_id in {interest.service_account_id for interest in interests}:
                 await self._record_service_trace(
@@ -755,6 +785,20 @@ class EventSubManager:
                 envelope["twitch_chat_assets"] = enriched
         await self._update_channel_state_from_event(bot.id, event_type, broadcaster_user_id, event)
         for interest in interests:
+            self._audit_log(
+                level="info",
+                payload={
+                    "kind": "eventsub_outgoing",
+                    "service_account_id": str(interest.service_account_id),
+                    "bot_account_id": str(bot.id),
+                    "event_type": event_type,
+                    "broadcaster_user_id": broadcaster_user_id,
+                    "direction": "outgoing",
+                    "transport": interest.transport,
+                    "target": interest.webhook_url if interest.transport == "webhook" else "/ws/events",
+                    "payload": envelope,
+                },
+            )
             await self._record_service_trace(
                 service_account_id=interest.service_account_id,
                 direction="outgoing",
@@ -772,6 +816,21 @@ class EventSubManager:
                     )
             else:
                 await self.event_hub.publish_to_service(interest.service_account_id, envelope)
+
+    def _audit_log(self, level: str, payload: dict) -> None:
+        record = self._redact_payload(payload)
+        if isinstance(record, dict):
+            record.setdefault("timestamp", datetime.now(UTC).isoformat())
+            record.setdefault("level", level)
+        text = json.dumps(record, default=str)
+        if len(text) > self._audit_payload_max_chars:
+            text = text[: self._audit_payload_max_chars] + "... [truncated]"
+        if level == "error":
+            eventsub_audit_logger.error(text)
+        elif level == "warning":
+            eventsub_audit_logger.warning(text)
+        else:
+            eventsub_audit_logger.info(text)
 
     @staticmethod
     def _is_sensitive_key(key: str) -> bool:
@@ -873,6 +932,16 @@ class EventSubManager:
         twitch_id = sub.get("id")
         if not twitch_id:
             return
+        self._audit_log(
+            level="warning",
+            payload={
+                "kind": "eventsub_revocation",
+                "direction": "incoming",
+                "transport": "twitch_eventsub",
+                "subscription_id": twitch_id,
+                "payload": payload,
+            },
+        )
         async with self.session_factory() as session:
             db_sub = await session.scalar(
                 select(TwitchSubscription).where(TwitchSubscription.twitch_subscription_id == twitch_id)
@@ -885,6 +954,16 @@ class EventSubManager:
         revoked_user_id = event.get("user_id")
         if not revoked_user_id:
             return
+        self._audit_log(
+            level="warning",
+            payload={
+                "kind": "eventsub_user_authorization_revoke",
+                "direction": "incoming",
+                "transport": "twitch_eventsub",
+                "event_type": "user.authorization.revoke",
+                "payload": event,
+            },
+        )
         async with self.session_factory() as session:
             bot = await session.scalar(select(BotAccount).where(BotAccount.twitch_user_id == revoked_user_id))
             if not bot:
