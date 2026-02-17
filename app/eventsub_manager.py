@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -55,6 +56,11 @@ class EventSubManager:
         self._session_id: str | None = None
         self._zero_listener_since: datetime | None = None
         self._subscription_lock = asyncio.Lock()
+        self._subscription_error_cooldown = timedelta(minutes=1)
+        self._subscription_error_last_sent: dict[
+            tuple[uuid.UUID, uuid.UUID, str, str, str], datetime
+        ] = {}
+        self._subscription_error_lock = asyncio.Lock()
 
     def _transport_for_event(self, event_type: str) -> Literal["websocket", "webhook"]:
         if event_type == "user.authorization.revoke":
@@ -463,6 +469,13 @@ class EventSubManager:
                         )
                     except TwitchApiError as exc:
                         if not self._is_subscription_not_found_error(exc):
+                            await self._notify_subscription_failure(
+                                key=key,
+                                upstream_transport=upstream_transport,
+                                reason=(
+                                    f"Cannot rotate EventSub subscription {db_sub.twitch_subscription_id}: {exc}"
+                                ),
+                            )
                             logger.warning(
                                 "Cannot rotate EventSub subscription %s for %s/%s: %s",
                                 db_sub.twitch_subscription_id,
@@ -475,9 +488,16 @@ class EventSubManager:
                     await session.flush()
                 if upstream_transport == "webhook":
                     if not self.webhook_callback_url or not self.webhook_secret:
-                        raise RuntimeError(
-                            "TWITCH_EVENTSUB_WEBHOOK_CALLBACK_URL and TWITCH_EVENTSUB_WEBHOOK_SECRET are required for webhook events"
+                        reason = (
+                            "TWITCH_EVENTSUB_WEBHOOK_CALLBACK_URL and "
+                            "TWITCH_EVENTSUB_WEBHOOK_SECRET are required for webhook events"
                         )
+                        await self._notify_subscription_failure(
+                            key=key,
+                            upstream_transport=upstream_transport,
+                            reason=reason,
+                        )
+                        raise RuntimeError(reason)
                     transport: dict[str, str] = {
                         "method": "webhook",
                         "callback": self.webhook_callback_url,
@@ -497,9 +517,21 @@ class EventSubManager:
                 if key.event_type.startswith("channel.chat."):
                     bot = await session.get(BotAccount, key.bot_account_id)
                     if not bot:
-                        raise RuntimeError(f"Bot account missing for chat subscription: {key.bot_account_id}")
+                        reason = f"Bot account missing for chat subscription: {key.bot_account_id}"
+                        await self._notify_subscription_failure(
+                            key=key,
+                            upstream_transport=upstream_transport,
+                            reason=reason,
+                        )
+                        raise RuntimeError(reason)
                     if not bot.enabled:
-                        raise RuntimeError(f"Bot account disabled for chat subscription: {key.bot_account_id}")
+                        reason = f"Bot account disabled for chat subscription: {key.bot_account_id}"
+                        await self._notify_subscription_failure(
+                            key=key,
+                            upstream_transport=upstream_transport,
+                            reason=reason,
+                        )
+                        raise RuntimeError(reason)
                     create_access_token = await ensure_bot_access_token(session, self.twitch, bot)
                     condition["user_id"] = bot.twitch_user_id
                 try:
@@ -519,6 +551,11 @@ class EventSubManager:
                         if self._session_id == session_id_snapshot:
                             self._session_id = None
                         return
+                    await self._notify_subscription_failure(
+                        key=key,
+                        upstream_transport=upstream_transport,
+                        reason=str(exc),
+                    )
                     raise
                 new_sub = TwitchSubscription(
                     bot_account_id=key.bot_account_id,
@@ -531,6 +568,89 @@ class EventSubManager:
                 )
                 session.add(new_sub)
                 await session.commit()
+
+    @staticmethod
+    def _classify_subscription_failure(reason: str) -> tuple[str, str]:
+        message = reason.lower()
+        if "missing proper authorization" in message or "subscription missing proper authorization" in message:
+            return (
+                "insufficient_permissions",
+                "Broadcaster authorization for this bot is missing or no longer valid.",
+            )
+        if "missing required scope" in message or "scope" in message:
+            return (
+                "missing_scope",
+                "Bot OAuth token is missing required scope for this subscription type.",
+            )
+        if "unauthorized" in message or "forbidden" in message:
+            return (
+                "unauthorized",
+                "Twitch rejected subscription authorization for this bot/condition.",
+            )
+        return ("subscription_create_failed", "Twitch rejected subscription creation for this interest.")
+
+    async def _should_emit_subscription_error(
+        self,
+        service_account_id: uuid.UUID,
+        key: InterestKey,
+        error_code: str,
+    ) -> bool:
+        now = datetime.now(UTC)
+        throttle_key = (
+            service_account_id,
+            key.bot_account_id,
+            key.event_type,
+            key.broadcaster_user_id,
+            error_code,
+        )
+        async with self._subscription_error_lock:
+            threshold = now - self._subscription_error_cooldown
+            expired = [k for k, sent_at in self._subscription_error_last_sent.items() if sent_at < threshold]
+            for item in expired:
+                self._subscription_error_last_sent.pop(item, None)
+            last_sent = self._subscription_error_last_sent.get(throttle_key)
+            if last_sent and now - last_sent < self._subscription_error_cooldown:
+                return False
+            self._subscription_error_last_sent[throttle_key] = now
+            return True
+
+    async def _notify_subscription_failure(
+        self,
+        key: InterestKey,
+        upstream_transport: Literal["websocket", "webhook"],
+        reason: str,
+    ) -> None:
+        interests = await self.registry.interested(key)
+        if not interests:
+            return
+        error_code, hint = self._classify_subscription_failure(reason)
+        for interest in interests:
+            if not await self._should_emit_subscription_error(interest.service_account_id, key, error_code):
+                continue
+            envelope = {
+                "id": uuid.uuid4().hex,
+                "provider": "twitch-service",
+                "type": "subscription.error",
+                "event_timestamp": datetime.now(UTC).isoformat(),
+                "event": {
+                    "error_code": error_code,
+                    "reason": reason,
+                    "hint": hint,
+                    "event_type": key.event_type,
+                    "broadcaster_user_id": key.broadcaster_user_id,
+                    "bot_account_id": str(key.bot_account_id),
+                    "upstream_transport": upstream_transport,
+                },
+            }
+            if interest.transport == "webhook" and interest.webhook_url:
+                with suppress(Exception):
+                    await self.event_hub.publish_webhook(
+                        interest.service_account_id,
+                        interest.webhook_url,
+                        envelope,
+                    )
+            else:
+                await self.event_hub.publish_to_service(interest.service_account_id, envelope)
 
     async def handle_webhook_notification(self, payload: dict, message_id: str = "") -> None:
         await self._forward_notification_payload(payload, message_id)

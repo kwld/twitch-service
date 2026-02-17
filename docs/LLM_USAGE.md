@@ -98,7 +98,27 @@ LLM rule:
 - `WS /ws/events`
 - outgoing webhook callbacks to service-owned URLs.
 
-## 5) Exact Request/Response Contracts
+## 5) How Other Apps Subscribe To Twitch Events
+Use this order for a reliable integration:
+1. Authenticate service calls with `X-Client-Id` + `X-Client-Secret`.
+1. Discover available bots via `GET /v1/bots/accessible` and pick one allowed bot.
+1. Fetch supported event types via `GET /v1/eventsub/subscription-types`.
+1. If your event type needs broadcaster consent for the selected bot, run:
+   - `POST /v1/broadcaster-authorizations/start`
+   - complete Twitch OAuth redirect
+   - confirm with `GET /v1/broadcaster-authorizations`.
+1. Create subscription intent with `POST /v1/interests`:
+   - choose downstream `transport`:
+     - `websocket`: receive events over `WS /ws/events`
+     - `webhook`: receive events via `webhook_url`
+1. Keep interests alive with `POST /v1/interests/{interest_id}/heartbeat`.
+1. Remove unused subscriptions with `DELETE /v1/interests/{interest_id}`.
+
+Notes:
+- `POST /v1/interests` deduplicates by service/bot/event/broadcaster/transport/webhook URL.
+- Upstream Twitch transport (webhook vs websocket) is selected by server policy and is independent of your downstream transport.
+
+## 6) Exact Request/Response Contracts
 
 ### `GET /v1/interests`
 Returns list of interest rows owned by authenticated service.
@@ -358,7 +378,7 @@ LLM guidance:
 - If user intent is "clip the moment that just happened", default to `has_delay=true`.
 - If user intent is "start clipping from now", use `has_delay=false`.
 
-## 6) OAuth Callback Semantics
+## 7) OAuth Callback Semantics
 Endpoint: `GET /oauth/callback`
 
 Two behaviors share this endpoint:
@@ -377,7 +397,7 @@ For broadcaster auth requests:
 - marks request completed/failed,
 - if request includes `redirect_url`, returns HTTP `302` to that URL with result query params.
 
-## 7) Event Delivery Semantics
+## 8) Event Delivery Semantics
 
 ### Service websocket (`WS /ws/events`)
 - preferred auth: short-lived token from `POST /v1/ws-token`.
@@ -406,12 +426,52 @@ Envelope shape emitted by local hub:
 }
 ```
 
+Subscription failure notification:
+- when upstream Twitch subscription creation/rotation fails for an active interest key, the service emits a `subscription.error` envelope to every interested service using that service's configured transport (`websocket` or `webhook`).
+- this includes permission failures (for example missing broadcaster authorization or missing scopes).
+- notifications are rate-limited per `(service, bot, event_type, broadcaster, error_code)` for 1 minute to reduce spam.
+
+`subscription.error` example:
+```json
+{
+  "id": "generated-id",
+  "provider": "twitch-service",
+  "type": "subscription.error",
+  "event_timestamp": "ISO8601",
+  "event": {
+    "error_code": "insufficient_permissions|missing_scope|unauthorized|subscription_create_failed",
+    "reason": "raw upstream error text",
+    "hint": "operator-friendly remediation hint",
+    "event_type": "channel.chat.message",
+    "broadcaster_user_id": "12345",
+    "bot_account_id": "uuid",
+    "upstream_transport": "websocket|webhook"
+  }
+}
+```
+
+LLM handling guideline for `subscription.error`:
+1. Treat it as operational failure of upstream subscription state, not as a user-content event.
+1. Parse `event.error_code` first, then route remediation:
+   - `insufficient_permissions`: run broadcaster authorization flow for the same `(bot_account_id, broadcaster_user_id)`.
+   - `missing_scope`: re-run bot OAuth setup to refresh scopes, then re-create interest.
+   - `unauthorized`: verify selected bot is allowed for your service and still enabled; then retry with valid bot/auth.
+   - `subscription_create_failed`: inspect `event.reason`, then retry with bounded backoff.
+1. Do not hard-loop retries.
+   - Use capped retry attempts with exponential backoff (for example 3 attempts over a few minutes).
+1. Preserve subscription intent.
+   - Keep or recreate the logical interest after remediation so manager can ensure upstream subscription again.
+1. Surface operator diagnostics.
+   - Log full envelope, include `bot_account_id`, `event_type`, `broadcaster_user_id`, `upstream_transport`, `reason`.
+1. Escalate when persistent.
+   - If the same key continues failing after remediation/retries, alert human operator and stop auto-retry for that key until manual action.
+
 Optional enrichment (backward compatible):
 - For `type` starting with `channel.chat.` the envelope may include:
   - `twitch_chat_assets`: best-effort lookup payload containing badge/emote image metadata referenced by the message.
   - Old clients should ignore unknown top-level keys.
 
-## 8) Upstream Twitch EventSub Routing
+## 9) Upstream Twitch EventSub Routing
 Routing to Twitch transport is decided by manager:
 - `user.authorization.revoke` => webhook only.
 - event type in `TWITCH_EVENTSUB_WEBHOOK_EVENT_TYPES` => webhook.
@@ -419,7 +479,7 @@ Routing to Twitch transport is decided by manager:
 
 This is independent of downstream service transport preference.
 
-## 9) Error Model (Observed)
+## 10) Error Model (Observed)
 - `401`: invalid service credentials.
 - `403`: authenticated service not authorized for selected bot.
 - `404`: missing bot/interest/service resource.
@@ -441,7 +501,7 @@ LLM rule:
   - choose accessible bot,
   - validate credentials.
 
-## 10) Strict LLM Playbook
+## 11) Strict LLM Playbook
 1. Authenticate once with `GET /v1/interests`.
 1. Fetch `GET /v1/bots/accessible`; choose only listed bot.
 1. Fetch catalog `GET /v1/eventsub/subscription-types`.
@@ -449,14 +509,16 @@ LLM rule:
 1. If target channel requires channel grant, start and complete broadcaster auth.
 1. Create interests.
 1. If you need authoritative live status for interested channels, call `GET /v1/twitch/streams/status/interested?refresh=true` (or use `/v1/twitch/streams/live-test` for a single channel).
-1. Open websocket and/or webhook receiver.
+1. For websocket delivery, mint token via `POST /v1/ws-token`, then open `WS /ws/events?ws_token=...`.
+1. Open webhook receiver if using webhook transport.
 1. Heartbeat interests while active.
+1. If you receive `subscription.error`, surface it to operators and run remediation (grant broadcaster authorization, refresh bot scopes, or switch bot).
 1. On each incoming webhook, verify it is still desired; if not desired, delete matching webhook interests immediately.
 1. Send chat with chosen `auth_mode`.
 1. Create clips with `POST /v1/twitch/clips` when needed.
 1. Delete interests when no longer needed.
 
-## 11) Non-Service Endpoints (Admin/Operator)
+## 12) Non-Service Endpoints (Admin/Operator)
 For completeness:
 - `GET /v1/bots` (admin)
 - `POST /v1/admin/service-accounts` (admin)
