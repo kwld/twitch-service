@@ -54,6 +54,27 @@ class ServiceSubscriptionTransportSummaryResponse(BaseModel):
     by_event_type: list[ServiceSubscriptionTransportRow]
 
 
+class ActiveTwitchSubscriptionItem(BaseModel):
+    twitch_subscription_id: str
+    status: str
+    event_type: str
+    broadcaster_user_id: str
+    upstream_transport: Literal["webhook", "websocket"]
+    bot_account_id: uuid.UUID
+    matched_interest_ids: list[uuid.UUID]
+    session_id: str | None = None
+    connected_at: str | None = None
+    disconnected_at: str | None = None
+
+
+class ActiveTwitchSubscriptionsResponse(BaseModel):
+    source: Literal["cache", "twitch_live"]
+    cached_at: datetime
+    total_from_twitch: int
+    matched_for_service: int
+    items: list[ActiveTwitchSubscriptionItem]
+
+
 class EventEnvelope(BaseModel):
     id: str
     subscription_type: str

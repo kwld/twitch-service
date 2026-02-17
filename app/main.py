@@ -59,6 +59,8 @@ from app.models import (
     TwitchSubscription,
 )
 from app.schemas import (
+    ActiveTwitchSubscriptionItem,
+    ActiveTwitchSubscriptionsResponse,
     BroadcasterAuthorizationResponse,
     CreateClipRequest,
     CreateClipResponse,
@@ -1251,6 +1253,77 @@ async def list_service_subscription_transports(service: ServiceAccount = Depends
             "webhook": by_transport["webhook"],
         },
         by_event_type=rows,
+    )
+
+
+@app.get(
+    "/v1/eventsub/subscriptions/active",
+    response_model=ActiveTwitchSubscriptionsResponse,
+)
+async def list_active_twitch_subscriptions_for_service(
+    refresh: bool = False,
+    service: ServiceAccount = Depends(_service_auth),
+):
+    snapshot, cached_at, from_cache = await eventsub_manager.get_active_subscriptions_snapshot(
+        force_refresh=refresh
+    )
+    async with session_factory() as session:
+        allowed_ids = await _service_allowed_bot_ids(session, service.id)
+        interests = list(
+            (
+                await session.scalars(
+                    select(ServiceInterest).where(ServiceInterest.service_account_id == service.id)
+                )
+            ).all()
+        )
+    interest_ids_by_key: dict[tuple[str, str, str], list[uuid.UUID]] = {}
+    for interest in interests:
+        key = (
+            str(interest.bot_account_id),
+            interest.event_type,
+            interest.broadcaster_user_id,
+        )
+        bucket = interest_ids_by_key.setdefault(key, [])
+        bucket.append(interest.id)
+
+    items: list[ActiveTwitchSubscriptionItem] = []
+    for row in snapshot:
+        bot_account_id = row.get("bot_account_id", "")
+        try:
+            bot_uuid = uuid.UUID(str(bot_account_id))
+        except Exception:
+            continue
+        if allowed_ids and bot_uuid not in allowed_ids:
+            continue
+        key = (
+            str(bot_uuid),
+            str(row.get("event_type", "")),
+            str(row.get("broadcaster_user_id", "")),
+        )
+        matched_interest_ids = interest_ids_by_key.get(key, [])
+        if not matched_interest_ids:
+            continue
+        items.append(
+            ActiveTwitchSubscriptionItem(
+                twitch_subscription_id=str(row.get("twitch_subscription_id", "")),
+                status=str(row.get("status", "unknown")),
+                event_type=str(row.get("event_type", "")),
+                broadcaster_user_id=str(row.get("broadcaster_user_id", "")),
+                upstream_transport=str(row.get("upstream_transport", "websocket")),
+                bot_account_id=bot_uuid,
+                matched_interest_ids=matched_interest_ids,
+                session_id=row.get("session_id"),
+                connected_at=row.get("connected_at"),
+                disconnected_at=row.get("disconnected_at"),
+            )
+        )
+
+    return ActiveTwitchSubscriptionsResponse(
+        source="cache" if from_cache else "twitch_live",
+        cached_at=cached_at,
+        total_from_twitch=len(snapshot),
+        matched_for_service=len(items),
+        items=items,
     )
 
 

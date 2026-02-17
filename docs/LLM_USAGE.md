@@ -63,6 +63,7 @@ LLM rule:
 ### Core
 - `GET /health`
 - `GET /v1/eventsub/subscription-types`
+- `GET /v1/eventsub/subscriptions/active`
 - `GET /v1/bots/accessible`
 
 ### Interest lifecycle
@@ -233,6 +234,45 @@ Returns:
 
 LLM rule:
 - never invent event types; choose from returned catalog.
+
+### `GET /v1/eventsub/subscriptions/active`
+Purpose:
+- confirm real upstream Twitch EventSub subscription state for this service's own interest keys.
+
+Query:
+- `refresh` (optional bool, default `false`)
+  - `false`: returns cached Twitch snapshot when still fresh.
+  - `true`: forces a fresh fetch from Twitch before filtering for this service.
+
+Response:
+```json
+{
+  "source": "cache|twitch_live",
+  "cached_at": "ISO8601",
+  "total_from_twitch": 123,
+  "matched_for_service": 7,
+  "items": [
+    {
+      "twitch_subscription_id": "string",
+      "status": "enabled|...",
+      "event_type": "channel.chat.message",
+      "broadcaster_user_id": "12345",
+      "upstream_transport": "webhook|websocket",
+      "bot_account_id": "uuid",
+      "matched_interest_ids": ["uuid"],
+      "session_id": "string|null",
+      "connected_at": "ISO8601|null",
+      "disconnected_at": "ISO8601|null"
+    }
+  ]
+}
+```
+
+Notes:
+- returns only rows matched to the authenticated service's interest keys; no cross-service leakage.
+- `total_from_twitch` is the full upstream snapshot size before service filtering.
+- cache TTL is short-lived (about 30 seconds) to reduce Twitch API pressure.
+- intended for operational confirmation (e.g., "is my subscription really enabled upstream?").
 
 ### `POST /v1/broadcaster-authorizations/start`
 Request:

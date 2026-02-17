@@ -124,6 +124,7 @@ bash ./scripts/run-dev.sh 8080
 - `GET /v1/user-auth/session/{state}` (service)
 - `POST /v1/ws-token` (service)
 - `GET /v1/eventsub/subscription-types` (service)
+- `GET /v1/eventsub/subscriptions/active?refresh=false` (service)
 - `POST /v1/interests` (service)
 - `DELETE /v1/interests/{interest_id}` (service)
 - `POST /v1/interests/{interest_id}/heartbeat` (service)

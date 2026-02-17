@@ -68,6 +68,10 @@ class EventSubManager:
         self._subscription_error_lock = asyncio.Lock()
         self._trace_payload_max_chars = 12000
         self._audit_payload_max_chars = 8000
+        self._active_subscriptions_cache_ttl = timedelta(seconds=30)
+        self._active_subscriptions_cache_lock = asyncio.Lock()
+        self._active_subscriptions_cached_at: datetime | None = None
+        self._active_subscriptions_cache: list[dict] = []
 
     def _transport_for_event(self, event_type: str) -> Literal["websocket", "webhook"]:
         transport, _ = best_transport_for_service(
@@ -330,6 +334,75 @@ class EventSubManager:
                         if sub_id:
                             merged[sub_id] = sub
         return list(merged.values())
+
+    async def get_active_subscriptions_snapshot(
+        self,
+        force_refresh: bool = False,
+    ) -> tuple[list[dict], datetime, bool]:
+        now = datetime.now(UTC)
+        async with self._active_subscriptions_cache_lock:
+            if (
+                not force_refresh
+                and self._active_subscriptions_cached_at
+                and (now - self._active_subscriptions_cached_at) < self._active_subscriptions_cache_ttl
+            ):
+                return (
+                    [dict(item) for item in self._active_subscriptions_cache],
+                    self._active_subscriptions_cached_at,
+                    True,
+                )
+
+            subs = await self._list_eventsub_subscriptions_all_tokens()
+            snapshot: list[dict] = []
+            async with self.session_factory() as session:
+                previous_sub_owner = {
+                    row.twitch_subscription_id: row.bot_account_id
+                    for row in list((await session.scalars(select(TwitchSubscription))).all())
+                }
+                for sub in subs:
+                    condition = sub.get("condition", {})
+                    event_type = str(sub.get("type", "")).strip()
+                    sub_id = str(sub.get("id", "")).strip()
+                    status = str(sub.get("status", "unknown"))
+                    broadcaster_user_id = str(condition.get("broadcaster_user_id", "")).strip()
+                    method = str(sub.get("transport", {}).get("method", "")).strip()
+                    if method not in {"websocket", "webhook"}:
+                        continue
+                    if not sub_id or not event_type or not broadcaster_user_id:
+                        continue
+                    bot: BotAccount | None = None
+                    if event_type.startswith("channel.chat."):
+                        bot_user_id = str(condition.get("user_id", "")).strip()
+                        if bot_user_id:
+                            bot = await session.scalar(
+                                select(BotAccount).where(BotAccount.twitch_user_id == bot_user_id)
+                            )
+                    else:
+                        previous_bot_id = previous_sub_owner.get(sub_id)
+                        if previous_bot_id:
+                            bot = await session.get(BotAccount, previous_bot_id)
+                        if not bot:
+                            bot = await session.scalar(
+                                select(BotAccount).where(BotAccount.twitch_user_id == broadcaster_user_id)
+                            )
+                    if not bot:
+                        continue
+                    snapshot.append(
+                        {
+                            "twitch_subscription_id": sub_id,
+                            "status": status,
+                            "event_type": event_type,
+                            "broadcaster_user_id": broadcaster_user_id,
+                            "upstream_transport": method,
+                            "session_id": sub.get("transport", {}).get("session_id"),
+                            "connected_at": sub.get("transport", {}).get("connected_at"),
+                            "disconnected_at": sub.get("transport", {}).get("disconnected_at"),
+                            "bot_account_id": str(bot.id),
+                        }
+                    )
+            self._active_subscriptions_cache = [dict(item) for item in snapshot]
+            self._active_subscriptions_cached_at = now
+            return [dict(item) for item in snapshot], now, False
 
     async def _sync_from_twitch_and_reconcile(self) -> None:
         subs = await self._list_eventsub_subscriptions_all_tokens()
