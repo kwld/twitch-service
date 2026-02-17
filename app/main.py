@@ -1496,14 +1496,32 @@ async def create_interest(
                 await session.refresh(interest)
 
     key = await interest_registry.add(interest)
-    await eventsub_manager.on_interest_added(key)
+    try:
+        await eventsub_manager.on_interest_added(key)
+    except Exception as exc:
+        logger.warning(
+            "Interest created but upstream subscription ensure failed for %s/%s/%s: %s",
+            key.bot_account_id,
+            key.event_type,
+            key.broadcaster_user_id,
+            exc,
+        )
     for default_interest in await _ensure_default_stream_interests(
         service=service,
         bot_account_id=req.bot_account_id,
         broadcaster_user_id=broadcaster_user_id,
     ):
         default_key = await interest_registry.add(default_interest)
-        await eventsub_manager.on_interest_added(default_key)
+        try:
+            await eventsub_manager.on_interest_added(default_key)
+        except Exception as exc:
+            logger.warning(
+                "Default interest created but upstream subscription ensure failed for %s/%s/%s: %s",
+                default_key.bot_account_id,
+                default_key.event_type,
+                default_key.broadcaster_user_id,
+                exc,
+            )
     return interest
 
 

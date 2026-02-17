@@ -214,6 +214,7 @@ Side effects:
 - auto-ensures default stream interests for same `(service, bot, broadcaster)`:
   - `stream.online`
   - `stream.offline`
+- if upstream ensure fails (for example missing broadcaster authorization or unsupported Twitch condition fields), the API still persists the logical interest and emits `subscription.error` to service transports; clients should handle that event for remediation.
 
 ### `DELETE /v1/interests/{interest_id}`
 - deletes interest only if owned by service.
