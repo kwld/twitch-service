@@ -24,6 +24,7 @@ Minimal API service that:
     - regenerate secret,
     - delete account,
     - grant/revoke bot access per service.
+  - live per-service communication tracking (incoming from Twitch and outgoing to service transports) with redacted payloads/secrets.
 - API for local services to register interest subscriptions.
 - API to list EventSub subscription catalog and transport recommendations.
 - API for services to list effective bot access (`GET /v1/bots/accessible`).

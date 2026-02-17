@@ -588,3 +588,23 @@ For completeness:
 - `GET /v1/admin/service-accounts` (admin)
 - `POST /v1/admin/service-accounts/{client_id}/regenerate` (admin)
 - CLI console provides additional management operations not exposed as service APIs.
+
+### Operator CLI: Live Service Communication Tracking
+The operator CLI (`twitch-eventsub-cli console`) includes a live tracking mode for a selected service account.
+
+Behavior:
+- tails redacted `service_event_traces` entries in near real-time,
+- shows both:
+  - incoming events from Twitch into the bridge (per interested service),
+  - outgoing events from bridge to service local transport (`websocket`/`webhook`),
+- prints details:
+  - direction,
+  - local transport,
+  - event type,
+  - target,
+  - payload JSON.
+
+Redaction policy:
+- sensitive payload fields are masked (e.g. keys containing `secret`, `token`, `authorization`, `api_key`, `password`),
+- sensitive values are shown as `***` + last 4 characters,
+- target URLs with sensitive query params are masked using the same rule.

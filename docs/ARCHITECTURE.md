@@ -46,6 +46,7 @@ Main tables:
 - `service_user_auth_requests`: pending/completed Twitch end-user auth sessions per service (`user:read:email`).
 - `oauth_callbacks`: callback relay storage for CLI OAuth polling.
 - `service_runtime_stats`: per-service counters and connection/event timestamps.
+- `service_event_traces`: redacted incoming/outgoing communication traces per service for operator live tracking.
 
 ## 4) Authentication Model
 - Admin endpoints: `X-Admin-Key` must match `ADMIN_API_KEY`.

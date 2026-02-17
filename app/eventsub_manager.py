@@ -7,6 +7,7 @@ import uuid
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import Literal
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import websockets
 from websockets.exceptions import ConnectionClosedError
@@ -19,6 +20,8 @@ from app.event_router import InterestKey, InterestRegistry, LocalEventHub
 from app.models import (
     BotAccount,
     ChannelState,
+    ServiceAccount,
+    ServiceEventTrace,
     ServiceInterest,
     ServiceRuntimeStats,
     TwitchSubscription,
@@ -62,6 +65,7 @@ class EventSubManager:
             tuple[uuid.UUID, uuid.UUID, str, str, str], datetime
         ] = {}
         self._subscription_error_lock = asyncio.Lock()
+        self._trace_payload_max_chars = 12000
 
     def _transport_for_event(self, event_type: str) -> Literal["websocket", "webhook"]:
         transport, _ = best_transport_for_service(
@@ -643,6 +647,14 @@ class EventSubManager:
                     "upstream_transport": upstream_transport,
                 },
             }
+            await self._record_service_trace(
+                service_account_id=interest.service_account_id,
+                direction="outgoing",
+                local_transport=interest.transport,
+                event_type="subscription.error",
+                target=interest.webhook_url if interest.transport == "webhook" else "/ws/events",
+                payload=envelope,
+            )
             if interest.transport == "webhook" and interest.webhook_url:
                 with suppress(Exception):
                     await self.event_hub.publish_webhook(
@@ -654,7 +666,7 @@ class EventSubManager:
                 await self.event_hub.publish_to_service(interest.service_account_id, envelope)
 
     async def handle_webhook_notification(self, payload: dict, message_id: str = "") -> None:
-        await self._forward_notification_payload(payload, message_id)
+        await self._forward_notification_payload(payload, message_id, incoming_transport="twitch_webhook")
 
     async def handle_webhook_revocation(self, payload: dict) -> None:
         await self._handle_revocation(payload)
@@ -662,9 +674,18 @@ class EventSubManager:
     async def _handle_notification(self, message: dict) -> None:
         payload = message.get("payload", {})
         metadata = message.get("metadata", {})
-        await self._forward_notification_payload(payload, metadata.get("message_id", ""))
+        await self._forward_notification_payload(
+            payload,
+            metadata.get("message_id", ""),
+            incoming_transport="twitch_websocket",
+        )
 
-    async def _forward_notification_payload(self, payload: dict, message_id: str) -> None:
+    async def _forward_notification_payload(
+        self,
+        payload: dict,
+        message_id: str,
+        incoming_transport: str,
+    ) -> None:
         subscription = payload.get("subscription", {})
         event = payload.get("event", {})
         event_type = subscription.get("type")
@@ -706,6 +727,22 @@ class EventSubManager:
             broadcaster_user_id=broadcaster_user_id,
         )
         interests = await self.registry.interested(key)
+        if interests:
+            source_payload = {
+                "message_id": message_id,
+                "subscription": subscription,
+                "event": event,
+            }
+            source_target = "twitch:eventsub"
+            for service_id in {interest.service_account_id for interest in interests}:
+                await self._record_service_trace(
+                    service_account_id=service_id,
+                    direction="incoming",
+                    local_transport=incoming_transport,
+                    event_type=event_type,
+                    target=source_target,
+                    payload=source_payload,
+                )
         envelope = self.event_hub.envelope(
             message_id=message_id,
             event_type=event_type,
@@ -718,6 +755,14 @@ class EventSubManager:
                 envelope["twitch_chat_assets"] = enriched
         await self._update_channel_state_from_event(bot.id, event_type, broadcaster_user_id, event)
         for interest in interests:
+            await self._record_service_trace(
+                service_account_id=interest.service_account_id,
+                direction="outgoing",
+                local_transport=interest.transport,
+                event_type=event_type,
+                target=interest.webhook_url if interest.transport == "webhook" else "/ws/events",
+                payload=envelope,
+            )
             if interest.transport == "webhook" and interest.webhook_url:
                 with suppress(Exception):
                     await self.event_hub.publish_webhook(
@@ -727,6 +772,101 @@ class EventSubManager:
                     )
             else:
                 await self.event_hub.publish_to_service(interest.service_account_id, envelope)
+
+    @staticmethod
+    def _is_sensitive_key(key: str) -> bool:
+        k = key.strip().lower().replace("-", "_")
+        return any(
+            token in k
+            for token in (
+                "secret",
+                "token",
+                "authorization",
+                "api_key",
+                "password",
+                "client_secret",
+                "x_client_secret",
+                "ws_token",
+            )
+        )
+
+    @staticmethod
+    def _mask_secret(value: object) -> str:
+        raw = str(value)
+        if not raw:
+            return "***"
+        if len(raw) <= 4:
+            return "***"
+        return "***" + raw[-4:]
+
+    def _redact_payload(self, payload: object) -> object:
+        if isinstance(payload, dict):
+            out: dict[str, object] = {}
+            for key, value in payload.items():
+                if self._is_sensitive_key(str(key)):
+                    out[str(key)] = self._mask_secret(value)
+                else:
+                    out[str(key)] = self._redact_payload(value)
+            return out
+        if isinstance(payload, list):
+            return [self._redact_payload(x) for x in payload]
+        if isinstance(payload, str):
+            return payload
+        return payload
+
+    def _redact_target(self, target: str | None) -> str | None:
+        if not target:
+            return target
+        raw = str(target)
+        try:
+            split = urlsplit(raw)
+            if split.scheme and split.netloc:
+                query_items = parse_qsl(split.query, keep_blank_values=True)
+                redacted_items: list[tuple[str, str]] = []
+                for key, value in query_items:
+                    if self._is_sensitive_key(key):
+                        redacted_items.append((key, self._mask_secret(value)))
+                    else:
+                        redacted_items.append((key, value))
+                redacted_query = urlencode(redacted_items, doseq=True)
+                return urlunsplit((split.scheme, split.netloc, split.path, redacted_query, split.fragment))
+        except Exception:
+            pass
+        if any(token in raw.lower() for token in ("secret", "token", "authorization", "api_key", "password")):
+            return self._mask_secret(raw)
+        return raw
+
+    async def _record_service_trace(
+        self,
+        service_account_id: uuid.UUID,
+        direction: str,
+        local_transport: str,
+        event_type: str,
+        target: str | None,
+        payload: object,
+    ) -> None:
+        try:
+            redacted = self._redact_payload(payload)
+            payload_json = json.dumps(redacted, default=str)
+            if len(payload_json) > self._trace_payload_max_chars:
+                payload_json = payload_json[: self._trace_payload_max_chars] + "... [truncated]"
+            async with self.session_factory() as session:
+                service = await session.get(ServiceAccount, service_account_id)
+                if service is None:
+                    return
+                session.add(
+                    ServiceEventTrace(
+                        service_account_id=service_account_id,
+                        direction=direction,
+                        local_transport=local_transport,
+                        event_type=event_type,
+                        target=self._redact_target(target),
+                        payload_json=payload_json,
+                    )
+                )
+                await session.commit()
+        except Exception as exc:
+            logger.debug("Skipping service event trace write: %s", exc)
 
     async def _handle_revocation(self, payload: dict) -> None:
         sub = payload.get("subscription", {})

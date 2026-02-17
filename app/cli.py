@@ -24,6 +24,7 @@ from app.models import (
     OAuthCallback,
     ServiceAccount,
     ServiceBotAccess,
+    ServiceEventTrace,
     ServiceInterest,
     ServiceRuntimeStats,
     TwitchSubscription,
@@ -1253,6 +1254,72 @@ async def list_tracked_channels_menu(session: PromptSession, session_factory) ->
         )
 
 
+def _format_trace_payload(payload_json: str, max_chars: int = 8000) -> str:
+    text = payload_json or "{}"
+    if len(text) > max_chars:
+        text = text[:max_chars] + "... [truncated]"
+    try:
+        parsed = json.loads(text)
+        return json.dumps(parsed, indent=2, ensure_ascii=False)
+    except Exception:
+        return text
+
+
+async def live_service_event_tracking_menu(session: PromptSession, session_factory) -> None:
+    service = await _select_service_account(session, session_factory)
+    if not service:
+        return
+    raw_limit = (await session.prompt_async("Recent buffer size [200]: ")).strip()
+    raw_poll = (await session.prompt_async("Poll interval seconds [1.0]: ")).strip()
+    try:
+        limit = int(raw_limit) if raw_limit else 200
+    except ValueError:
+        limit = 200
+    try:
+        poll_seconds = float(raw_poll) if raw_poll else 1.0
+    except ValueError:
+        poll_seconds = 1.0
+    limit = max(10, min(limit, 2000))
+    poll_seconds = max(0.2, min(poll_seconds, 10.0))
+
+    print(
+        "\nLive service communication tracking\n"
+        f"- service={service.name} client_id={service.client_id}\n"
+        f"- showing incoming/outgoing event traces (payload already redacted)\n"
+        "- press Ctrl+C to stop\n"
+    )
+    seen: set[str] = set()
+    try:
+        while True:
+            async with session_factory() as db:
+                rows = list(
+                    (
+                        await db.scalars(
+                            select(ServiceEventTrace)
+                            .where(ServiceEventTrace.service_account_id == service.id)
+                            .order_by(ServiceEventTrace.created_at.desc())
+                            .limit(limit)
+                        )
+                    ).all()
+                )
+            rows = list(reversed(rows))
+            fresh = [row for row in rows if str(row.id) not in seen]
+            for row in fresh:
+                seen.add(str(row.id))
+                print(
+                    f"[{row.created_at.isoformat()}] direction={row.direction} "
+                    f"transport={row.local_transport} event={row.event_type} target={row.target or '-'}"
+                )
+                print(_format_trace_payload(row.payload_json))
+                print("-" * 80)
+            # keep memory bounded for long sessions
+            if len(seen) > 5000:
+                seen = set(list(seen)[-3000:])
+            await asyncio.sleep(poll_seconds)
+    except KeyboardInterrupt:
+        print("\nLive tracking stopped.")
+
+
 async def menu_loop() -> None:
     settings, engine, session_factory = await init_db()
     twitch = TwitchClient(
@@ -1280,7 +1347,8 @@ async def menu_loop() -> None:
             "11) View broadcaster authorizations\n"
             "12) Create clip\n"
             "13) View tracked channels (online/offline)\n"
-            "14) Exit\n"
+            "14) Live service communication tracking\n"
+            "15) Exit\n"
         )
         choice = (await session.prompt_async("Select option: ")).strip()
 
@@ -1377,6 +1445,9 @@ async def menu_loop() -> None:
             await list_tracked_channels_menu(session, session_factory)
 
         elif choice == "14":
+            await live_service_event_tracking_menu(session, session_factory)
+
+        elif choice == "15":
             break
 
         else:
