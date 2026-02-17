@@ -5,9 +5,9 @@ from typing import Literal
 
 
 # Source: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types/
-# Snapshot date: 2026-02-12
+# Snapshot date: 2026-02-17
 SOURCE_URL = "https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types/"
-SOURCE_SNAPSHOT_DATE = "2026-02-12"
+SOURCE_SNAPSHOT_DATE = "2026-02-17"
 
 
 @dataclass(frozen=True, slots=True)
@@ -337,13 +337,38 @@ EVENTSUB_CATALOG: tuple[EventSubCatalogEntry, ...] = (
 KNOWN_EVENT_TYPES: frozenset[str] = frozenset(entry.event_type for entry in EVENTSUB_CATALOG)
 
 
-def best_transport_for_service(event_type: str, webhook_event_types: set[str]) -> tuple[str, str]:
+# Per Twitch docs (EventSub Subscription Types), these are webhook-only and cannot use WebSockets.
+WEBSOCKET_UNSUPPORTED_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "drop.entitlement.grant",
+        "extension.bits_transaction.create",
+        "user.authorization.grant",
+        "user.authorization.revoke",
+    }
+)
+
+
+def supported_twitch_transports(event_type: str) -> list[Literal["webhook", "websocket"]]:
+    normalized = event_type.strip().lower()
+    if normalized in WEBSOCKET_UNSUPPORTED_EVENT_TYPES:
+        return ["webhook"]
+    return ["webhook", "websocket"]
+
+
+def best_transport_for_service(
+    event_type: str,
+    webhook_available: bool,
+) -> tuple[Literal["webhook", "websocket"], str]:
+    transports = supported_twitch_transports(event_type)
     normalized = event_type.strip().lower()
     if normalized == "user.authorization.revoke":
-        return "webhook", "Must remain durable even while websocket reconnects; managed as webhook."
-    if normalized in webhook_event_types:
-        return "webhook", "Configured as webhook-preferred in TWITCH_EVENTSUB_WEBHOOK_EVENT_TYPES."
-    if normalized.startswith("channel.chat.") or normalized.startswith("user.whisper."):
-        return "websocket", "Low-latency chat-like event; websocket is recommended."
-    return "websocket", "Default transport in this service to minimize public callback dependencies."
+        return "webhook", "Webhook-only by Twitch; required for authorization revoke handling."
+    if webhook_available and "webhook" in transports:
+        return (
+            "webhook",
+            "Webhook preferred for hosted services; app-token EventSub flow and durable delivery.",
+        )
+    if "websocket" in transports:
+        return "websocket", "Webhook callback not configured; using websocket fallback."
+    return "webhook", "Webhook-only by Twitch."
 

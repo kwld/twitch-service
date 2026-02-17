@@ -10,6 +10,7 @@ Minimal API service that:
 - `README.md`: operator-facing overview, setup, deploy, and feature map.
 - `docs/ARCHITECTURE.md`: runtime internals and component behavior.
 - `docs/LLM_USAGE.md`: strict integration contract for LLM/service clients (code-aligned).
+- `docs/EVENTSUB_TRANSPORT_CATALOG.md`: Twitch upstream transport capability snapshot used by this project.
 - `docs/DEV_SETUP.md`: local development container workflow.
 - `docs/START_AND_TEST_APP.md`: full step-by-step local walkthrough (start API + run test app).
 - `docs/PRODUCTION_DEPLOY.md`: production deployment procedure.
@@ -233,23 +234,20 @@ or
 If the dev app container is running, scripts attach via `exec`.
 If not running, scripts start one-off `compose run` CLI container.
 
-## Upstream EventSub Routing (Both Transports)
-The service can use websocket and webhook upstream at the same time.
+## Upstream EventSub Routing (Automatic)
+The service chooses upstream Twitch transport automatically per event type.
 
 Configure in `.env`:
 - `TWITCH_EVENTSUB_WS_URL`: websocket endpoint.
 - `TWITCH_EVENTSUB_WEBHOOK_CALLBACK_URL`: public HTTPS callback.
 - `TWITCH_EVENTSUB_WEBHOOK_SECRET`: webhook secret (10-100 ASCII chars).
-- `TWITCH_EVENTSUB_WEBHOOK_EVENT_TYPES`: comma-separated event types that should use webhook.
 
 Routing rule:
-- If event type is in `TWITCH_EVENTSUB_WEBHOOK_EVENT_TYPES`, subscription uses Twitch webhook.
-- Otherwise, subscription uses Twitch websocket.
+- webhook-only Twitch event types are always webhook upstream.
+- if webhook callback config is available, webhook is preferred upstream for supported types.
+- if webhook callback config is unavailable, websocket is used as fallback for types that support websocket.
 
-Example:
-- `TWITCH_EVENTSUB_WEBHOOK_EVENT_TYPES=stream.online,stream.offline`
-- `stream.online` and `stream.offline` go through webhook.
-- `channel.chat.message` goes through websocket.
+See `docs/EVENTSUB_TRANSPORT_CATALOG.md` for the current capability snapshot and webhook-only exceptions.
 
 Twitch webhook callback:
 - `POST /webhooks/twitch/eventsub`

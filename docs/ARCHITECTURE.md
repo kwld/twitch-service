@@ -75,9 +75,9 @@ Endpoints enforcing this:
 
 ## 6) EventSub Routing Strategy
 Routing decision (`EventSubManager._transport_for_event`):
-- `user.authorization.revoke`: always webhook upstream.
-- if event type is listed in `TWITCH_EVENTSUB_WEBHOOK_EVENT_TYPES`: webhook upstream.
-- otherwise: websocket upstream.
+- webhook-only Twitch event types always use webhook upstream.
+- if webhook callback is configured, webhook is preferred upstream for supported types.
+- if webhook callback is not configured, websocket is used as fallback for types that support websocket.
 
 Interest transport in `service_interests` is independent and controls service delivery:
 - `websocket`: publish to service websocket client (`/ws/events`).

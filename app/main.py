@@ -37,6 +37,7 @@ from app.eventsub_catalog import (
     SOURCE_SNAPSHOT_DATE,
     SOURCE_URL,
     best_transport_for_service,
+    supported_twitch_transports,
 )
 from app.event_router import InterestRegistry, LocalEventHub
 from app.eventsub_manager import EventSubManager
@@ -1175,7 +1176,9 @@ async def list_eventsub_subscription_types(_: ServiceAccount = Depends(_service_
     for entry in EVENTSUB_CATALOG:
         best_transport, reason = best_transport_for_service(
             event_type=entry.event_type,
-            webhook_event_types=eventsub_manager.webhook_event_types,
+            webhook_available=bool(
+                eventsub_manager.webhook_callback_url and eventsub_manager.webhook_secret
+            ),
         )
         item = EventSubCatalogItem(
             title=entry.title,
@@ -1183,7 +1186,7 @@ async def list_eventsub_subscription_types(_: ServiceAccount = Depends(_service_
             version=entry.version,
             description=entry.description,
             status=entry.status,
-            twitch_transports=["webhook", "websocket"],
+            twitch_transports=supported_twitch_transports(entry.event_type),
             best_transport=best_transport,
             best_transport_reason=reason,
         )

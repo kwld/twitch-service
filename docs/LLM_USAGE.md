@@ -116,7 +116,13 @@ Use this order for a reliable integration:
 
 Notes:
 - `POST /v1/interests` deduplicates by service/bot/event/broadcaster/transport/webhook URL.
-- Upstream Twitch transport (webhook vs websocket) is selected by server policy and is independent of your downstream transport.
+- Services choose only downstream delivery transport (`websocket` or `webhook`) from this bridge.
+- Upstream Twitch transport is selected automatically by the bridge and is independent of downstream transport.
+- Upstream policy:
+  - if webhook callback is configured, bridge prefers Twitch webhook transport,
+  - if webhook callback is not configured, bridge uses Twitch websocket transport fallback when supported,
+  - webhook-only Twitch event types are never routed to upstream websocket.
+- See `docs/EVENTSUB_TRANSPORT_CATALOG.md` for the transport-capability catalog used by this project.
 
 ## 6) Exact Request/Response Contracts
 
@@ -472,12 +478,15 @@ Optional enrichment (backward compatible):
   - Old clients should ignore unknown top-level keys.
 
 ## 9) Upstream Twitch EventSub Routing
-Routing to Twitch transport is decided by manager:
-- `user.authorization.revoke` => webhook only.
-- event type in `TWITCH_EVENTSUB_WEBHOOK_EVENT_TYPES` => webhook.
-- all others => websocket.
+Routing to Twitch transport is decided by manager using Twitch capability + runtime availability:
+- webhook-only event types (from Twitch docs) always use upstream webhook.
+- when webhook callback is configured, other types use upstream webhook (preferred).
+- when webhook callback is unavailable, bridge uses upstream websocket fallback for types that support websocket.
 
 This is independent of downstream service transport preference.
+For bots, auth/token model for upstream subscription creation:
+- Twitch webhook transport uses app access token.
+- Twitch websocket transport uses bot user access token.
 
 ## 10) Error Model (Observed)
 - `401`: invalid service credentials.

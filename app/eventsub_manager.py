@@ -14,6 +14,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.bot_auth import ensure_bot_access_token
+from app.eventsub_catalog import best_transport_for_service
 from app.event_router import InterestKey, InterestRegistry, LocalEventHub
 from app.models import (
     BotAccount,
@@ -63,11 +64,11 @@ class EventSubManager:
         self._subscription_error_lock = asyncio.Lock()
 
     def _transport_for_event(self, event_type: str) -> Literal["websocket", "webhook"]:
-        if event_type == "user.authorization.revoke":
-            return "webhook"
-        if event_type in self.webhook_event_types:
-            return "webhook"
-        return "websocket"
+        transport, _ = best_transport_for_service(
+            event_type=event_type,
+            webhook_available=bool(self.webhook_callback_url and self.webhook_secret),
+        )
+        return transport
 
     @staticmethod
     def _is_dead_websocket_status(status: str | None) -> bool:
@@ -113,7 +114,7 @@ class EventSubManager:
             return
         async with self.session_factory() as session:
             delete_access_token: str | None = None
-            if key.event_type.startswith("channel.chat."):
+            if self._transport_for_event(key.event_type) == "websocket":
                 bot = await session.get(BotAccount, key.bot_account_id)
                 if bot and bot.enabled:
                     with suppress(Exception):
@@ -289,11 +290,10 @@ class EventSubManager:
                 if self._transport_for_event(db_sub.event_type) != "websocket":
                     continue
                 delete_access_token: str | None = None
-                if db_sub.event_type.startswith("channel.chat."):
-                    bot = await session.get(BotAccount, db_sub.bot_account_id)
-                    if bot and bot.enabled:
-                        with suppress(Exception):
-                            delete_access_token = await ensure_bot_access_token(session, self.twitch, bot)
+                bot = await session.get(BotAccount, db_sub.bot_account_id)
+                if bot and bot.enabled:
+                    with suppress(Exception):
+                        delete_access_token = await ensure_bot_access_token(session, self.twitch, bot)
                 with suppress(TwitchApiError):
                     await self.twitch.delete_eventsub_subscription(
                         db_sub.twitch_subscription_id,
@@ -371,7 +371,7 @@ class EventSubManager:
                     and self._is_dead_websocket_status(sub_status)
                 ):
                     delete_access_token: str | None = None
-                    if event_type.startswith("channel.chat.") and bot.enabled:
+                    if bot.enabled:
                         with suppress(Exception):
                             delete_access_token = await ensure_bot_access_token(session, self.twitch, bot)
                     with suppress(TwitchApiError):
@@ -458,7 +458,7 @@ class EventSubManager:
                         return
                 if db_sub and db_sub.twitch_subscription_id:
                     delete_access_token: str | None = None
-                    if key.event_type.startswith("channel.chat."):
+                    if upstream_transport == "websocket":
                         bot = await session.get(BotAccount, key.bot_account_id)
                         if bot and bot.enabled:
                             with suppress(Exception):
@@ -514,25 +514,26 @@ class EventSubManager:
                     transport = {"method": "websocket", "session_id": session_id_snapshot}
                 condition: dict[str, str] = {"broadcaster_user_id": key.broadcaster_user_id}
                 create_access_token: str | None = None
-                if key.event_type.startswith("channel.chat."):
-                    bot = await session.get(BotAccount, key.bot_account_id)
-                    if not bot:
-                        reason = f"Bot account missing for chat subscription: {key.bot_account_id}"
-                        await self._notify_subscription_failure(
-                            key=key,
-                            upstream_transport=upstream_transport,
-                            reason=reason,
-                        )
-                        raise RuntimeError(reason)
-                    if not bot.enabled:
-                        reason = f"Bot account disabled for chat subscription: {key.bot_account_id}"
-                        await self._notify_subscription_failure(
-                            key=key,
-                            upstream_transport=upstream_transport,
-                            reason=reason,
-                        )
-                        raise RuntimeError(reason)
+                bot = await session.get(BotAccount, key.bot_account_id)
+                if not bot:
+                    reason = f"Bot account missing for subscription: {key.bot_account_id}"
+                    await self._notify_subscription_failure(
+                        key=key,
+                        upstream_transport=upstream_transport,
+                        reason=reason,
+                    )
+                    raise RuntimeError(reason)
+                if not bot.enabled:
+                    reason = f"Bot account disabled for subscription: {key.bot_account_id}"
+                    await self._notify_subscription_failure(
+                        key=key,
+                        upstream_transport=upstream_transport,
+                        reason=reason,
+                    )
+                    raise RuntimeError(reason)
+                if upstream_transport == "websocket":
                     create_access_token = await ensure_bot_access_token(session, self.twitch, bot)
+                if key.event_type.startswith("channel.chat."):
                     condition["user_id"] = bot.twitch_user_id
                 try:
                     created = await self.twitch.create_eventsub_subscription(
