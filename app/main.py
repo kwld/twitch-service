@@ -69,6 +69,10 @@ from app.schemas import (
     StartBroadcasterAuthorizationResponse,
     StartUserAuthorizationRequest,
     StartUserAuthorizationResponse,
+    ServiceSubscriptionsResponse,
+    ServiceSubscriptionItem,
+    ServiceSubscriptionTransportRow,
+    ServiceSubscriptionTransportSummaryResponse,
     UserAuthorizationSessionResponse,
 )
 from app.twitch import TwitchClient
@@ -1091,6 +1095,70 @@ async def list_interests(service: ServiceAccount = Depends(_service_auth)):
             ).all()
         )
     return interests
+
+
+@app.get("/v1/subscriptions", response_model=ServiceSubscriptionsResponse)
+async def list_service_subscriptions(service: ServiceAccount = Depends(_service_auth)):
+    async with session_factory() as session:
+        interests = list(
+            (
+                await session.scalars(
+                    select(ServiceInterest).where(ServiceInterest.service_account_id == service.id)
+                )
+            ).all()
+        )
+    items = [
+        ServiceSubscriptionItem(
+            interest_id=interest.id,
+            bot_account_id=interest.bot_account_id,
+            event_type=interest.event_type,
+            broadcaster_user_id=interest.broadcaster_user_id,
+            local_transport=interest.transport,
+            webhook_url=interest.webhook_url,
+            created_at=interest.created_at,
+            updated_at=interest.updated_at,
+        )
+        for interest in interests
+    ]
+    return ServiceSubscriptionsResponse(total=len(items), items=items)
+
+
+@app.get(
+    "/v1/subscriptions/transports",
+    response_model=ServiceSubscriptionTransportSummaryResponse,
+)
+async def list_service_subscription_transports(service: ServiceAccount = Depends(_service_auth)):
+    async with session_factory() as session:
+        interests = list(
+            (
+                await session.scalars(
+                    select(ServiceInterest).where(ServiceInterest.service_account_id == service.id)
+                )
+            ).all()
+        )
+    by_transport: dict[str, int] = {"websocket": 0, "webhook": 0}
+    by_event_type: dict[str, dict[str, int]] = {}
+    for interest in interests:
+        transport = interest.transport if interest.transport in {"websocket", "webhook"} else "websocket"
+        by_transport[transport] += 1
+        row = by_event_type.setdefault(interest.event_type, {"websocket": 0, "webhook": 0})
+        row[transport] += 1
+    rows = [
+        ServiceSubscriptionTransportRow(
+            event_type=event_type,
+            websocket=counts["websocket"],
+            webhook=counts["webhook"],
+        )
+        for event_type, counts in sorted(by_event_type.items())
+    ]
+    return ServiceSubscriptionTransportSummaryResponse(
+        total_subscriptions=len(interests),
+        by_transport={
+            "websocket": by_transport["websocket"],
+            "webhook": by_transport["webhook"],
+        },
+        by_event_type=rows,
+    )
 
 
 @app.post(

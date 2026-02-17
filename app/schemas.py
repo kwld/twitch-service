@@ -26,6 +26,34 @@ class InterestResponse(BaseModel):
     created_at: datetime
 
 
+class ServiceSubscriptionItem(BaseModel):
+    interest_id: uuid.UUID
+    bot_account_id: uuid.UUID
+    event_type: str
+    broadcaster_user_id: str
+    local_transport: Literal["websocket", "webhook"]
+    webhook_url: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ServiceSubscriptionsResponse(BaseModel):
+    total: int
+    items: list[ServiceSubscriptionItem]
+
+
+class ServiceSubscriptionTransportRow(BaseModel):
+    event_type: str
+    websocket: int
+    webhook: int
+
+
+class ServiceSubscriptionTransportSummaryResponse(BaseModel):
+    total_subscriptions: int
+    by_transport: dict[Literal["websocket", "webhook"], int]
+    by_event_type: list[ServiceSubscriptionTransportRow]
+
+
 class EventEnvelope(BaseModel):
     id: str
     subscription_type: str

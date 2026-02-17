@@ -126,6 +126,8 @@ bash ./scripts/run-dev.sh 8080
 - `POST /v1/interests` (service)
 - `DELETE /v1/interests/{interest_id}` (service)
 - `POST /v1/interests/{interest_id}/heartbeat` (service)
+- `GET /v1/subscriptions` (service)
+- `GET /v1/subscriptions/transports` (service)
 - `GET /v1/twitch/profiles?bot_account_id=...&user_ids=...&logins=...` (service)
 - `GET /v1/twitch/streams/status?bot_account_id=...&broadcaster_user_ids=...` (service)
 - `GET /v1/twitch/streams/status/interested` (service)

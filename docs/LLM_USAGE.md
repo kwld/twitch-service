@@ -66,6 +66,8 @@ LLM rule:
 
 ### Interest lifecycle
 - `GET /v1/interests`
+- `GET /v1/subscriptions`
+- `GET /v1/subscriptions/transports`
 - `POST /v1/interests`
 - `DELETE /v1/interests/{interest_id}`
 - `POST /v1/interests/{interest_id}/heartbeat`
@@ -128,6 +130,58 @@ Notes:
 
 ### `GET /v1/interests`
 Returns list of interest rows owned by authenticated service.
+
+### `GET /v1/subscriptions`
+Returns service-owned subscription list focused on downstream/local delivery fields.
+
+Response:
+```json
+{
+  "total": 2,
+  "items": [
+    {
+      "interest_id": "uuid",
+      "bot_account_id": "uuid",
+      "event_type": "channel.chat.message",
+      "broadcaster_user_id": "12345",
+      "local_transport": "websocket",
+      "webhook_url": null,
+      "created_at": "ISO8601",
+      "updated_at": "ISO8601"
+    }
+  ]
+}
+```
+
+Use this endpoint when your service needs an explicit view of its local delivery mode (`local_transport`) without inferring from generic interest rows.
+
+### `GET /v1/subscriptions/transports`
+Returns per-service transport usage summary (local transport only).
+
+Response:
+```json
+{
+  "total_subscriptions": 5,
+  "by_transport": {
+    "websocket": 3,
+    "webhook": 2
+  },
+  "by_event_type": [
+    {
+      "event_type": "channel.chat.message",
+      "websocket": 2,
+      "webhook": 0
+    },
+    {
+      "event_type": "stream.online",
+      "websocket": 1,
+      "webhook": 2
+    }
+  ]
+}
+```
+
+This endpoint reports only the service's local delivery preferences to this bridge. It does not expose or control bridge-to-Twitch upstream transport.
 
 ### `POST /v1/interests`
 Request:
