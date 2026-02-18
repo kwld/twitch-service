@@ -1431,6 +1431,74 @@ async def _remote_list_accessible_bots(
     print(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
+async def _remote_list_interests(
+    client: httpx.AsyncClient,
+    client_id: str,
+    client_secret: str,
+) -> None:
+    resp = await client.get(
+        "/v1/interests",
+        headers=_service_headers(client_id, client_secret),
+    )
+    if resp.status_code >= 300:
+        print(f"Request failed: HTTP {resp.status_code} {resp.text[:400]}")
+        return
+    payload = resp.json()
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
+async def _remote_list_service_subscriptions(
+    client: httpx.AsyncClient,
+    client_id: str,
+    client_secret: str,
+) -> None:
+    resp = await client.get(
+        "/v1/subscriptions",
+        headers=_service_headers(client_id, client_secret),
+    )
+    if resp.status_code >= 300:
+        print(f"Request failed: HTTP {resp.status_code} {resp.text[:400]}")
+        return
+    payload = resp.json()
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
+async def _remote_list_subscription_transports(
+    client: httpx.AsyncClient,
+    client_id: str,
+    client_secret: str,
+) -> None:
+    resp = await client.get(
+        "/v1/subscriptions/transports",
+        headers=_service_headers(client_id, client_secret),
+    )
+    if resp.status_code >= 300:
+        print(f"Request failed: HTTP {resp.status_code} {resp.text[:400]}")
+        return
+    payload = resp.json()
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
+async def _remote_list_active_subscriptions(
+    session: PromptSession,
+    client: httpx.AsyncClient,
+    client_id: str,
+    client_secret: str,
+) -> None:
+    raw = (await session.prompt_async("Force refresh from Twitch? [y/N]: ")).strip().lower()
+    refresh = raw in {"y", "yes"}
+    resp = await client.get(
+        "/v1/eventsub/subscriptions/active",
+        params={"refresh": "true" if refresh else "false"},
+        headers=_service_headers(client_id, client_secret),
+    )
+    if resp.status_code >= 300:
+        print(f"Request failed: HTTP {resp.status_code} {resp.text[:400]}")
+        return
+    payload = resp.json()
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
 async def _remote_list_bots_admin(client: httpx.AsyncClient, admin_api_key: str) -> None:
     if not admin_api_key:
         print("CLI_ADMIN_API_KEY is required for this action.")
@@ -1491,8 +1559,12 @@ async def remote_menu_loop(
                 "1) Health check\n"
                 "2) List accessible bots (service auth)\n"
                 "3) List bots (admin auth)\n"
-                "4) Listen on /ws/events (ws_token flow)\n"
-                "5) Exit\n"
+                "4) List interests (service auth)\n"
+                "5) List subscriptions (service auth)\n"
+                "6) List subscription transports (service auth)\n"
+                "7) List active subscriptions (service auth)\n"
+                "8) Listen on /ws/events (ws_token flow)\n"
+                "9) Exit\n"
             )
             choice = (await session.prompt_async("Select option: ")).strip()
             if choice == "1":
@@ -1511,9 +1583,38 @@ async def remote_menu_loop(
                 if not service_client_id or not service_client_secret:
                     print("CLI_SERVICE_CLIENT_ID and CLI_SERVICE_CLIENT_SECRET are required.")
                     continue
-                await _remote_ws_listen_once(client, api_base_url, service_client_id, service_client_secret)
+                await _remote_list_interests(client, service_client_id, service_client_secret)
                 continue
             if choice == "5":
+                if not service_client_id or not service_client_secret:
+                    print("CLI_SERVICE_CLIENT_ID and CLI_SERVICE_CLIENT_SECRET are required.")
+                    continue
+                await _remote_list_service_subscriptions(client, service_client_id, service_client_secret)
+                continue
+            if choice == "6":
+                if not service_client_id or not service_client_secret:
+                    print("CLI_SERVICE_CLIENT_ID and CLI_SERVICE_CLIENT_SECRET are required.")
+                    continue
+                await _remote_list_subscription_transports(client, service_client_id, service_client_secret)
+                continue
+            if choice == "7":
+                if not service_client_id or not service_client_secret:
+                    print("CLI_SERVICE_CLIENT_ID and CLI_SERVICE_CLIENT_SECRET are required.")
+                    continue
+                await _remote_list_active_subscriptions(
+                    session,
+                    client,
+                    service_client_id,
+                    service_client_secret,
+                )
+                continue
+            if choice == "8":
+                if not service_client_id or not service_client_secret:
+                    print("CLI_SERVICE_CLIENT_ID and CLI_SERVICE_CLIENT_SECRET are required.")
+                    continue
+                await _remote_ws_listen_once(client, api_base_url, service_client_id, service_client_secret)
+                continue
+            if choice == "9":
                 return
             print("Invalid option.")
 

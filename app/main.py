@@ -518,6 +518,72 @@ async def _record_service_trace(
         return
 
 
+async def _notify_interest_rejected(
+    interest: ServiceInterest,
+    key,
+    reason: str,
+) -> None:
+    envelope = {
+        "id": uuid.uuid4().hex,
+        "provider": "twitch-service",
+        "type": "interest.rejected",
+        "event_timestamp": datetime.now(UTC).isoformat(),
+        "event": {
+            "interest_id": str(interest.id),
+            "service_account_id": str(interest.service_account_id),
+            "bot_account_id": str(key.bot_account_id),
+            "event_type": key.event_type,
+            "broadcaster_user_id": key.broadcaster_user_id,
+            "reason": reason,
+        },
+    }
+    await _record_service_trace(
+        service_account_id=interest.service_account_id,
+        direction="outgoing",
+        local_transport=interest.transport,
+        event_type="interest.rejected",
+        target=interest.webhook_url if interest.transport == "webhook" else "/ws/events",
+        payload=envelope,
+    )
+    if interest.transport == "webhook" and interest.webhook_url:
+        try:
+            await event_hub.publish_webhook(interest.service_account_id, interest.webhook_url, envelope)
+        except Exception:
+            return
+    else:
+        await event_hub.publish_to_service(interest.service_account_id, envelope)
+
+
+async def _delete_interest_row(interest_id: uuid.UUID) -> None:
+    async with session_factory() as session:
+        db_interest = await session.get(ServiceInterest, interest_id)
+        if not db_interest:
+            return
+        await session.delete(db_interest)
+        await session.commit()
+
+
+async def _filter_working_interests(session, interests: list[ServiceInterest]) -> list[ServiceInterest]:
+    if not interests:
+        return []
+    active_subs = list(
+        (
+            await session.scalars(
+                select(TwitchSubscription).where(TwitchSubscription.status.startswith("enabled"))
+            )
+        ).all()
+    )
+    active_keys = {
+        (row.bot_account_id, row.event_type, row.broadcaster_user_id)
+        for row in active_subs
+    }
+    return [
+        interest
+        for interest in interests
+        if (interest.bot_account_id, interest.event_type, interest.broadcaster_user_id) in active_keys
+    ]
+
+
 async def _service_allowed_bot_ids(session, service_account_id: uuid.UUID) -> set[uuid.UUID]:
     rows = list(
         (
@@ -1274,7 +1340,8 @@ async def list_interests(service: ServiceAccount = Depends(_service_auth)):
                 )
             ).all()
         )
-    return interests
+        working = await _filter_working_interests(session, interests)
+    return working
 
 
 @app.get("/v1/subscriptions", response_model=ServiceSubscriptionsResponse)
@@ -1287,6 +1354,7 @@ async def list_service_subscriptions(service: ServiceAccount = Depends(_service_
                 )
             ).all()
         )
+        interests = await _filter_working_interests(session, interests)
     items = [
         ServiceSubscriptionItem(
             interest_id=interest.id,
@@ -1316,6 +1384,7 @@ async def list_service_subscription_transports(service: ServiceAccount = Depends
                 )
             ).all()
         )
+        interests = await _filter_working_interests(session, interests)
     by_transport: dict[str, int] = {"websocket": 0, "webhook": 0}
     by_event_type: dict[str, dict[str, int]] = {}
     for interest in interests:
@@ -1361,6 +1430,7 @@ async def list_active_twitch_subscriptions_for_service(
                 )
             ).all()
         )
+        interests = await _filter_working_interests(session, interests)
     interest_ids_by_key: dict[tuple[str, str, str], list[uuid.UUID]] = {}
     for interest in interests:
         key = (
@@ -1374,6 +1444,9 @@ async def list_active_twitch_subscriptions_for_service(
     items: list[ActiveTwitchSubscriptionItem] = []
     for row in snapshot:
         bot_account_id = row.get("bot_account_id", "")
+        status_value = str(row.get("status", "unknown"))
+        if not status_value.startswith("enabled"):
+            continue
         try:
             bot_uuid = uuid.UUID(str(bot_account_id))
         except Exception:
@@ -1391,7 +1464,7 @@ async def list_active_twitch_subscriptions_for_service(
         items.append(
             ActiveTwitchSubscriptionItem(
                 twitch_subscription_id=str(row.get("twitch_subscription_id", "")),
-                status=str(row.get("status", "unknown")),
+                status=status_value,
                 event_type=str(row.get("event_type", "")),
                 broadcaster_user_id=str(row.get("broadcaster_user_id", "")),
                 upstream_transport=str(row.get("upstream_transport", "websocket")),
@@ -1677,6 +1750,10 @@ async def create_interest(
             key.broadcaster_user_id,
             exc,
         )
+        await _notify_interest_rejected(interest, key, str(exc))
+        await _delete_interest_row(interest.id)
+        await interest_registry.remove(interest)
+        raise HTTPException(status_code=502, detail=f"Upstream subscription rejected: {exc}") from exc
     for default_interest in await _ensure_default_stream_interests(
         service=service,
         bot_account_id=req.bot_account_id,
@@ -1693,6 +1770,9 @@ async def create_interest(
                 default_key.broadcaster_user_id,
                 exc,
             )
+            await _notify_interest_rejected(default_interest, default_key, str(exc))
+            await _delete_interest_row(default_interest.id)
+            await interest_registry.remove(default_interest)
     return interest
 
 

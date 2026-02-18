@@ -203,7 +203,13 @@ Security checks for `webhook_url`:
 
 `POST /v1/interests` also:
 - validates `event_type` against the known Twitch EventSub catalog,
-- deduplicates per-service interests (same service + bot + event_type + broadcaster + transport + webhook_url).
+- deduplicates per-service interests (same service + bot + event_type + broadcaster + transport + webhook_url),
+- keeps only working interests: if upstream Twitch rejects subscription creation, that interest is removed and the service receives `interest.rejected` via its selected local transport.
+
+Service listing endpoints report working subscriptions only:
+- `GET /v1/interests`
+- `GET /v1/subscriptions`
+- `GET /v1/subscriptions/transports`
 
 `broadcaster_user_id` input:
 - preferred: numeric Twitch user id (string).

@@ -131,10 +131,11 @@ Notes:
 ## 6) Exact Request/Response Contracts
 
 ### `GET /v1/interests`
-Returns list of interest rows owned by authenticated service.
+Returns working interest rows owned by authenticated service.
+Working means the interest currently has an enabled upstream Twitch EventSub subscription.
 
 ### `GET /v1/subscriptions`
-Returns service-owned subscription list focused on downstream/local delivery fields.
+Returns service-owned working subscription list focused on downstream/local delivery fields.
 
 Response:
 ```json
@@ -158,7 +159,7 @@ Response:
 Use this endpoint when your service needs an explicit view of its local delivery mode (`local_transport`) without inferring from generic interest rows.
 
 ### `GET /v1/subscriptions/transports`
-Returns per-service transport usage summary (local transport only).
+Returns per-service transport usage summary for working subscriptions only (local transport only).
 
 Response:
 ```json
@@ -215,7 +216,8 @@ Side effects:
 - auto-ensures default stream interests for same `(service, bot, broadcaster)`:
   - `stream.online`
   - `stream.offline`
-- if upstream ensure fails (for example missing broadcaster authorization or unsupported Twitch condition fields), the API still persists the logical interest and emits `subscription.error` to service transports; clients should handle that event for remediation.
+- if upstream ensure fails (for example missing broadcaster authorization or unsupported Twitch condition fields), the API removes the rejected interest and emits `interest.rejected` to the service's selected local transport.
+- rejected interests are not returned by listing endpoints.
 
 ### `DELETE /v1/interests/{interest_id}`
 - deletes interest only if owned by service.
@@ -503,7 +505,6 @@ For broadcaster auth requests:
 
 ### Service websocket (`WS /ws/events`)
 - preferred auth: short-lived token from `POST /v1/ws-token`.
-- legacy auth: direct query/header credentials (still accepted for compatibility).
 - server accepts connection, tracks runtime stats.
 - incoming client text messages are ignored (used as keepalive).
 - server pushes event envelopes when matching interests fire.
@@ -532,6 +533,28 @@ Subscription failure notification:
 - when upstream Twitch subscription creation/rotation fails for an active interest key, the service emits a `subscription.error` envelope to every interested service using that service's configured transport (`websocket` or `webhook`).
 - this includes permission failures (for example missing broadcaster authorization or missing scopes).
 - notifications are rate-limited per `(service, bot, event_type, broadcaster, error_code)` for 1 minute to reduce spam.
+
+Interest rejection notification:
+- when a newly requested interest cannot create/ensure upstream Twitch subscription, the service removes that interest and emits `interest.rejected` to that service using the requested local transport.
+- this keeps service listing endpoints aligned to only working upstream subscriptions.
+
+`interest.rejected` example:
+```json
+{
+  "id": "generated-id",
+  "provider": "twitch-service",
+  "type": "interest.rejected",
+  "event_timestamp": "ISO8601",
+  "event": {
+    "interest_id": "uuid",
+    "service_account_id": "uuid",
+    "bot_account_id": "uuid",
+    "event_type": "channel.prediction.progress",
+    "broadcaster_user_id": "12345",
+    "reason": "raw upstream error text"
+  }
+}
+```
 
 `subscription.error` example:
 ```json
@@ -567,6 +590,12 @@ LLM handling guideline for `subscription.error`:
    - Log full envelope, include `bot_account_id`, `event_type`, `broadcaster_user_id`, `upstream_transport`, `reason`.
 1. Escalate when persistent.
    - If the same key continues failing after remediation/retries, alert human operator and stop auto-retry for that key until manual action.
+
+LLM handling guideline for `interest.rejected`:
+1. Treat it as definitive rejection of the newly created interest.
+1. Do not assume the interest still exists in `GET /v1/interests`.
+1. Parse `event.reason` and run remediation (broadcaster auth, scope refresh, supported event type).
+1. Re-create the interest only after remediation.
 
 Optional enrichment (backward compatible):
 - For `type` starting with `channel.chat.` the envelope may include:
@@ -617,6 +646,7 @@ LLM rule:
 1. For websocket delivery, mint token via `POST /v1/ws-token`, then open `WS /ws/events?ws_token=...`.
 1. Open webhook receiver if using webhook transport.
 1. Heartbeat interests while active.
+1. If you receive `interest.rejected`, treat that interest as removed; remediate and recreate only if still needed.
 1. If you receive `subscription.error`, surface it to operators and run remediation (grant broadcaster authorization, refresh bot scopes, or switch bot).
 1. On each incoming webhook, verify it is still desired; if not desired, delete matching webhook interests immediately.
 1. Send chat with chosen `auth_mode`.
