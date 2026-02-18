@@ -423,6 +423,8 @@ class EventSubManager:
                 for row in list((await session.scalars(select(TwitchSubscription))).all())
             }
             await session.execute(delete(TwitchSubscription))
+            deduped: dict[tuple[uuid.UUID, str, str], dict] = {}
+            duplicates: list[dict] = []
             for sub in subs:
                 condition = sub.get("condition", {})
                 event_type = sub.get("type")
@@ -473,17 +475,79 @@ class EventSubManager:
                         sub_status,
                     )
                     continue
-                db_sub = TwitchSubscription(
-                    bot_account_id=bot.id,
-                    event_type=event_type,
-                    broadcaster_user_id=broadcaster_user_id,
-                    twitch_subscription_id=sub_id,
-                    status=sub_status,
-                    session_id=sub.get("transport", {}).get("session_id"),
-                    last_seen_at=datetime.now(UTC),
+                dedupe_key = (bot.id, event_type, broadcaster_user_id)
+                candidate = {
+                    "bot_account_id": bot.id,
+                    "event_type": event_type,
+                    "broadcaster_user_id": broadcaster_user_id,
+                    "twitch_subscription_id": sub_id,
+                    "status": sub_status,
+                    "session_id": sub.get("transport", {}).get("session_id"),
+                    "connected_at": str(sub.get("transport", {}).get("connected_at", "")),
+                    "method": method,
+                }
+                existing = deduped.get(dedupe_key)
+                if not existing:
+                    deduped[dedupe_key] = candidate
+                    continue
+
+                # Prefer enabled subscriptions; when tied, prefer the one with the latest
+                # connected_at timestamp (ISO-8601 strings compare lexicographically here).
+                candidate_rank = (
+                    1 if str(candidate["status"]).startswith("enabled") else 0,
+                    str(candidate["connected_at"]),
+                    str(candidate["twitch_subscription_id"]),
                 )
-                session.add(db_sub)
+                existing_rank = (
+                    1 if str(existing["status"]).startswith("enabled") else 0,
+                    str(existing["connected_at"]),
+                    str(existing["twitch_subscription_id"]),
+                )
+                if candidate_rank > existing_rank:
+                    duplicates.append(existing)
+                    deduped[dedupe_key] = candidate
+                else:
+                    duplicates.append(candidate)
+
+            for item in deduped.values():
+                session.add(
+                    TwitchSubscription(
+                        bot_account_id=item["bot_account_id"],
+                        event_type=item["event_type"],
+                        broadcaster_user_id=item["broadcaster_user_id"],
+                        twitch_subscription_id=item["twitch_subscription_id"],
+                        status=item["status"],
+                        session_id=item["session_id"],
+                        last_seen_at=datetime.now(UTC),
+                    )
+                )
             await session.commit()
+
+            for duplicate in duplicates:
+                duplicate_id = str(duplicate["twitch_subscription_id"])
+                if not duplicate_id:
+                    continue
+                delete_access_token: str | None = None
+                if duplicate.get("method") == "websocket":
+                    duplicate_bot = await session.get(BotAccount, duplicate["bot_account_id"])
+                    if duplicate_bot and duplicate_bot.enabled:
+                        with suppress(Exception):
+                            delete_access_token = await ensure_bot_access_token(
+                                session,
+                                self.twitch,
+                                duplicate_bot,
+                            )
+                with suppress(TwitchApiError):
+                    await self.twitch.delete_eventsub_subscription(
+                        duplicate_id,
+                        access_token=delete_access_token,
+                    )
+                logger.warning(
+                    "Removed duplicate Twitch subscription during reconcile: id=%s type=%s broadcaster=%s",
+                    duplicate_id,
+                    duplicate.get("event_type"),
+                    duplicate.get("broadcaster_user_id"),
+                )
 
     async def _ensure_authorization_revoke_subscription(self) -> None:
         if not self.webhook_callback_url or not self.webhook_secret:
