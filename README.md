@@ -77,6 +77,14 @@ Flow:
    twitch-eventsub-cli console
    ```
 
+Remote API mode for CLI:
+1. Copy `.cli.env.example` to `.cli.env` and fill remote credentials.
+2. Start CLI in remote mode:
+   ```bash
+   twitch-eventsub-cli --cli-env-file .cli.env console --remote
+   ```
+   - or pass URL directly: `twitch-eventsub-cli console --remote --api-base-url https://api.example.com`
+
 If `.env` is missing, app/cli exits with an explicit error.
 
 ## Helper Scripts (Install, Run, Run Dev)

@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import secrets
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from prompt_toolkit import PromptSession
@@ -34,10 +36,46 @@ from app.twitch import TwitchApiError, TwitchClient
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Twitch EventSub Service CLI")
+    parser.add_argument(
+        "--cli-env-file",
+        default=".cli.env",
+        help="Path to optional CLI env file for remote mode settings (default: .cli.env)",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("console", help="Start interactive async console")
+    console = sub.add_parser("console", help="Start interactive async console")
+    console.add_argument(
+        "--remote",
+        action="store_true",
+        help="Use remote API mode instead of local database mode",
+    )
+    console.add_argument(
+        "--api-base-url",
+        default=None,
+        help="Remote API base URL (for example https://api.example.com)",
+    )
     sub.add_parser("run-api", help="Run API server")
     return parser.parse_args()
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = (os.getenv(name, "") or "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "y", "on"}
+
+
+def _load_cli_env(path: str) -> None:
+    env_path = Path(path)
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            raw = line.strip()
+            if not raw or raw.startswith("#") or "=" not in raw:
+                continue
+            key, value = raw.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if key and key not in os.environ:
+                os.environ[key] = value
 
 
 async def init_db() -> tuple:
@@ -1320,6 +1358,139 @@ async def live_service_event_tracking_menu(session: PromptSession, session_facto
         print("\nLive tracking stopped.")
 
 
+def _normalize_base_url(raw: str) -> str:
+    value = (raw or "").strip()
+    if not value:
+        raise ValueError("Remote API base URL is required")
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("Remote API base URL must be an absolute http(s) URL")
+    return value.rstrip("/")
+
+
+def _build_ws_events_url(base_url: str, ws_token: str) -> str:
+    parsed = urlparse(base_url)
+    ws_scheme = "wss" if parsed.scheme == "https" else "ws"
+    base_path = parsed.path.rstrip("/")
+    ws_path = f"{base_path}/ws/events" if base_path else "/ws/events"
+    return f"{ws_scheme}://{parsed.netloc}{ws_path}?ws_token={ws_token}"
+
+
+async def _remote_health_check(client: httpx.AsyncClient) -> None:
+    resp = await client.get("/health")
+    print(f"HTTP {resp.status_code}: {resp.text[:300]}")
+
+
+def _service_headers(client_id: str, client_secret: str) -> dict[str, str]:
+    return {
+        "X-Client-Id": client_id,
+        "X-Client-Secret": client_secret,
+    }
+
+
+async def _remote_list_accessible_bots(
+    client: httpx.AsyncClient,
+    client_id: str,
+    client_secret: str,
+) -> None:
+    resp = await client.get(
+        "/v1/bots/accessible",
+        headers=_service_headers(client_id, client_secret),
+    )
+    if resp.status_code >= 300:
+        print(f"Request failed: HTTP {resp.status_code} {resp.text[:400]}")
+        return
+    payload = resp.json()
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
+async def _remote_list_bots_admin(client: httpx.AsyncClient, admin_api_key: str) -> None:
+    if not admin_api_key:
+        print("CLI_ADMIN_API_KEY is required for this action.")
+        return
+    resp = await client.get("/v1/bots", headers={"X-Admin-Key": admin_api_key})
+    if resp.status_code >= 300:
+        print(f"Request failed: HTTP {resp.status_code} {resp.text[:400]}")
+        return
+    payload = resp.json()
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
+async def _remote_ws_listen_once(
+    client: httpx.AsyncClient,
+    base_url: str,
+    client_id: str,
+    client_secret: str,
+) -> None:
+    resp = await client.post("/v1/ws-token", headers=_service_headers(client_id, client_secret))
+    if resp.status_code >= 300:
+        print(f"Token request failed: HTTP {resp.status_code} {resp.text[:400]}")
+        return
+    data = resp.json()
+    ws_token = str(data.get("ws_token", "")).strip()
+    if not ws_token:
+        print("Token response missing ws_token.")
+        return
+    ws_url = _build_ws_events_url(base_url, ws_token)
+    print(f"Connecting websocket: {ws_url}")
+    try:
+        async with websockets.connect(ws_url, max_size=4 * 1024 * 1024) as ws:
+            print("Connected. Waiting for events (Ctrl+C to stop).")
+            while True:
+                raw = await ws.recv()
+                print(raw)
+    except KeyboardInterrupt:
+        print("\nStopped websocket listener.")
+    except Exception as exc:
+        print(f"Websocket failed: {exc}")
+
+
+async def remote_menu_loop(
+    api_base_url: str,
+    service_client_id: str,
+    service_client_secret: str,
+    admin_api_key: str,
+    verify_tls: bool,
+) -> None:
+    import httpx
+
+    session = PromptSession()
+    timeout = httpx.Timeout(20.0)
+    async with httpx.AsyncClient(base_url=api_base_url, timeout=timeout, verify=verify_tls) as client:
+        while True:
+            print(
+                "\nRemote Console\n"
+                f"target={api_base_url}\n"
+                "1) Health check\n"
+                "2) List accessible bots (service auth)\n"
+                "3) List bots (admin auth)\n"
+                "4) Listen on /ws/events (ws_token flow)\n"
+                "5) Exit\n"
+            )
+            choice = (await session.prompt_async("Select option: ")).strip()
+            if choice == "1":
+                await _remote_health_check(client)
+                continue
+            if choice == "2":
+                if not service_client_id or not service_client_secret:
+                    print("CLI_SERVICE_CLIENT_ID and CLI_SERVICE_CLIENT_SECRET are required.")
+                    continue
+                await _remote_list_accessible_bots(client, service_client_id, service_client_secret)
+                continue
+            if choice == "3":
+                await _remote_list_bots_admin(client, admin_api_key)
+                continue
+            if choice == "4":
+                if not service_client_id or not service_client_secret:
+                    print("CLI_SERVICE_CLIENT_ID and CLI_SERVICE_CLIENT_SECRET are required.")
+                    continue
+                await _remote_ws_listen_once(client, api_base_url, service_client_id, service_client_secret)
+                continue
+            if choice == "5":
+                return
+            print("Invalid option.")
+
+
 async def menu_loop() -> None:
     settings, engine, session_factory = await init_db()
     twitch = TwitchClient(
@@ -1458,12 +1629,35 @@ async def menu_loop() -> None:
 
 def main() -> None:
     args = parse_args()
+    _load_cli_env(args.cli_env_file)
     if args.command == "run-api":
         from app.main import run as run_api
 
         run_api()
         return
     if args.command == "console":
+        env_api_base_url = os.getenv("CLI_API_BASE_URL", "")
+        api_base_url_raw = args.api_base_url or env_api_base_url
+        use_remote = bool(args.remote or api_base_url_raw.strip())
+        if use_remote:
+            try:
+                api_base_url = _normalize_base_url(api_base_url_raw)
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from exc
+            service_client_id = os.getenv("CLI_SERVICE_CLIENT_ID", "").strip()
+            service_client_secret = os.getenv("CLI_SERVICE_CLIENT_SECRET", "").strip()
+            admin_api_key = os.getenv("CLI_ADMIN_API_KEY", "").strip()
+            verify_tls = _env_bool("CLI_VERIFY_TLS", True)
+            asyncio.run(
+                remote_menu_loop(
+                    api_base_url=api_base_url,
+                    service_client_id=service_client_id,
+                    service_client_secret=service_client_secret,
+                    admin_api_key=admin_api_key,
+                    verify_tls=verify_tls,
+                )
+            )
+            return
         asyncio.run(menu_loop())
         return
 
