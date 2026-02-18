@@ -213,6 +213,10 @@ Validation behavior:
 Side effects:
 - creates/upserts one logical interest.
 - ensures upstream Twitch subscription exists.
+- chooses EventSub subscribe parameters automatically from catalog/runtime context:
+  - uses latest numeric version for the requested event type (for example `channel.hype_train.*` uses version `2`),
+  - adds required condition fields (for example `user_id` for chat settings updates),
+  - validates broadcaster/bot authorization scopes for scope-gated topics before calling Twitch.
 - auto-ensures default stream interests for same `(service, bot, broadcaster)`:
   - `stream.online`
   - `stream.offline`

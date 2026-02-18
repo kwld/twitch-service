@@ -335,6 +335,9 @@ EVENTSUB_CATALOG: tuple[EventSubCatalogEntry, ...] = (
 
 
 KNOWN_EVENT_TYPES: frozenset[str] = frozenset(entry.event_type for entry in EVENTSUB_CATALOG)
+_VERSIONS_BY_EVENT_TYPE: dict[str, list[str]] = {}
+for _entry in EVENTSUB_CATALOG:
+    _VERSIONS_BY_EVENT_TYPE.setdefault(_entry.event_type, []).append(_entry.version)
 
 
 # Per Twitch docs (EventSub Subscription Types), these are webhook-only and cannot use WebSockets.
@@ -371,4 +374,38 @@ def best_transport_for_service(
     if "websocket" in transports:
         return "websocket", "Webhook callback not configured; using websocket fallback."
     return "webhook", "Webhook-only by Twitch."
+
+
+def preferred_eventsub_version(event_type: str) -> str:
+    versions = _VERSIONS_BY_EVENT_TYPE.get(event_type.strip().lower(), [])
+    numeric = sorted((int(v) for v in versions if str(v).isdigit()), reverse=True)
+    if numeric:
+        return str(numeric[0])
+    return "1"
+
+
+def requires_condition_user_id(event_type: str) -> bool:
+    normalized = event_type.strip().lower()
+    return normalized.startswith("channel.chat.") or normalized == "channel.chat_settings.update"
+
+
+def required_scope_any_of_groups(event_type: str) -> list[set[str]]:
+    normalized = event_type.strip().lower()
+    if normalized.startswith("channel.channel_points_custom_reward"):
+        return [{"channel:read:redemptions", "channel:manage:redemptions"}]
+    if normalized.startswith("channel.channel_points_custom_reward_redemption"):
+        return [{"channel:read:redemptions", "channel:manage:redemptions"}]
+    if normalized.startswith("channel.poll."):
+        return [{"channel:read:polls", "channel:manage:polls"}]
+    if normalized.startswith("channel.prediction."):
+        return [{"channel:read:predictions", "channel:manage:predictions"}]
+    if normalized.startswith("channel.goal."):
+        return [{"channel:read:goals"}]
+    if normalized.startswith("channel.charity_campaign."):
+        return [{"channel:read:charity"}]
+    if normalized == "channel.ad_break.begin":
+        return [{"channel:read:ads"}]
+    if normalized.startswith("channel.hype_train."):
+        return [{"channel:read:hype_train"}]
+    return []
 
