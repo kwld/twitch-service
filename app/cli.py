@@ -22,6 +22,7 @@ from app.models import (
     Base,
     BotAccount,
     BroadcasterAuthorization,
+    BroadcasterAuthorizationRequest,
     ChannelState,
     OAuthCallback,
     ServiceAccount,
@@ -29,6 +30,7 @@ from app.models import (
     ServiceEventTrace,
     ServiceInterest,
     ServiceRuntimeStats,
+    ServiceUserAuthRequest,
     TwitchSubscription,
 )
 from app.twitch import TwitchApiError, TwitchClient
@@ -1159,6 +1161,31 @@ async def manage_service_accounts_menu(session: PromptSession, session_factory) 
                 if not target:
                     print("Service account already removed.")
                     continue
+                await db.execute(
+                    delete(BroadcasterAuthorization).where(
+                        BroadcasterAuthorization.service_account_id == target.id
+                    )
+                )
+                await db.execute(
+                    delete(BroadcasterAuthorizationRequest).where(
+                        BroadcasterAuthorizationRequest.service_account_id == target.id
+                    )
+                )
+                await db.execute(
+                    delete(ServiceBotAccess).where(ServiceBotAccess.service_account_id == target.id)
+                )
+                await db.execute(
+                    delete(ServiceInterest).where(ServiceInterest.service_account_id == target.id)
+                )
+                await db.execute(
+                    delete(ServiceRuntimeStats).where(ServiceRuntimeStats.service_account_id == target.id)
+                )
+                await db.execute(
+                    delete(ServiceUserAuthRequest).where(ServiceUserAuthRequest.service_account_id == target.id)
+                )
+                await db.execute(
+                    delete(ServiceEventTrace).where(ServiceEventTrace.service_account_id == target.id)
+                )
                 await db.delete(target)
                 await db.commit()
             print(f"Deleted service account: {account.name}")
