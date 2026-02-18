@@ -18,6 +18,7 @@ from app.auth import generate_client_id, generate_client_secret, hash_secret
 from app.bot_auth import ensure_bot_access_token
 from app.config import load_settings
 from app.db import create_engine_and_session
+from app.eventsub_catalog import KNOWN_EVENT_TYPES, recommended_broadcaster_scopes
 from app.models import (
     Base,
     BotAccount,
@@ -164,6 +165,55 @@ async def obtain_oauth_code(
         return None
     if returned_state != state:
         print("State mismatch. Stop and retry guided setup (possible CSRF or wrong callback URL).")
+        return None
+    return code
+
+
+async def obtain_oauth_code_for_scopes(
+    session: PromptSession,
+    session_factory,
+    twitch: TwitchClient,
+    state: str,
+    scopes: list[str],
+) -> str | None:
+    async with session_factory() as db:
+        existing = await db.get(OAuthCallback, state)
+        if existing:
+            await db.delete(existing)
+            await db.commit()
+
+    auth_url = twitch.build_authorize_url_with_scopes(
+        state=state,
+        scopes=" ".join(scopes),
+        force_verify=True,
+    )
+    print("\nOpen this URL and authorize with the broadcaster account:\n")
+    print(auth_url)
+    print("\nCLI will auto-detect callback for up to 5 minutes.")
+    print("Waiting for OAuth callback...")
+
+    code, error = await wait_for_oauth_callback(session_factory, state=state)
+    if error:
+        print(f"OAuth failed with error: {error}")
+        return None
+    if code:
+        print("OAuth callback confirmed.")
+        return code
+
+    print("Timed out waiting for callback.")
+    print("Paste full redirect URL to continue, or leave blank to cancel.")
+    callback = (await session.prompt_async("Redirect URL: ")).strip()
+    if not callback:
+        return None
+    code, returned_state, error = parse_oauth_callback(callback)
+    if error:
+        print(f"OAuth failed with error: {error}")
+        return None
+    if not code:
+        print("No OAuth code found in redirect URL.")
+        return None
+    if returned_state != state:
+        print("State mismatch. Stop and retry flow.")
         return None
     return code
 
@@ -1270,6 +1320,96 @@ async def list_broadcaster_authorizations_menu(session_factory) -> None:
         )
 
 
+async def authorize_bot_self_channel_menu(
+    session: PromptSession,
+    session_factory,
+    twitch: TwitchClient,
+) -> None:
+    service = await _select_service_account(session, session_factory)
+    if not service:
+        return
+    bot = await select_bot_account(session, session_factory)
+    if not bot:
+        return
+
+    raw_event_types = (await session.prompt_async("Event types CSV (optional): ")).strip()
+    requested_event_types = [x.strip().lower() for x in raw_event_types.split(",") if x.strip()]
+    invalid = [x for x in requested_event_types if x not in KNOWN_EVENT_TYPES]
+    if invalid:
+        print("Unsupported event types: " + ", ".join(sorted(set(invalid))))
+        return
+
+    requested_scopes = {"channel:bot"}
+    for event_type in requested_event_types:
+        requested_scopes.update(recommended_broadcaster_scopes(event_type))
+    requested_scope_list = sorted(requested_scopes)
+
+    print(f"\nAuthorizing service '{service.name}' for bot '{bot.name}' in bot's own channel.")
+    print("Requested scopes: " + ", ".join(requested_scope_list))
+    if not await ask_yes_no(session, "Continue?", default_yes=True):
+        return
+
+    state = secrets.token_urlsafe(24)
+    code = await obtain_oauth_code_for_scopes(
+        session=session,
+        session_factory=session_factory,
+        twitch=twitch,
+        state=state,
+        scopes=requested_scope_list,
+    )
+    if not code:
+        return
+
+    try:
+        token = await twitch.exchange_code(code)
+        token_info = await twitch.validate_user_token(token.access_token)
+    except Exception as exc:
+        print(f"OAuth/token validation failed: {exc}")
+        return
+
+    broadcaster_user_id = str(token_info.get("user_id", "")).strip()
+    broadcaster_login = str(token_info.get("login", "")).strip().lower()
+    granted_scopes = sorted(set(token_info.get("scopes", [])))
+    missing = sorted(set(requested_scope_list) - set(granted_scopes))
+    if missing:
+        print("Missing required granted scopes: " + ", ".join(missing))
+        return
+    if broadcaster_user_id != bot.twitch_user_id:
+        print(
+            "Authorized account does not match selected bot. "
+            f"Expected user_id={bot.twitch_user_id}, got {broadcaster_user_id}."
+        )
+        return
+
+    async with session_factory() as db:
+        row = await db.scalar(
+            select(BroadcasterAuthorization).where(
+                BroadcasterAuthorization.service_account_id == service.id,
+                BroadcasterAuthorization.bot_account_id == bot.id,
+                BroadcasterAuthorization.broadcaster_user_id == broadcaster_user_id,
+            )
+        )
+        scopes_csv = ",".join(granted_scopes)
+        now = datetime.now(UTC)
+        if row:
+            row.broadcaster_login = broadcaster_login
+            row.scopes_csv = scopes_csv
+            row.authorized_at = now
+        else:
+            db.add(
+                BroadcasterAuthorization(
+                    service_account_id=service.id,
+                    bot_account_id=bot.id,
+                    broadcaster_user_id=broadcaster_user_id,
+                    broadcaster_login=broadcaster_login,
+                    scopes_csv=scopes_csv,
+                    authorized_at=now,
+                )
+            )
+        await db.commit()
+    print("Broadcaster authorization saved for bot own channel.")
+
+
 async def list_tracked_channels_menu(session: PromptSession, session_factory) -> None:
     only_live = await ask_yes_no(session, "Show only live channels?", default_yes=False)
     raw_limit = (await session.prompt_async("Limit [200]: ")).strip()
@@ -1647,7 +1787,8 @@ async def menu_loop() -> None:
             "12) Create clip\n"
             "13) View tracked channels (online/offline)\n"
             "14) Live service communication tracking\n"
-            "15) Exit\n"
+            "15) Authorize bot in own channel (service)\n"
+            "16) Exit\n"
         )
         choice = (await session.prompt_async("Select option: ")).strip()
 
@@ -1747,6 +1888,9 @@ async def menu_loop() -> None:
             await live_service_event_tracking_menu(session, session_factory)
 
         elif choice == "15":
+            await authorize_bot_self_channel_menu(session, session_factory, twitch)
+
+        elif choice == "16":
             break
 
         else:
