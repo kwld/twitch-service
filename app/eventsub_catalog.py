@@ -409,3 +409,24 @@ def required_scope_any_of_groups(event_type: str) -> list[set[str]]:
         return [{"channel:read:hype_train"}]
     return []
 
+
+def recommended_broadcaster_scopes(event_type: str) -> set[str]:
+    normalized = event_type.strip().lower()
+    if normalized.startswith("channel.channel_points_custom_reward"):
+        return {"channel:read:redemptions"}
+    if normalized.startswith("channel.channel_points_custom_reward_redemption"):
+        return {"channel:read:redemptions"}
+    if normalized.startswith("channel.poll."):
+        return {"channel:read:polls"}
+    if normalized.startswith("channel.prediction."):
+        return {"channel:read:predictions"}
+    if normalized.startswith("channel.goal."):
+        return {"channel:read:goals"}
+    if normalized.startswith("channel.charity_campaign."):
+        return {"channel:read:charity"}
+    if normalized == "channel.ad_break.begin":
+        return {"channel:read:ads"}
+    if normalized.startswith("channel.hype_train."):
+        return {"channel:read:hype_train"}
+    return set()
+

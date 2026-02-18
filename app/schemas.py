@@ -148,6 +148,7 @@ class CreateClipResponse(BaseModel):
 class StartBroadcasterAuthorizationRequest(BaseModel):
     bot_account_id: uuid.UUID
     redirect_url: HttpUrl | None = None
+    event_types: list[str] | None = None
 
 
 class StartBroadcasterAuthorizationResponse(BaseModel):

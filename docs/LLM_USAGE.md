@@ -286,7 +286,8 @@ Request:
 ```json
 {
   "bot_account_id": "uuid",
-  "redirect_url": "https://your-service.example.com/oauth/done"
+  "redirect_url": "https://your-service.example.com/oauth/done",
+  "event_types": ["channel.poll.begin", "channel.prediction.begin"]
 }
 ```
 Returns:
@@ -294,7 +295,7 @@ Returns:
 {
   "state": "string",
   "authorize_url": "https://id.twitch.tv/oauth2/authorize?...",
-  "requested_scopes": ["channel:bot"],
+  "requested_scopes": ["channel:bot", "channel:read:polls", "channel:read:predictions"],
   "expires_in_seconds": 600
 }
 ```
@@ -312,6 +313,11 @@ Returns:
   - `ok=false`
   - `error`
   - `message`
+
+`event_types` behavior:
+- Optional list of target EventSub types for this broadcaster grant flow.
+- Service automatically includes required broadcaster scopes for those event types in `requested_scopes`.
+- If omitted, request falls back to baseline `channel:bot`.
 
 ### `GET /v1/broadcaster-authorizations`
 Returns broadcaster grants for this service:

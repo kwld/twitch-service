@@ -347,8 +347,9 @@ Use this flow for each streamer channel where the bot should act as a cloud bot:
 1. Ensure bot account OAuth token includes: `user:read:chat`, `user:write:chat`, `user:bot`, `clips:edit`.
 2. Service calls `POST /v1/broadcaster-authorizations/start` with `bot_account_id`.
    - Optional: include `redirect_url` so callback redirects back to your app after consent.
+   - Optional: include `event_types` so this service requests the broadcaster scopes required for those EventSub types.
 3. Redirect streamer in browser to returned `authorize_url`.
-4. Streamer approves Twitch consent for scope `channel:bot`.
+4. Streamer approves Twitch consent for `channel:bot` plus any event-specific scopes requested by this service.
 5. Twitch redirects to this service at `TWITCH_REDIRECT_URI` (this app handles `/oauth/callback`).
 6. Service verifies with `GET /v1/broadcaster-authorizations` before creating chat subscriptions or sending bot-badge-eligible messages.
 

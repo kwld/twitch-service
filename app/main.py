@@ -40,6 +40,7 @@ from app.eventsub_catalog import (
     SOURCE_SNAPSHOT_DATE,
     SOURCE_URL,
     best_transport_for_service,
+    recommended_broadcaster_scopes,
     supported_twitch_transports,
 )
 from app.event_router import InterestRegistry, LocalEventHub
@@ -1448,6 +1449,21 @@ async def start_broadcaster_authorization(
     req: StartBroadcasterAuthorizationRequest,
     service: ServiceAccount = Depends(_service_auth),
 ):
+    requested_event_types = [str(x).strip().lower() for x in (req.event_types or []) if str(x).strip()]
+    invalid_types = [x for x in requested_event_types if x not in KNOWN_EVENT_TYPES]
+    if invalid_types:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Unsupported event_types for broadcaster authorization: "
+                + ", ".join(sorted(set(invalid_types)))
+            ),
+        )
+    requested_scope_set = set(BROADCASTER_AUTH_SCOPES)
+    for event_type in requested_event_types:
+        requested_scope_set.update(recommended_broadcaster_scopes(event_type))
+    requested_scopes = sorted(requested_scope_set)
+
     async with session_factory() as session:
         bot = await session.get(BotAccount, req.bot_account_id)
         if not bot:
@@ -1457,7 +1473,7 @@ async def start_broadcaster_authorization(
         await _ensure_service_can_access_bot(session, service.id, req.bot_account_id)
 
         state = secrets.token_urlsafe(24)
-        scopes_csv = ",".join(BROADCASTER_AUTH_SCOPES)
+        scopes_csv = ",".join(requested_scopes)
         session.add(
             BroadcasterAuthorizationRequest(
                 state=state,
@@ -1470,7 +1486,7 @@ async def start_broadcaster_authorization(
         )
         await session.commit()
 
-    scopes_str = " ".join(BROADCASTER_AUTH_SCOPES)
+    scopes_str = " ".join(requested_scopes)
     authorize_url = twitch_client.build_authorize_url_with_scopes(
         state=state,
         scopes=scopes_str,
@@ -1479,7 +1495,7 @@ async def start_broadcaster_authorization(
     return StartBroadcasterAuthorizationResponse(
         state=state,
         authorize_url=authorize_url,
-        requested_scopes=list(BROADCASTER_AUTH_SCOPES),
+        requested_scopes=requested_scopes,
         expires_in_seconds=600,
     )
 
