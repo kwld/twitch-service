@@ -10,3 +10,4 @@ test-app/.run.out.log
 .mypy_cache/
 .ruff_cache/
 logs/
+.cli.env
