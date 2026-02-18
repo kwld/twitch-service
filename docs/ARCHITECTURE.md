@@ -54,8 +54,7 @@ Main tables:
   - `X-Client-Id`
   - `X-Client-Secret`
 - Service websocket:
-  - preferred: `POST /v1/ws-token` then `WS /ws/events?ws_token=<token>`,
-  - compatibility mode: direct `client_id/client_secret` websocket auth (legacy).
+  - required: `POST /v1/ws-token` then `WS /ws/events?ws_token=<token>`.
 - Service secrets are hashed with PBKDF2-SHA256 format:
   - `pbkdf2_sha256$<iterations>$<salt_b64>$<digest_b64>`
 - Legacy bcrypt hashes are still verifiable for backward compatibility.

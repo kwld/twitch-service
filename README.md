@@ -172,11 +172,10 @@ Optional enrichment (backward compatible):
 - Legacy bcrypt hashes remain verifiable for backward compatibility.
 
 ### Service WebSocket Auth
-- Preferred flow:
+- Required flow:
   1. call `POST /v1/ws-token` with service headers,
   2. connect `WS /ws/events?ws_token=<token>`.
 - WS tokens are short-lived and single-use.
-- Backward compatibility: `client_id` + `client_secret` are still accepted on websocket query/header auth, but should be treated as legacy.
 
 ### Create Interest Payload
 ```json
@@ -190,6 +189,9 @@ Optional enrichment (backward compatible):
 ```
 
 For `transport=webhook`, `webhook_url` is required.
+Security checks for `webhook_url`:
+- optional host allowlist via `APP_WEBHOOK_TARGET_ALLOWLIST` (comma-separated hostnames),
+- private/link-local/loopback/reserved targets are blocked by default (`APP_BLOCK_PRIVATE_WEBHOOK_TARGETS=true`).
 
 `POST /v1/interests` also:
 - validates `event_type` against the known Twitch EventSub catalog,

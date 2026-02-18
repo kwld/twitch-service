@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     app_eventsub_log_path: str = Field(default="./logs/eventsub.log", alias="APP_EVENTSUB_LOG_PATH")
     app_allowed_ips: str = Field(default="", alias="APP_ALLOWED_IPS")
     app_trust_x_forwarded_for: bool = Field(default=False, alias="APP_TRUST_X_FORWARDED_FOR")
+    app_webhook_target_allowlist: str = Field(default="", alias="APP_WEBHOOK_TARGET_ALLOWLIST")
+    app_block_private_webhook_targets: bool = Field(default=True, alias="APP_BLOCK_PRIVATE_WEBHOOK_TARGETS")
     loki_host: Optional[str] = Field(default=None, alias="LOKI_HOST")
     loki_port: Optional[int] = Field(default=None, alias="LOKI_PORT")
 

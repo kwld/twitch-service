@@ -7,6 +7,7 @@ import ipaddress
 import json
 import logging
 import secrets
+import socket
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -133,6 +134,84 @@ def _parse_allowed_ip_networks(raw: str) -> list[ipaddress.IPv4Network | ipaddre
     return networks
 
 
+def _parse_webhook_target_allowlist(raw: str) -> list[str]:
+    hosts = [v.strip().lower().lstrip(".") for v in raw.split(",") if v.strip()]
+    for host in hosts:
+        if "://" in host or "/" in host:
+            raise RuntimeError(
+                f"Invalid APP_WEBHOOK_TARGET_ALLOWLIST entry '{host}'. Use hostnames only."
+            )
+    return hosts
+
+
+def _host_matches_allowlist(host: str, allowlist: list[str]) -> bool:
+    normalized = host.strip().lower().rstrip(".")
+    if not allowlist:
+        return True
+    return any(normalized == allowed or normalized.endswith(f".{allowed}") for allowed in allowlist)
+
+
+def _is_public_ip_address(value: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return not (
+        value.is_private
+        or value.is_loopback
+        or value.is_link_local
+        or value.is_multicast
+        or value.is_reserved
+        or value.is_unspecified
+    )
+
+
+async def _validate_webhook_target_url(raw_url: str) -> None:
+    split = urlsplit(raw_url)
+    if split.scheme not in {"http", "https"}:
+        raise HTTPException(status_code=422, detail="webhook_url must use http or https")
+    if split.username or split.password:
+        raise HTTPException(status_code=422, detail="webhook_url must not contain userinfo credentials")
+    host = (split.hostname or "").strip().lower().rstrip(".")
+    if not host:
+        raise HTTPException(status_code=422, detail="webhook_url host is required")
+    if not _host_matches_allowlist(host, webhook_target_allowlist):
+        raise HTTPException(status_code=422, detail="webhook_url host is not allowed by APP_WEBHOOK_TARGET_ALLOWLIST")
+    if not settings.app_block_private_webhook_targets:
+        return
+    try:
+        parsed = ipaddress.ip_address(host)
+    except ValueError:
+        parsed = None
+    if parsed:
+        if not _is_public_ip_address(parsed):
+            raise HTTPException(status_code=422, detail="webhook_url target IP must be public")
+        return
+    if host.endswith((".localhost", ".local", ".internal")):
+        raise HTTPException(status_code=422, detail="webhook_url target host is not public")
+    port = split.port or (443 if split.scheme == "https" else 80)
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise HTTPException(status_code=422, detail=f"webhook_url host resolution failed: {exc}") from exc
+    if not infos:
+        raise HTTPException(status_code=422, detail="webhook_url host resolution returned no addresses")
+    resolved_ips: set[str] = set()
+    for family, _, _, _, sockaddr in infos:
+        if family == socket.AF_INET:
+            resolved_ips.add(str(sockaddr[0]))
+        elif family == socket.AF_INET6:
+            resolved_ips.add(str(sockaddr[0]))
+    if not resolved_ips:
+        raise HTTPException(status_code=422, detail="webhook_url host resolution returned no usable IP addresses")
+    for raw_ip in resolved_ips:
+        try:
+            ip_value = ipaddress.ip_address(raw_ip)
+        except ValueError:
+            continue
+        if not _is_public_ip_address(ip_value):
+            raise HTTPException(
+                status_code=422,
+                detail="webhook_url target host resolves to non-public IP address",
+            )
+
+
 settings = load_settings()
 _eventsub_log_path = Path(settings.app_eventsub_log_path)
 _eventsub_log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -146,6 +225,12 @@ eventsub_audit_logger.propagate = False
 allowed_ip_networks = _parse_allowed_ip_networks(settings.app_allowed_ips)
 if allowed_ip_networks:
     logger.info("IP allowlist enabled with %d entries", len(allowed_ip_networks))
+webhook_target_allowlist = _parse_webhook_target_allowlist(settings.app_webhook_target_allowlist)
+if webhook_target_allowlist:
+    logger.info(
+        "Webhook target allowlist enabled with %d host entries",
+        len(webhook_target_allowlist),
+    )
 engine, session_factory = create_engine_and_session(settings)
 twitch_client = TwitchClient(
     client_id=settings.twitch_client_id,
@@ -1474,6 +1559,8 @@ async def create_interest(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="webhook_url is required for webhook transport",
         )
+    if req.transport == "webhook" and webhook_url:
+        await _validate_webhook_target_url(webhook_url)
     if event_type not in KNOWN_EVENT_TYPES:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -2205,8 +2292,6 @@ async def create_twitch_clip(
 @app.websocket("/ws/events")
 async def ws_events(
     websocket: WebSocket,
-    client_id: str | None = Query(default=None),
-    client_secret: str | None = Query(default=None),
     ws_token: str | None = Query(default=None),
 ):
     client_ip = _resolve_client_ip(
@@ -2217,30 +2302,20 @@ async def ws_events(
         logger.warning("Blocked WebSocket connection from IP %s", client_ip or "unknown")
         await websocket.close(code=4403)
         return
-    service: ServiceAccount | None = None
     raw_ws_token = (ws_token or "").strip()
     token_value = raw_ws_token if raw_ws_token and raw_ws_token.lower() not in {"undefined", "null"} else ""
-    if token_value:
-        service_account_id = await _consume_ws_token(token_value)
-        if service_account_id:
-            async with session_factory() as session:
-                service = await session.get(ServiceAccount, service_account_id)
-                if not service or not service.enabled:
-                    service = None
-    if service is None:
-        header_client_id = websocket.headers.get("x-client-id", "")
-        header_client_secret = websocket.headers.get("x-client-secret", "")
-        auth_client_id = (client_id or "").strip() or header_client_id.strip()
-        auth_client_secret = (client_secret or "").strip() or header_client_secret.strip()
-        if not auth_client_id or not auth_client_secret:
-            await websocket.close(code=4401)
-            return
-        try:
-            async with session_factory() as session:
-                service = await authenticate_service(session, auth_client_id, auth_client_secret)
-        except HTTPException:
-            await websocket.close(code=4401)
-            return
+    if not token_value:
+        await websocket.close(code=4401)
+        return
+    service_account_id = await _consume_ws_token(token_value)
+    if not service_account_id:
+        await websocket.close(code=4401)
+        return
+    async with session_factory() as session:
+        service = await session.get(ServiceAccount, service_account_id)
+    if not service or not service.enabled:
+        await websocket.close(code=4401)
+        return
     logger.info("Incoming /ws/events connection accepted for service_id=%s", service.id)
     await _record_service_trace(
         service_account_id=service.id,
@@ -2250,7 +2325,7 @@ async def ws_events(
         target="/ws/events",
         payload={
             "ws_token_present": bool(token_value),
-            "auth_mode": "ws_token" if token_value else "credentials",
+            "auth_mode": "ws_token",
             "client_ip": client_ip,
         },
     )
