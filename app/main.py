@@ -518,51 +518,6 @@ async def _record_service_trace(
         return
 
 
-async def _notify_interest_rejected(
-    interest: ServiceInterest,
-    key,
-    reason: str,
-) -> None:
-    envelope = {
-        "id": uuid.uuid4().hex,
-        "provider": "twitch-service",
-        "type": "interest.rejected",
-        "event_timestamp": datetime.now(UTC).isoformat(),
-        "event": {
-            "interest_id": str(interest.id),
-            "service_account_id": str(interest.service_account_id),
-            "bot_account_id": str(key.bot_account_id),
-            "event_type": key.event_type,
-            "broadcaster_user_id": key.broadcaster_user_id,
-            "reason": reason,
-        },
-    }
-    await _record_service_trace(
-        service_account_id=interest.service_account_id,
-        direction="outgoing",
-        local_transport=interest.transport,
-        event_type="interest.rejected",
-        target=interest.webhook_url if interest.transport == "webhook" else "/ws/events",
-        payload=envelope,
-    )
-    if interest.transport == "webhook" and interest.webhook_url:
-        try:
-            await event_hub.publish_webhook(interest.service_account_id, interest.webhook_url, envelope)
-        except Exception:
-            return
-    else:
-        await event_hub.publish_to_service(interest.service_account_id, envelope)
-
-
-async def _delete_interest_row(interest_id: uuid.UUID) -> None:
-    async with session_factory() as session:
-        db_interest = await session.get(ServiceInterest, interest_id)
-        if not db_interest:
-            return
-        await session.delete(db_interest)
-        await session.commit()
-
-
 async def _filter_working_interests(session, interests: list[ServiceInterest]) -> list[ServiceInterest]:
     if not interests:
         return []
@@ -1750,9 +1705,10 @@ async def create_interest(
             key.broadcaster_user_id,
             exc,
         )
-        await _notify_interest_rejected(interest, key, str(exc))
-        await _delete_interest_row(interest.id)
-        await interest_registry.remove(interest)
+        await eventsub_manager.reject_interests_for_key(
+            key=key,
+            reason=str(exc),
+        )
         raise HTTPException(status_code=502, detail=f"Upstream subscription rejected: {exc}") from exc
     for default_interest in await _ensure_default_stream_interests(
         service=service,
@@ -1770,9 +1726,10 @@ async def create_interest(
                 default_key.broadcaster_user_id,
                 exc,
             )
-            await _notify_interest_rejected(default_interest, default_key, str(exc))
-            await _delete_interest_row(default_interest.id)
-            await interest_registry.remove(default_interest)
+            await eventsub_manager.reject_interests_for_key(
+                key=default_key,
+                reason=str(exc),
+            )
     return interest
 
 

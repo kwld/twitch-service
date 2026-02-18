@@ -218,6 +218,7 @@ Side effects:
   - `stream.offline`
 - if upstream ensure fails (for example missing broadcaster authorization or unsupported Twitch condition fields), the API removes the rejected interest and emits `interest.rejected` to the service's selected local transport.
 - rejected interests are not returned by listing endpoints.
+- the same rejection/removal rule is applied during manager startup/session reconciliation for previously persisted interests that can no longer be ensured upstream.
 
 ### `DELETE /v1/interests/{interest_id}`
 - deletes interest only if owned by service.

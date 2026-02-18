@@ -512,6 +512,11 @@ class EventSubManager:
                 await self._ensure_subscription(key)
             except Exception as exc:
                 logger.warning("Failed ensuring subscription for %s: %s", key, exc)
+                await self.reject_interests_for_key(
+                    key=key,
+                    reason=str(exc),
+                    upstream_transport=self._transport_for_event(key.event_type),
+                )
 
     async def _ensure_webhook_subscriptions(self) -> None:
         for key in await self.registry.keys():
@@ -520,6 +525,11 @@ class EventSubManager:
                     await self._ensure_subscription(key)
                 except Exception as exc:
                     logger.warning("Failed ensuring webhook subscription for %s: %s", key, exc)
+                    await self.reject_interests_for_key(
+                        key=key,
+                        reason=str(exc),
+                        upstream_transport=self._transport_for_event(key.event_type),
+                    )
 
     async def _ensure_subscription(self, key: InterestKey) -> None:
         async with self._subscription_lock:
@@ -895,6 +905,82 @@ class EventSubManager:
                     )
             else:
                 await self.event_hub.publish_to_service(interest.service_account_id, envelope)
+
+    async def reject_interests_for_key(
+        self,
+        key: InterestKey,
+        reason: str,
+        upstream_transport: Literal["websocket", "webhook"] | None = None,
+    ) -> int:
+        interests = await self.registry.interested(key)
+        if not interests:
+            return 0
+        transport = upstream_transport or self._transport_for_event(key.event_type)
+        for interest in interests:
+            envelope = {
+                "id": uuid.uuid4().hex,
+                "provider": "twitch-service",
+                "type": "interest.rejected",
+                "event_timestamp": datetime.now(UTC).isoformat(),
+                "event": {
+                    "interest_id": str(interest.id),
+                    "service_account_id": str(interest.service_account_id),
+                    "bot_account_id": str(key.bot_account_id),
+                    "event_type": key.event_type,
+                    "broadcaster_user_id": key.broadcaster_user_id,
+                    "upstream_transport": transport,
+                    "reason": reason,
+                },
+            }
+            await self._audit_log(
+                level="warning",
+                payload={
+                    "kind": "interest_rejected",
+                    "service_account_id": str(interest.service_account_id),
+                    "bot_account_id": str(key.bot_account_id),
+                    "event_type": key.event_type,
+                    "broadcaster_user_id": key.broadcaster_user_id,
+                    "direction": "outgoing",
+                    "transport": interest.transport,
+                    "target": interest.webhook_url if interest.transport == "webhook" else "/ws/events",
+                    "reason": reason,
+                },
+            )
+            await self._record_service_trace(
+                service_account_id=interest.service_account_id,
+                direction="outgoing",
+                local_transport=interest.transport,
+                event_type="interest.rejected",
+                target=interest.webhook_url if interest.transport == "webhook" else "/ws/events",
+                payload=envelope,
+            )
+            if interest.transport == "webhook" and interest.webhook_url:
+                with suppress(Exception):
+                    await self.event_hub.publish_webhook(
+                        interest.service_account_id,
+                        interest.webhook_url,
+                        envelope,
+                    )
+            else:
+                await self.event_hub.publish_to_service(interest.service_account_id, envelope)
+
+        interest_ids = [interest.id for interest in interests]
+        async with self.session_factory() as session:
+            rows = list(
+                (
+                    await session.scalars(
+                        select(ServiceInterest).where(ServiceInterest.id.in_(interest_ids))
+                    )
+                ).all()
+            )
+            for row in rows:
+                await session.delete(row)
+            await session.commit()
+
+        for interest in interests:
+            removed_key, still_used = await self.registry.remove(interest)
+            await self.on_interest_removed(removed_key, still_used)
+        return len(interests)
 
     async def _audit_log(self, level: str, payload: dict) -> None:
         enriched_payload = await self._enrich_audit_payload(payload)
