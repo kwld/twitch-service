@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from contextlib import suppress
 
 from prompt_toolkit import PromptSession
-from sqlalchemy import select
+from sqlalchemy import delete, select
+import websockets
 
 from app.bot_auth import ensure_bot_access_token
+from app.event_router import InterestRegistry, LocalEventHub
+from app.eventsub_manager import EventSubManager
 from app.models import BotAccount, TwitchSubscription
 from app.twitch import TwitchClient
 
@@ -90,9 +95,74 @@ async def manage_eventsub_subscriptions_menu(
     session: PromptSession,
     session_factory,
     twitch: TwitchClient,
+    settings,
     websocket_listener_cooldown_remaining_cli_fn,
     format_duration_short_fn,
 ) -> None:
+    async def _open_eventsub_welcome_session_id() -> tuple[websockets.WebSocketClientProtocol, str]:
+        ws = await websockets.connect(twitch.eventsub_ws_url, max_size=4 * 1024 * 1024)
+        raw = await asyncio.wait_for(ws.recv(), timeout=15)
+        welcome = json.loads(raw)
+        msg_type = welcome.get("metadata", {}).get("message_type")
+        if msg_type != "session_welcome":
+            await ws.close()
+            raise RuntimeError(f"Unexpected first EventSub message: {msg_type}")
+        session_id = str(welcome.get("payload", {}).get("session", {}).get("id", "")).strip()
+        if not session_id:
+            await ws.close()
+            raise RuntimeError("EventSub welcome did not include session id")
+        return ws, session_id
+
+    async def _recreate_all_from_interests() -> None:
+        print("Fetching active subscriptions...")
+        subs = await list_active_eventsub_subscriptions_cli(session_factory, twitch)
+        print(f"Deleting {len(subs)} active subscriptions from Twitch...")
+        failures = 0
+        for sub in subs:
+            try:
+                await delete_eventsub_subscription_cli(session_factory, twitch, sub)
+            except Exception as exc:
+                failures += 1
+                print(f"- failed delete {sub.get('id')}: {exc}")
+        if failures:
+            raise RuntimeError(f"Failed deleting {failures} subscription(s); aborting recreate")
+
+        async with session_factory() as db:
+            await db.execute(delete(TwitchSubscription))
+            await db.commit()
+
+        manager = EventSubManager(
+            twitch_client=twitch,
+            session_factory=session_factory,
+            registry=InterestRegistry(),
+            event_hub=LocalEventHub(),
+            chat_assets=None,
+            webhook_event_types={
+                x.strip()
+                for x in settings.twitch_eventsub_webhook_event_types.split(",")
+                if x.strip()
+            },
+            webhook_callback_url=settings.twitch_eventsub_webhook_callback_url,
+            webhook_secret=settings.twitch_eventsub_webhook_secret,
+        )
+
+        ws = None
+        try:
+            await manager._load_interests()
+            await manager._ensure_authorization_revoke_subscription()
+            await manager._ensure_webhook_subscriptions()
+            if await manager._has_websocket_interest():
+                ws, session_id = await _open_eventsub_welcome_session_id()
+                manager._session_id = session_id
+                await manager._ensure_all_subscriptions()
+            await manager._sync_from_twitch_and_reconcile()
+        finally:
+            if ws:
+                with suppress(Exception):
+                    await ws.close()
+            with suppress(Exception):
+                await manager.event_hub.close()
+
     filter_mode = "all"
     while True:
         try:
@@ -137,7 +207,8 @@ async def manage_eventsub_subscriptions_menu(
         print("4) Show all")
         print("5) Show webhook only")
         print("6) Show websocket only")
-        print("7) Back")
+        print("7) Delete all and recreate from interests")
+        print("8) Back")
         choice = (await session.prompt_async("Select option: ")).strip()
 
         if choice == "1":
@@ -208,6 +279,20 @@ async def manage_eventsub_subscriptions_menu(
             filter_mode = "websocket"
             continue
         if choice == "7":
+            confirm = (
+                await session.prompt_async(
+                    "Type 'recreate all from interests' to confirm destructive rebuild: "
+                )
+            ).strip().lower()
+            if confirm != "recreate all from interests":
+                print("Canceled.")
+                continue
+            try:
+                await _recreate_all_from_interests()
+                print("Recreated upstream subscriptions from persisted interests.")
+            except Exception as exc:
+                print(f"Failed rebuild: {exc}")
+            continue
+        if choice == "8":
             return
         print("Invalid option.")
-

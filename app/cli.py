@@ -207,6 +207,7 @@ async def menu_loop() -> None:
                 session,
                 session_factory,
                 twitch,
+                settings,
                 websocket_listener_cooldown_remaining_cli_fn=websocket_listener_cooldown_remaining_cli,
                 format_duration_short_fn=format_duration_short,
             )
