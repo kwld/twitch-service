@@ -464,7 +464,13 @@ async def lifespan(_: FastAPI):
         await engine.dispose()
 
 
-app = FastAPI(title="Twitch EventSub Service", lifespan=lifespan)
+app = FastAPI(
+    title="Twitch EventSub Service",
+    lifespan=lifespan,
+    docs_url="/api-docs",
+    openapi_url="/api-docs/openapi.json",
+    redoc_url="/api-redoc",
+)
 
 
 @app.middleware("http")
