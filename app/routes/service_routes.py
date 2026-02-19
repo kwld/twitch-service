@@ -559,8 +559,12 @@ def register_service_routes(
                     ServiceInterest.webhook_url == webhook_url,
                 )
             )
+            created_interest = False
             if existing:
                 interest = existing
+                interest.updated_at = datetime.now(UTC)
+                await session.commit()
+                await session.refresh(interest)
             else:
                 interest = ServiceInterest(
                     service_account_id=service.id,
@@ -589,8 +593,11 @@ def register_service_routes(
                         raise HTTPException(status_code=409, detail="Interest already exists") from None
                 else:
                     await session.refresh(interest)
+                    created_interest = True
 
         key = await interest_registry.add(interest)
+        if not created_interest:
+            return interest
         try:
             await eventsub_manager.on_interest_added(key)
         except Exception as exc:

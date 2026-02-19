@@ -28,6 +28,18 @@ logger = logging.getLogger(__name__)
 
 
 class EventSubSubscriptionMixin:
+    @staticmethod
+    def _is_subscription_reusable_status(status: str | None) -> bool:
+        normalized = (status or "").strip().lower()
+        if not normalized:
+            return False
+        if normalized.startswith("enabled"):
+            return True
+        return normalized in {
+            "webhook_callback_verification_pending",
+            "websocket_callback_verification_pending",
+        }
+
     async def _sync_from_twitch_and_reconcile(self) -> None:
         subs = await self._list_eventsub_subscriptions_all_tokens()
         async with self.session_factory() as session:
@@ -229,8 +241,8 @@ class EventSubSubscriptionMixin:
                         TwitchSubscription.broadcaster_user_id == key.broadcaster_user_id,
                     )
                 )
-                if db_sub and db_sub.status.startswith("enabled"):
-                    if upstream_transport == "webhook" and not db_sub.session_id:
+                if db_sub and self._is_subscription_reusable_status(db_sub.status):
+                    if upstream_transport == "webhook":
                         return
                     if upstream_transport == "websocket" and db_sub.session_id == session_id_snapshot:
                         return
