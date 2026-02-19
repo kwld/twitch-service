@@ -23,6 +23,9 @@ services:
       dockerfile: Dockerfile.dev
     container_name: twitch_eventsub_app_dev
     restart: unless-stopped
+    labels:
+      observability_loki: "true"
+      observability_loki_group: "app"
     depends_on:
       db:
         condition: service_healthy
@@ -77,6 +80,7 @@ services:
     volumes:
       - ./observability/alloy/config.alloy:/etc/alloy/config.alloy:ro
       - ./logs:/var/log/twitch-service
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     ports:
       - "12345:12345"
 

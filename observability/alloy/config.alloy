@@ -7,6 +7,69 @@ local.file_match "eventsub_audit" {
   ]
 }
 
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+discovery.relabel "container_logs" {
+  targets = discovery.docker.containers.targets
+
+  # Scrape only containers explicitly labeled for Loki collection.
+  rule {
+    source_labels = ["__meta_docker_container_label_observability_loki"]
+    regex         = "true"
+    action        = "keep"
+  }
+
+  # Optional app-specific filter (set label to "app" to keep only app logs).
+  rule {
+    source_labels = ["__meta_docker_container_label_observability_loki_group"]
+    regex         = "app|infra|all"
+    action        = "keep"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+    replacement   = "$1"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "compose_service"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_id"]
+    target_label  = "container_id"
+  }
+
+  rule {
+    target_label = "job"
+    replacement  = "docker-containers"
+  }
+}
+
+loki.source.docker "containers" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.container_logs.output
+  forward_to = [loki.process.container_logs.receiver]
+}
+
+loki.process "container_logs" {
+  stage.labels {
+    values = {
+      job            = "job",
+      container      = "container",
+      compose_service = "compose_service",
+      container_id   = "container_id",
+    }
+  }
+
+  forward_to = [loki.write.remote.receiver]
+}
+
 loki.source.file "eventsub_audit" {
   targets    = local.file_match.eventsub_audit.targets
   forward_to = [loki.process.eventsub_audit.receiver]
