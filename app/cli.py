@@ -7,7 +7,7 @@ import secrets
 from pathlib import Path
 
 from prompt_toolkit import PromptSession
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.cli_components.bot_workflows import (
     ask_yes_no,
@@ -88,6 +88,30 @@ async def init_db() -> tuple:
     engine, session_factory = create_engine_and_session(settings)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(
+            text(
+                "ALTER TABLE service_interests "
+                "ADD COLUMN IF NOT EXISTS last_heartbeat_at TIMESTAMPTZ"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE service_interests "
+                "ADD COLUMN IF NOT EXISTS stale_marked_at TIMESTAMPTZ"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE service_interests "
+                "ADD COLUMN IF NOT EXISTS delete_after TIMESTAMPTZ"
+            )
+        )
+        await conn.execute(
+            text(
+                "UPDATE service_interests "
+                "SET last_heartbeat_at = COALESCE(last_heartbeat_at, updated_at)"
+            )
+        )
     return settings, engine, session_factory
 
 
