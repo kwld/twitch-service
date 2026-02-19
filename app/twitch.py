@@ -39,6 +39,8 @@ class TwitchClient:
         self.eventsub_ws_url = eventsub_ws_url
         self._app_token: str | None = None
         self._app_token_expiry: datetime | None = None
+        self._token_validation_cache: dict[str, tuple[dict[str, Any], datetime]] = {}
+        self._token_validation_cache_ttl = timedelta(seconds=60)
         self._http_client = httpx.AsyncClient(timeout=20)
 
     async def close(self) -> None:
@@ -159,11 +161,20 @@ class TwitchClient:
         return users[0] if users else None
 
     async def validate_user_token(self, access_token: str) -> dict[str, Any]:
+        now = datetime.now(UTC)
+        cached = self._token_validation_cache.get(access_token)
+        if cached and cached[1] > now:
+            return dict(cached[0])
         headers = {"Authorization": f"OAuth {access_token}"}
         resp = await self._http_client.get(VALIDATE_URL, headers=headers)
         if resp.status_code >= 300:
             raise TwitchApiError(f"Failed token validation: {resp.text}")
-        return resp.json()
+        payload = resp.json()
+        self._token_validation_cache[access_token] = (
+            dict(payload),
+            now + self._token_validation_cache_ttl,
+        )
+        return payload
 
     async def app_access_token(self) -> str:
         if self._app_token and self._app_token_expiry and datetime.now(UTC) < self._app_token_expiry:
