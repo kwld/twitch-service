@@ -366,6 +366,11 @@ def best_transport_for_service(
     normalized = event_type.strip().lower()
     if normalized == "user.authorization.revoke":
         return "webhook", "Webhook-only by Twitch; required for authorization revoke handling."
+    if normalized.startswith("channel.chat.") and "websocket" in transports:
+        return (
+            "websocket",
+            "Chat events prefer WebSocket: bot user-token flow with lower notification latency.",
+        )
     if webhook_available and "webhook" in transports:
         return (
             "webhook",
