@@ -22,7 +22,7 @@ from fastapi import (
     status,
 )
 from fastapi.openapi.docs import get_swagger_ui_html, get_swagger_ui_oauth2_redirect_html
-from fastapi.responses import Response
+from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
@@ -478,12 +478,17 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 @app.get("/api-docs", include_in_schema=False)
 async def custom_swagger_ui_html():
-    return get_swagger_ui_html(
+    base_html = get_swagger_ui_html(
         openapi_url=app.openapi_url,
         title=f"{app.title} - API Docs",
         oauth2_redirect_url="/api-docs/oauth2-redirect",
-        swagger_css_url="/static/swagger-dark.css",
     )
+    content = base_html.body.decode("utf-8")
+    content = content.replace(
+        "</head>",
+        '  <link rel="stylesheet" type="text/css" href="/static/swagger-dark.css">\n</head>',
+    )
+    return HTMLResponse(content=content)
 
 
 @app.get("/api-docs/oauth2-redirect", include_in_schema=False)
