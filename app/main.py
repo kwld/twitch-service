@@ -3,16 +3,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
-import ipaddress
 import json
 import logging
 import secrets
-import socket
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlunsplit
 
 import uvicorn
 from fastapi import (
@@ -20,70 +18,47 @@ from fastapi import (
     FastAPI,
     Header,
     HTTPException,
-    Query,
     Request,
-    WebSocket,
-    WebSocketDisconnect,
     status,
 )
-from fastapi.responses import PlainTextResponse, RedirectResponse, Response
+from fastapi.responses import Response
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 
-from app.auth import authenticate_service, generate_client_id, generate_client_secret, hash_secret
+from app.auth import authenticate_service
 from app.bot_auth import ensure_bot_access_token
 from app.config import RuntimeState, load_settings
-from app.db import create_engine_and_session
-from app.eventsub_catalog import (
-    EVENTSUB_CATALOG,
-    KNOWN_EVENT_TYPES,
-    SOURCE_SNAPSHOT_DATE,
-    SOURCE_URL,
-    best_transport_for_service,
-    recommended_broadcaster_scopes,
-    supported_twitch_transports,
+from app.core.network_security import (
+    WebhookTargetValidator,
+    is_ip_allowed,
+    parse_allowed_ip_networks,
+    parse_webhook_target_allowlist,
+    resolve_client_ip,
 )
+from app.core.normalization import normalize_broadcaster_id_or_login
+from app.core.redaction import redact_payload
+from app.core.runtime_tokens import EventSubMessageDeduper, WsTokenStore
+from app.db import create_engine_and_session
 from app.event_router import InterestRegistry, LocalEventHub
 from app.eventsub_manager import EventSubManager
 from app.models import (
     Base,
     BotAccount,
-    BroadcasterAuthorization,
-    BroadcasterAuthorizationRequest,
     ChannelState,
-    OAuthCallback,
     ServiceAccount,
     ServiceBotAccess,
     ServiceEventTrace,
     ServiceInterest,
     ServiceRuntimeStats,
-    ServiceUserAuthRequest,
     TwitchSubscription,
 )
-from app.schemas import (
-    ActiveTwitchSubscriptionItem,
-    ActiveTwitchSubscriptionsResponse,
-    BroadcasterAuthorizationResponse,
-    CreateClipRequest,
-    CreateClipResponse,
-    CreateInterestRequest,
-    EventSubCatalogItem,
-    EventSubCatalogResponse,
-    InterestResponse,
-    SendChatMessageRequest,
-    SendChatMessageResponse,
-    StartBroadcasterAuthorizationRequest,
-    StartMinimalBroadcasterAuthorizationRequest,
-    StartBroadcasterAuthorizationResponse,
-    StartUserAuthorizationRequest,
-    StartUserAuthorizationResponse,
-    ServiceSubscriptionsResponse,
-    ServiceSubscriptionItem,
-    ServiceSubscriptionTransportRow,
-    ServiceSubscriptionTransportSummaryResponse,
-    UserAuthorizationSessionResponse,
+from app.routes import (
+    register_admin_routes,
+    register_service_routes,
+    register_system_routes,
+    register_twitch_routes,
+    register_ws_routes,
 )
-from app.routes import register_admin_routes, register_service_routes, register_twitch_routes
 from app.twitch import TwitchClient
 from app.twitch_chat_assets import TwitchChatAssetCache
 
@@ -91,128 +66,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("twitch-eventsub-service")
 eventsub_audit_logger = logging.getLogger("eventsub.audit")
 TWITCH_WEBHOOK_PATH = "/webhooks/twitch/eventsub"
-
-
-def _normalize_broadcaster_id_or_login(raw: str) -> str:
-    """
-    Accept either a Twitch user id, a login, or a twitch.tv URL, and normalize to
-    a single token (id/login) without surrounding punctuation.
-    """
-    value = (raw or "").strip()
-    if not value:
-        return ""
-    if value.startswith(("http://", "https://")):
-        try:
-            split = urlsplit(value)
-            host = (split.netloc or "").lower()
-            if host.endswith("twitch.tv"):
-                path = (split.path or "").strip("/")
-                if path:
-                    value = path.split("/", 1)[0]
-        except Exception:
-            pass
-    value = value.strip().lstrip("@")
-    if "/" in value:
-        value = value.split("/", 1)[0]
-    if "?" in value:
-        value = value.split("?", 1)[0]
-    return value.strip()
-
-
-def _parse_allowed_ip_networks(raw: str) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
-    values = [v.strip() for v in raw.split(",") if v.strip()]
-    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
-    for value in values:
-        try:
-            if "/" in value:
-                network = ipaddress.ip_network(value, strict=False)
-            else:
-                host = ipaddress.ip_address(value)
-                network = ipaddress.ip_network(f"{host}/{host.max_prefixlen}", strict=False)
-        except ValueError as exc:
-            raise RuntimeError(
-                f"Invalid APP_ALLOWED_IPS entry '{value}'. Use IPv4/IPv6 or CIDR values."
-            ) from exc
-        networks.append(network)
-    return networks
-
-
-def _parse_webhook_target_allowlist(raw: str) -> list[str]:
-    hosts = [v.strip().lower().lstrip(".") for v in raw.split(",") if v.strip()]
-    for host in hosts:
-        if "://" in host or "/" in host:
-            raise RuntimeError(
-                f"Invalid APP_WEBHOOK_TARGET_ALLOWLIST entry '{host}'. Use hostnames only."
-            )
-    return hosts
-
-
-def _host_matches_allowlist(host: str, allowlist: list[str]) -> bool:
-    normalized = host.strip().lower().rstrip(".")
-    if not allowlist:
-        return True
-    return any(normalized == allowed or normalized.endswith(f".{allowed}") for allowed in allowlist)
-
-
-def _is_public_ip_address(value: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    return not (
-        value.is_private
-        or value.is_loopback
-        or value.is_link_local
-        or value.is_multicast
-        or value.is_reserved
-        or value.is_unspecified
-    )
-
-
-async def _validate_webhook_target_url(raw_url: str) -> None:
-    split = urlsplit(raw_url)
-    if split.scheme not in {"http", "https"}:
-        raise HTTPException(status_code=422, detail="webhook_url must use http or https")
-    if split.username or split.password:
-        raise HTTPException(status_code=422, detail="webhook_url must not contain userinfo credentials")
-    host = (split.hostname or "").strip().lower().rstrip(".")
-    if not host:
-        raise HTTPException(status_code=422, detail="webhook_url host is required")
-    if not _host_matches_allowlist(host, webhook_target_allowlist):
-        raise HTTPException(status_code=422, detail="webhook_url host is not allowed by APP_WEBHOOK_TARGET_ALLOWLIST")
-    if not settings.app_block_private_webhook_targets:
-        return
-    try:
-        parsed = ipaddress.ip_address(host)
-    except ValueError:
-        parsed = None
-    if parsed:
-        if not _is_public_ip_address(parsed):
-            raise HTTPException(status_code=422, detail="webhook_url target IP must be public")
-        return
-    if host.endswith((".localhost", ".local", ".internal")):
-        raise HTTPException(status_code=422, detail="webhook_url target host is not public")
-    port = split.port or (443 if split.scheme == "https" else 80)
-    try:
-        infos = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    except socket.gaierror as exc:
-        raise HTTPException(status_code=422, detail=f"webhook_url host resolution failed: {exc}") from exc
-    if not infos:
-        raise HTTPException(status_code=422, detail="webhook_url host resolution returned no addresses")
-    resolved_ips: set[str] = set()
-    for family, _, _, _, sockaddr in infos:
-        if family == socket.AF_INET:
-            resolved_ips.add(str(sockaddr[0]))
-        elif family == socket.AF_INET6:
-            resolved_ips.add(str(sockaddr[0]))
-    if not resolved_ips:
-        raise HTTPException(status_code=422, detail="webhook_url host resolution returned no usable IP addresses")
-    for raw_ip in resolved_ips:
-        try:
-            ip_value = ipaddress.ip_address(raw_ip)
-        except ValueError:
-            continue
-        if not _is_public_ip_address(ip_value):
-            raise HTTPException(
-                status_code=422,
-                detail="webhook_url target host resolves to non-public IP address",
-            )
 
 
 settings = load_settings()
@@ -225,15 +78,19 @@ if not any(isinstance(h, logging.FileHandler) for h in eventsub_audit_logger.han
 eventsub_audit_logger.setLevel(logging.INFO)
 eventsub_audit_logger.propagate = False
 
-allowed_ip_networks = _parse_allowed_ip_networks(settings.app_allowed_ips)
+allowed_ip_networks = parse_allowed_ip_networks(settings.app_allowed_ips)
 if allowed_ip_networks:
     logger.info("IP allowlist enabled with %d entries", len(allowed_ip_networks))
-webhook_target_allowlist = _parse_webhook_target_allowlist(settings.app_webhook_target_allowlist)
+webhook_target_allowlist = parse_webhook_target_allowlist(settings.app_webhook_target_allowlist)
 if webhook_target_allowlist:
     logger.info(
         "Webhook target allowlist enabled with %d host entries",
         len(webhook_target_allowlist),
     )
+webhook_target_validator = WebhookTargetValidator(
+    allowlist=webhook_target_allowlist,
+    block_private_targets=settings.app_block_private_webhook_targets,
+)
 engine, session_factory = create_engine_and_session(settings)
 twitch_client = TwitchClient(
     client_id=settings.twitch_client_id,
@@ -265,84 +122,33 @@ BROADCASTER_AUTH_SCOPES = ("channel:bot",)
 SERVICE_USER_AUTH_SCOPES = ("user:read:email",)
 WS_TOKEN_TTL = timedelta(minutes=2)
 EVENTSUB_MESSAGE_DEDUP_TTL = timedelta(minutes=10)
-_ws_tokens: dict[str, tuple[uuid.UUID, datetime]] = {}
-_ws_tokens_lock = asyncio.Lock()
-_eventsub_seen_message_ids: dict[str, datetime] = {}
-_eventsub_seen_lock = asyncio.Lock()
+ws_token_store = WsTokenStore(ttl=WS_TOKEN_TTL)
+eventsub_message_deduper = EventSubMessageDeduper(ttl=EVENTSUB_MESSAGE_DEDUP_TTL)
 
 
 def _counter(value: int | None) -> int:
     return value or 0
 
 
-def _resolve_client_ip(
-    direct_host: str | None,
-    x_forwarded_for: str | None,
-) -> str | None:
-    if settings.app_trust_x_forwarded_for and x_forwarded_for:
-        forwarded = x_forwarded_for.split(",", 1)[0].strip()
-        if forwarded:
-            return forwarded
-    return direct_host
-
-
 def _request_client_ip(request: Request) -> str | None:
     direct_host = request.client.host if request.client else None
-    return _resolve_client_ip(direct_host, request.headers.get("x-forwarded-for"))
-
-
-def _is_ip_allowed(client_ip: str | None) -> bool:
-    if not allowed_ip_networks:
-        return True
-    if not client_ip:
-        return False
-    try:
-        parsed_ip = ipaddress.ip_address(client_ip)
-    except ValueError:
-        return False
-    return any(parsed_ip in network for network in allowed_ip_networks)
+    return resolve_client_ip(
+        direct_host,
+        request.headers.get("x-forwarded-for"),
+        trust_x_forwarded_for=settings.app_trust_x_forwarded_for,
+    )
 
 
 async def _issue_ws_token(service_account_id: uuid.UUID) -> tuple[str, int]:
-    token = secrets.token_urlsafe(32)
-    expires_at = datetime.now(UTC) + WS_TOKEN_TTL
-    async with _ws_tokens_lock:
-        now = datetime.now(UTC)
-        expired = [k for k, (_, exp) in _ws_tokens.items() if exp <= now]
-        for key in expired:
-            _ws_tokens.pop(key, None)
-        _ws_tokens[token] = (service_account_id, expires_at)
-    return token, int(WS_TOKEN_TTL.total_seconds())
+    return await ws_token_store.issue(service_account_id)
 
 
 async def _consume_ws_token(token: str) -> uuid.UUID | None:
-    now = datetime.now(UTC)
-    async with _ws_tokens_lock:
-        expired = [k for k, (_, exp) in _ws_tokens.items() if exp <= now]
-        for key in expired:
-            _ws_tokens.pop(key, None)
-        payload = _ws_tokens.pop(token, None)
-    if not payload:
-        return None
-    service_account_id, expires_at = payload
-    if expires_at <= now:
-        return None
-    return service_account_id
+    return await ws_token_store.consume(token)
 
 
 async def _is_new_eventsub_message_id(message_id: str) -> bool:
-    if not message_id:
-        return False
-    now = datetime.now(UTC)
-    async with _eventsub_seen_lock:
-        threshold = now - EVENTSUB_MESSAGE_DEDUP_TTL
-        expired = [k for k, seen_at in _eventsub_seen_message_ids.items() if seen_at < threshold]
-        for key in expired:
-            _eventsub_seen_message_ids.pop(key, None)
-        if message_id in _eventsub_seen_message_ids:
-            return False
-        _eventsub_seen_message_ids[message_id] = now
-        return True
+    return await eventsub_message_deduper.is_new(message_id)
 
 
 async def _require_admin(x_admin_key: str = Header(default="")) -> None:
@@ -452,44 +258,6 @@ def _append_query(url: str, params: dict[str, str]) -> str:
     )
 
 
-def _is_sensitive_key(key: str) -> bool:
-    normalized = key.strip().lower().replace("-", "_")
-    return any(
-        token in normalized
-        for token in (
-            "secret",
-            "token",
-            "authorization",
-            "api_key",
-            "password",
-            "client_secret",
-            "x_client_secret",
-            "ws_token",
-        )
-    )
-
-
-def _mask_secret(value: object) -> str:
-    raw = str(value)
-    if not raw or len(raw) <= 4:
-        return "***"
-    return "***" + raw[-4:]
-
-
-def _redact_trace_payload(payload: object) -> object:
-    if isinstance(payload, dict):
-        out: dict[str, object] = {}
-        for key, value in payload.items():
-            if _is_sensitive_key(str(key)):
-                out[str(key)] = _mask_secret(value)
-            else:
-                out[str(key)] = _redact_trace_payload(value)
-        return out
-    if isinstance(payload, list):
-        return [_redact_trace_payload(item) for item in payload]
-    return payload
-
-
 async def _record_service_trace(
     service_account_id: uuid.UUID,
     direction: str,
@@ -499,7 +267,7 @@ async def _record_service_trace(
     payload: object,
 ) -> None:
     try:
-        payload_json = json.dumps(_redact_trace_payload(payload), default=str)
+        payload_json = json.dumps(redact_payload(payload), default=str)
         if len(payload_json) > 12000:
             payload_json = payload_json[:12000] + "... [truncated]"
         async with session_factory() as session:
@@ -663,6 +431,7 @@ async def lifespan(_: FastAPI):
     finally:
         await eventsub_manager.stop()
         await event_hub.close()
+        await twitch_client.close()
         await engine.dispose()
 
 
@@ -676,7 +445,7 @@ async def enforce_ip_allowlist(request: Request, call_next):
     if not allowed_ip_networks:
         return await call_next(request)
     client_ip = _request_client_ip(request)
-    if not _is_ip_allowed(client_ip):
+    if not is_ip_allowed(client_ip, allowed_ip_networks):
         logger.warning("Blocked HTTP request from IP %s to %s", client_ip or "unknown", request.url.path)
         return Response(status_code=403, content="Client IP not allowed")
     return await call_next(request)
@@ -706,416 +475,17 @@ def _verify_twitch_signature(request: Request, raw_body: bytes) -> bool:
     return hmac.compare_digest(expected, message_signature)
 
 
-@app.get("/health")
-async def health():
-    return {"ok": True}
-
-
-@app.get("/oauth/callback")
-async def oauth_callback(code: str | None = None, state: str | None = None, error: str | None = None):
-    if state:
-        async with session_factory() as session:
-            auth_request = await session.get(BroadcasterAuthorizationRequest, state)
-            if auth_request:
-                redirect_url = auth_request.redirect_url
-                now = datetime.now(UTC)
-                if error:
-                    auth_request.status = "failed"
-                    auth_request.error = error
-                    auth_request.completed_at = now
-                    await session.commit()
-                    if redirect_url:
-                        return RedirectResponse(
-                            url=_append_query(
-                                redirect_url,
-                                {
-                                    "ok": "false",
-                                    "error": error,
-                                    "message": "Broadcaster authorization failed.",
-                                },
-                            ),
-                            status_code=302,
-                        )
-                    return {
-                        "ok": False,
-                        "error": error,
-                        "message": "Broadcaster authorization failed.",
-                    }
-                if not code:
-                    auth_request.status = "failed"
-                    auth_request.error = "missing_code"
-                    auth_request.completed_at = now
-                    await session.commit()
-                    if redirect_url:
-                        return RedirectResponse(
-                            url=_append_query(
-                                redirect_url,
-                                {
-                                    "ok": "false",
-                                    "error": "missing_code",
-                                    "message": "Missing OAuth code",
-                                },
-                            ),
-                            status_code=302,
-                        )
-                    raise HTTPException(status_code=400, detail="Missing OAuth code")
-
-                try:
-                    token = await twitch_client.exchange_code(code)
-                    token_info = await twitch_client.validate_user_token(token.access_token)
-                except Exception as exc:
-                    auth_request.status = "failed"
-                    auth_request.error = str(exc)
-                    auth_request.completed_at = now
-                    await session.commit()
-                    if redirect_url:
-                        return RedirectResponse(
-                            url=_append_query(
-                                redirect_url,
-                                {
-                                    "ok": "false",
-                                    "error": "oauth_exchange_failed",
-                                    "message": f"OAuth exchange failed: {exc}",
-                                },
-                            ),
-                            status_code=302,
-                        )
-                    raise HTTPException(status_code=502, detail=f"OAuth exchange failed: {exc}") from exc
-
-                granted_scopes = sorted(set(token_info.get("scopes", [])))
-                required = set(BROADCASTER_AUTH_SCOPES)
-                if not required.issubset(set(granted_scopes)):
-                    missing_required = ",".join(sorted(required - set(granted_scopes)))
-                    auth_request.status = "failed"
-                    auth_request.error = "missing_required_scopes:" + missing_required
-                    auth_request.completed_at = now
-                    await session.commit()
-                    if redirect_url:
-                        return RedirectResponse(
-                            url=_append_query(
-                                redirect_url,
-                                {
-                                    "ok": "false",
-                                    "error": "missing_required_scopes",
-                                    "message": (
-                                        "Broadcaster authorization succeeded but required scopes are missing: "
-                                        + missing_required
-                                    ),
-                                },
-                            ),
-                            status_code=302,
-                        )
-                    raise HTTPException(
-                        status_code=400,
-                        detail=(
-                            "Broadcaster authorization succeeded but required scopes are missing: "
-                            + missing_required
-                        ),
-                    )
-
-                broadcaster_user_id = str(token_info.get("user_id", ""))
-                broadcaster_login = str(token_info.get("login", ""))
-                if not broadcaster_user_id or not broadcaster_login:
-                    auth_request.status = "failed"
-                    auth_request.error = "missing_broadcaster_identity"
-                    auth_request.completed_at = now
-                    await session.commit()
-                    if redirect_url:
-                        return RedirectResponse(
-                            url=_append_query(
-                                redirect_url,
-                                {
-                                    "ok": "false",
-                                    "error": "missing_broadcaster_identity",
-                                    "message": "Could not resolve broadcaster identity",
-                                },
-                            ),
-                            status_code=302,
-                        )
-                    raise HTTPException(status_code=400, detail="Could not resolve broadcaster identity")
-
-                existing_auth = await session.scalar(
-                    select(BroadcasterAuthorization).where(
-                        BroadcasterAuthorization.service_account_id == auth_request.service_account_id,
-                        BroadcasterAuthorization.bot_account_id == auth_request.bot_account_id,
-                        BroadcasterAuthorization.broadcaster_user_id == broadcaster_user_id,
-                    )
-                )
-                scopes_csv = ",".join(granted_scopes)
-                if existing_auth:
-                    existing_auth.broadcaster_login = broadcaster_login
-                    existing_auth.scopes_csv = scopes_csv
-                    existing_auth.authorized_at = now
-                else:
-                    session.add(
-                        BroadcasterAuthorization(
-                            service_account_id=auth_request.service_account_id,
-                            bot_account_id=auth_request.bot_account_id,
-                            broadcaster_user_id=broadcaster_user_id,
-                            broadcaster_login=broadcaster_login,
-                            scopes_csv=scopes_csv,
-                            authorized_at=now,
-                        )
-                    )
-                auth_request.status = "completed"
-                auth_request.broadcaster_user_id = broadcaster_user_id
-                auth_request.error = None
-                auth_request.completed_at = now
-                await session.commit()
-                if redirect_url:
-                    return RedirectResponse(
-                        url=_append_query(
-                            redirect_url,
-                            {
-                                "ok": "true",
-                                "message": "Broadcaster authorization completed.",
-                                "service_connected": "true",
-                                "broadcaster_user_id": broadcaster_user_id,
-                                "broadcaster_login": broadcaster_login,
-                                "scopes": ",".join(granted_scopes),
-                            },
-                        ),
-                        status_code=302,
-                    )
-                return {
-                    "ok": True,
-                    "message": "Broadcaster authorization completed.",
-                    "service_connected": True,
-                    "broadcaster_user_id": broadcaster_user_id,
-                    "broadcaster_login": broadcaster_login,
-                    "scopes": granted_scopes,
-                }
-            user_auth_request = await session.get(ServiceUserAuthRequest, state)
-            if user_auth_request:
-                redirect_url = user_auth_request.redirect_url
-                now = datetime.now(UTC)
-                if error:
-                    user_auth_request.status = "failed"
-                    user_auth_request.error = error
-                    user_auth_request.completed_at = now
-                    await session.commit()
-                    if redirect_url:
-                        return RedirectResponse(
-                            url=_append_query(
-                                redirect_url,
-                                {
-                                    "ok": "false",
-                                    "auth_type": "service_user",
-                                    "state": state,
-                                    "error": error,
-                                    "message": "Service user authorization failed.",
-                                },
-                            ),
-                            status_code=302,
-                        )
-                    return {
-                        "ok": False,
-                        "auth_type": "service_user",
-                        "state": state,
-                        "error": error,
-                        "message": "Service user authorization failed.",
-                    }
-                if not code:
-                    user_auth_request.status = "failed"
-                    user_auth_request.error = "missing_code"
-                    user_auth_request.completed_at = now
-                    await session.commit()
-                    if redirect_url:
-                        return RedirectResponse(
-                            url=_append_query(
-                                redirect_url,
-                                {
-                                    "ok": "false",
-                                    "auth_type": "service_user",
-                                    "state": state,
-                                    "error": "missing_code",
-                                    "message": "Missing OAuth code",
-                                },
-                            ),
-                            status_code=302,
-                        )
-                    raise HTTPException(status_code=400, detail="Missing OAuth code")
-
-                try:
-                    token = await twitch_client.exchange_code(code)
-                    token_info = await twitch_client.validate_user_token(token.access_token)
-                    users = await twitch_client.get_users(token.access_token)
-                    user = users[0] if users else {}
-                except Exception as exc:
-                    user_auth_request.status = "failed"
-                    user_auth_request.error = str(exc)
-                    user_auth_request.completed_at = now
-                    await session.commit()
-                    if redirect_url:
-                        return RedirectResponse(
-                            url=_append_query(
-                                redirect_url,
-                                {
-                                    "ok": "false",
-                                    "auth_type": "service_user",
-                                    "state": state,
-                                    "error": "oauth_exchange_failed",
-                                    "message": f"OAuth exchange failed: {exc}",
-                                },
-                            ),
-                            status_code=302,
-                        )
-                    raise HTTPException(status_code=502, detail=f"OAuth exchange failed: {exc}") from exc
-
-                granted_scopes = sorted(set(token_info.get("scopes", [])))
-                required = set(SERVICE_USER_AUTH_SCOPES)
-                if not required.issubset(set(granted_scopes)):
-                    missing_required = ",".join(sorted(required - set(granted_scopes)))
-                    user_auth_request.status = "failed"
-                    user_auth_request.error = "missing_required_scopes:" + missing_required
-                    user_auth_request.completed_at = now
-                    await session.commit()
-                    if redirect_url:
-                        return RedirectResponse(
-                            url=_append_query(
-                                redirect_url,
-                                {
-                                    "ok": "false",
-                                    "auth_type": "service_user",
-                                    "state": state,
-                                    "error": "missing_required_scopes",
-                                    "message": (
-                                        "Service user authorization succeeded but required scopes are missing: "
-                                        + missing_required
-                                    ),
-                                },
-                            ),
-                            status_code=302,
-                        )
-                    raise HTTPException(
-                        status_code=400,
-                        detail=(
-                            "Service user authorization succeeded but required scopes are missing: "
-                            + missing_required
-                        ),
-                    )
-
-                twitch_user_id = str(token_info.get("user_id", "") or user.get("id", ""))
-                twitch_login = str(token_info.get("login", "") or user.get("login", ""))
-                if not twitch_user_id or not twitch_login:
-                    user_auth_request.status = "failed"
-                    user_auth_request.error = "missing_user_identity"
-                    user_auth_request.completed_at = now
-                    await session.commit()
-                    if redirect_url:
-                        return RedirectResponse(
-                            url=_append_query(
-                                redirect_url,
-                                {
-                                    "ok": "false",
-                                    "auth_type": "service_user",
-                                    "state": state,
-                                    "error": "missing_user_identity",
-                                    "message": "Could not resolve authenticated Twitch user identity",
-                                },
-                            ),
-                            status_code=302,
-                        )
-                    raise HTTPException(
-                        status_code=400, detail="Could not resolve authenticated Twitch user identity"
-                    )
-
-                user_auth_request.status = "completed"
-                user_auth_request.error = None
-                user_auth_request.twitch_user_id = twitch_user_id
-                user_auth_request.twitch_login = twitch_login
-                user_auth_request.twitch_display_name = str(user.get("display_name", twitch_login))
-                user_auth_request.twitch_email = user.get("email")
-                user_auth_request.access_token = token.access_token
-                user_auth_request.refresh_token = token.refresh_token
-                user_auth_request.token_expires_at = token.expires_at
-                user_auth_request.completed_at = now
-                await session.commit()
-                if redirect_url:
-                    return RedirectResponse(
-                        url=_append_query(
-                            redirect_url,
-                            {
-                                "ok": "true",
-                                "auth_type": "service_user",
-                                "state": state,
-                                "message": "Service user authorization completed.",
-                                "twitch_user_id": twitch_user_id,
-                                "twitch_login": twitch_login,
-                                "scopes": ",".join(granted_scopes),
-                            },
-                        ),
-                        status_code=302,
-                    )
-                return {
-                    "ok": True,
-                    "auth_type": "service_user",
-                    "state": state,
-                    "message": "Service user authorization completed.",
-                    "twitch_user_id": twitch_user_id,
-                    "twitch_login": twitch_login,
-                    "scopes": granted_scopes,
-                }
-
-    if state:
-        async with session_factory() as session:
-            callback = await session.get(OAuthCallback, state)
-            if callback is None:
-                callback = OAuthCallback(state=state)
-                session.add(callback)
-            callback.code = code
-            callback.error = error
-            await session.commit()
-
-    if error:
-        return {
-            "ok": False,
-            "error": error,
-            "message": "OAuth authorization returned an error.",
-        }
-    if not code:
-        raise HTTPException(status_code=400, detail="Missing OAuth code")
-    return {
-        "ok": True,
-        "message": "OAuth callback received. You can return to CLI and continue setup.",
-        "code_received": True,
-        "state_received": bool(state),
-    }
-
-
-@app.post("/webhooks/twitch/eventsub")
-async def twitch_eventsub_webhook(request: Request):
-    raw_body = await request.body()
-    if not _verify_twitch_signature(request, raw_body):
-        raise HTTPException(status_code=403, detail="Invalid Twitch signature")
-    message_id = request.headers.get("Twitch-Eventsub-Message-Id", "")
-    message_type = request.headers.get("Twitch-Eventsub-Message-Type", "").lower()
-    payload = await request.json()
-    if not await _is_new_eventsub_message_id(message_id):
-        if message_type == "webhook_callback_verification":
-            challenge = payload.get("challenge", "")
-            return PlainTextResponse(content=challenge, status_code=200)
-        return Response(status_code=204)
-
-    if message_type == "webhook_callback_verification":
-        challenge = payload.get("challenge", "")
-        return PlainTextResponse(content=challenge, status_code=200)
-
-    if message_type == "notification":
-        asyncio.create_task(
-            eventsub_manager.handle_webhook_notification(
-                payload, message_id
-            )
-        )
-        return Response(status_code=204)
-
-    if message_type == "revocation":
-        asyncio.create_task(eventsub_manager.handle_webhook_revocation(payload))
-        return Response(status_code=204)
-
-    return Response(status_code=204)
-
-
+register_system_routes(
+    app,
+    session_factory=session_factory,
+    twitch_client=twitch_client,
+    eventsub_manager=eventsub_manager,
+    append_query=_append_query,
+    verify_twitch_signature=_verify_twitch_signature,
+    is_new_eventsub_message_id=_is_new_eventsub_message_id,
+    broadcaster_auth_scopes=BROADCASTER_AUTH_SCOPES,
+    service_user_auth_scopes=SERVICE_USER_AUTH_SCOPES,
+)
 
 register_admin_routes(
     app,
@@ -1139,8 +509,8 @@ register_service_routes(
     service_allowed_bot_ids=_service_allowed_bot_ids,
     ensure_service_can_access_bot=_ensure_service_can_access_bot,
     ensure_default_stream_interests=_ensure_default_stream_interests,
-    validate_webhook_target_url=_validate_webhook_target_url,
-    normalize_broadcaster_id_or_login=_normalize_broadcaster_id_or_login,
+    validate_webhook_target_url=webhook_target_validator.validate,
+    normalize_broadcaster_id_or_login=normalize_broadcaster_id_or_login,
     broadcaster_auth_scopes=BROADCASTER_AUTH_SCOPES,
     service_user_auth_scopes=SERVICE_USER_AUTH_SCOPES,
 )
@@ -1152,113 +522,19 @@ register_twitch_routes(
     service_auth=_service_auth,
     split_csv=_split_csv,
     ensure_service_can_access_bot=_ensure_service_can_access_bot,
-    normalize_broadcaster_id_or_login=_normalize_broadcaster_id_or_login,
+    normalize_broadcaster_id_or_login=normalize_broadcaster_id_or_login,
 )
-@app.websocket("/ws/events")
-async def ws_events(
-    websocket: WebSocket,
-    ws_token: str | None = Query(default=None),
-):
-    client_ip = _resolve_client_ip(
-        websocket.client.host if websocket.client else None,
-        websocket.headers.get("x-forwarded-for"),
-    )
-    if not _is_ip_allowed(client_ip):
-        logger.warning("Blocked WebSocket connection from IP %s", client_ip or "unknown")
-        await websocket.close(code=4403)
-        return
-    raw_ws_token = (ws_token or "").strip()
-    token_value = raw_ws_token if raw_ws_token and raw_ws_token.lower() not in {"undefined", "null"} else ""
-    if not token_value:
-        await websocket.close(code=4401)
-        return
-    service_account_id = await _consume_ws_token(token_value)
-    if not service_account_id:
-        await websocket.close(code=4401)
-        return
-    async with session_factory() as session:
-        service = await session.get(ServiceAccount, service_account_id)
-    if not service or not service.enabled:
-        await websocket.close(code=4401)
-        return
-    logger.info("Incoming /ws/events connection accepted for service_id=%s", service.id)
-    await _record_service_trace(
-        service_account_id=service.id,
-        direction="incoming",
-        local_transport="websocket",
-        event_type="service.ws.connect",
-        target="/ws/events",
-        payload={
-            "ws_token_present": bool(token_value),
-            "auth_mode": "ws_token",
-            "client_ip": client_ip,
-        },
-    )
-    await event_hub.connect(service.id, websocket)
-    try:
-        while True:
-            # Keepalive for proxies; inbound messages are ignored for now.
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        pass
-    finally:
-        await event_hub.disconnect(service.id, websocket)
-        await _record_service_trace(
-            service_account_id=service.id,
-            direction="incoming",
-            local_transport="websocket",
-            event_type="service.ws.disconnect",
-            target="/ws/events",
-            payload={"client_ip": client_ip},
-        )
-
-
-_SOCKET_IO_MISMATCH_MESSAGE = (
-    "Socket.IO is not supported by this service. Use plain WebSocket endpoint "
-    "/ws/events?ws_token=<short_lived_token>."
+register_ws_routes(
+    app,
+    settings=settings,
+    logger=logger,
+    session_factory=session_factory,
+    consume_ws_token=_consume_ws_token,
+    record_service_trace=_record_service_trace,
+    event_hub=event_hub,
+    resolve_client_ip=resolve_client_ip,
+    is_ip_allowed=lambda client_ip: is_ip_allowed(client_ip, allowed_ip_networks),
 )
-_WS_ENDPOINT_MISMATCH_MESSAGE = (
-    "Invalid WebSocket endpoint. Use /ws/events?ws_token=<short_lived_token>. "
-    "Socket.IO is not supported."
-)
-
-
-@app.get("/socket.io")
-@app.get("/socket.io/")
-async def socketio_http_mismatch() -> PlainTextResponse:
-    return PlainTextResponse(_SOCKET_IO_MISMATCH_MESSAGE, status_code=426)
-
-
-@app.websocket("/socket.io")
-@app.websocket("/socket.io/")
-async def socketio_ws_mismatch(websocket: WebSocket):
-    client_ip = _resolve_client_ip(
-        websocket.client.host if websocket.client else None,
-        websocket.headers.get("x-forwarded-for"),
-    )
-    if not _is_ip_allowed(client_ip):
-        await websocket.close(code=4403)
-        return
-    await websocket.accept()
-    await websocket.send_text(_SOCKET_IO_MISMATCH_MESSAGE)
-    await websocket.close(code=4400)
-
-
-@app.websocket("/{full_path:path}")
-async def websocket_path_mismatch(websocket: WebSocket, full_path: str):
-    if full_path == "ws/events":
-        await websocket.close(code=4404)
-        return
-    client_ip = _resolve_client_ip(
-        websocket.client.host if websocket.client else None,
-        websocket.headers.get("x-forwarded-for"),
-    )
-    if not _is_ip_allowed(client_ip):
-        await websocket.close(code=4403)
-        return
-    await websocket.accept()
-    await websocket.send_text(_WS_ENDPOINT_MISMATCH_MESSAGE)
-    await websocket.close(code=4404)
 
 
 def run() -> None:

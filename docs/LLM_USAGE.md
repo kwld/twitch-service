@@ -16,9 +16,6 @@ Service websocket (preferred):
 - connect: `WS /ws/events?ws_token=<token>`
 - token response includes compatibility aliases (`ws_token`, `token`, `wsToken`).
 
-Service websocket (legacy compatibility):
-- `WS /ws/events?client_id=<id>&client_secret=<secret>`
-
 ## 2) Identity Model
 There are 3 identity layers:
 1. Service account:

@@ -4,12 +4,26 @@ This document describes how the application works from process startup to event 
 
 ## 1) Core Components
 - `app/main.py`: FastAPI app, API endpoints, auth dependencies, lifecycle startup/shutdown.
+- `app/core/`: shared security/runtime primitives (`network_security`, `runtime_tokens`, `redaction`, `normalization`).
 - `app/eventsub_manager.py`: reconciles and maintains upstream Twitch EventSub subscriptions.
+- `app/eventsub_manager_parts/subscription_mixin.py`: EventSub reconcile/ensure/rotation logic and subscription error signaling.
+- `app/eventsub_manager_parts/notification_mixin.py`: incoming notification handling, fanout delivery, audit/trace logging, and stream-state updates.
 - `app/event_router.py`:
   - `InterestRegistry`: in-memory map of service interests.
   - `LocalEventHub`: local fanout over websocket and outgoing webhooks.
 - `app/twitch.py`: Twitch OAuth/Helix client wrapper.
 - `app/cli.py`: async operator console (bot setup, service account management, live chat tools).
+- `app/cli_components/remote_console.py`: remote API console workflows used by `app/cli.py`.
+- `app/cli_components/monitoring.py`: service status, broadcaster authorization listing, tracked-channel views, and live event-trace tracking for CLI.
+- `app/cli_components/service_management.py`: CLI workflows for service-account CRUD, service bot access, and bot self-channel authorization.
+- `app/cli_components/bot_workflows.py`: bot OAuth callback polling, guided bot setup, and enabled-bot selection helpers.
+- `app/cli_components/chat_tools.py`: CLI live chat, clip creation, and bot removal workflows.
+- `app/cli_components/eventsub_tools.py`: CLI EventSub subscription listing/removal workflows.
+- `app/cli_components/interactive_tools.py`: thin compatibility re-export for chat/eventsub tool entrypoints.
+- `app/routes/system_routes.py`: system route wiring (`/health`) and registration of OAuth/webhook route modules.
+- `app/routes/oauth_routes.py`: OAuth callback endpoint logic (`/oauth/callback`) for broadcaster and service-user auth flows.
+- `app/routes/webhook_routes.py`: Twitch EventSub webhook callback endpoint logic (`/webhooks/twitch/eventsub`).
+- `app/routes/ws_routes.py`: websocket auth endpoint and websocket mismatch handlers (`/ws/events`, `/socket.io`, catch-all mismatch).
 - `app/models.py`: SQLAlchemy schema and relationships.
 - `app/auth.py`: service credential generation and verification.
 

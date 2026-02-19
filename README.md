@@ -14,6 +14,7 @@ Minimal API service that:
 - `docs/DEV_SETUP.md`: local development container workflow.
 - `docs/START_AND_TEST_APP.md`: full step-by-step local walkthrough (start API + run test app).
 - `docs/PRODUCTION_DEPLOY.md`: production deployment procedure.
+- `docs/HARDENING_PLAN.md`: targeted hardening roadmap and implementation status.
 
 ## Features
 - Async interactive CLI (`twitch-eventsub-cli console`) to:

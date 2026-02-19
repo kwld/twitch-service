@@ -39,6 +39,10 @@ class TwitchClient:
         self.eventsub_ws_url = eventsub_ws_url
         self._app_token: str | None = None
         self._app_token_expiry: datetime | None = None
+        self._http_client = httpx.AsyncClient(timeout=20)
+
+    async def close(self) -> None:
+        await self._http_client.aclose()
 
     def build_authorize_url(self, state: str) -> str:
         return self.build_authorize_url_with_scopes(state=state, scopes=self.scopes)
@@ -62,8 +66,7 @@ class TwitchClient:
             "grant_type": "authorization_code",
             "redirect_uri": self.redirect_uri,
         }
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.post(TOKEN_URL, params=payload)
+        resp = await self._http_client.post(TOKEN_URL, params=payload)
         if resp.status_code >= 300:
             raise TwitchApiError(f"Failed to exchange auth code: {resp.text}")
         data = resp.json()
@@ -80,8 +83,7 @@ class TwitchClient:
             "client_id": self.client_id,
             "client_secret": self.client_secret,
         }
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.post(TOKEN_URL, params=payload)
+        resp = await self._http_client.post(TOKEN_URL, params=payload)
         if resp.status_code >= 300:
             raise TwitchApiError(f"Failed to refresh token: {resp.text}")
         data = resp.json()
@@ -96,8 +98,7 @@ class TwitchClient:
             "Authorization": f"Bearer {access_token}",
             "Client-Id": self.client_id,
         }
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(f"{HELIX_BASE}/users", headers=headers)
+        resp = await self._http_client.get(f"{HELIX_BASE}/users", headers=headers)
         if resp.status_code >= 300:
             raise TwitchApiError(f"Failed users lookup: {resp.text}")
         return resp.json().get("data", [])
@@ -118,8 +119,7 @@ class TwitchClient:
             params.append(("id", uid))
         for login in logins:
             params.append(("login", login))
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(f"{HELIX_BASE}/users", headers=headers, params=params)
+        resp = await self._http_client.get(f"{HELIX_BASE}/users", headers=headers, params=params)
         if resp.status_code >= 300:
             raise TwitchApiError(f"Failed users lookup by query: {resp.text}")
         return resp.json().get("data", [])
@@ -129,8 +129,7 @@ class TwitchClient:
             return []
         headers = {"Authorization": f"Bearer {access_token}", "Client-Id": self.client_id}
         params = [("user_id", uid) for uid in user_ids]
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(f"{HELIX_BASE}/streams", headers=headers, params=params)
+        resp = await self._http_client.get(f"{HELIX_BASE}/streams", headers=headers, params=params)
         if resp.status_code >= 300:
             raise TwitchApiError(f"Failed streams lookup: {resp.text}")
         return resp.json().get("data", [])
@@ -141,8 +140,7 @@ class TwitchClient:
             "Authorization": f"Bearer {token}",
             "Client-Id": self.client_id,
         }
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(f"{HELIX_BASE}/users", headers=headers, params={"login": login})
+        resp = await self._http_client.get(f"{HELIX_BASE}/users", headers=headers, params={"login": login})
         if resp.status_code >= 300:
             raise TwitchApiError(f"Failed users lookup by login: {resp.text}")
         users = resp.json().get("data", [])
@@ -154,8 +152,7 @@ class TwitchClient:
             "Authorization": f"Bearer {token}",
             "Client-Id": self.client_id,
         }
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(f"{HELIX_BASE}/users", headers=headers, params={"id": user_id})
+        resp = await self._http_client.get(f"{HELIX_BASE}/users", headers=headers, params={"id": user_id})
         if resp.status_code >= 300:
             raise TwitchApiError(f"Failed users lookup by id: {resp.text}")
         users = resp.json().get("data", [])
@@ -163,8 +160,7 @@ class TwitchClient:
 
     async def validate_user_token(self, access_token: str) -> dict[str, Any]:
         headers = {"Authorization": f"OAuth {access_token}"}
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(VALIDATE_URL, headers=headers)
+        resp = await self._http_client.get(VALIDATE_URL, headers=headers)
         if resp.status_code >= 300:
             raise TwitchApiError(f"Failed token validation: {resp.text}")
         return resp.json()
@@ -178,8 +174,7 @@ class TwitchClient:
             "client_secret": self.client_secret,
             "grant_type": "client_credentials",
         }
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.post(TOKEN_URL, params=payload)
+        resp = await self._http_client.post(TOKEN_URL, params=payload)
         if resp.status_code >= 300:
             raise TwitchApiError(f"Failed to get app token: {resp.text}")
         data = resp.json()
@@ -192,17 +187,20 @@ class TwitchClient:
         headers = {"Authorization": f"Bearer {token}", "Client-Id": self.client_id}
         cursor = None
         out: list[dict[str, Any]] = []
-        async with httpx.AsyncClient(timeout=20) as client:
-            while True:
-                params = {"after": cursor} if cursor else None
-                resp = await client.get(f"{HELIX_BASE}/eventsub/subscriptions", headers=headers, params=params)
-                if resp.status_code >= 300:
-                    raise TwitchApiError(f"Failed listing subscriptions: {resp.text}")
-                payload = resp.json()
-                out.extend(payload.get("data", []))
-                cursor = payload.get("pagination", {}).get("cursor")
-                if not cursor:
-                    break
+        while True:
+            params = {"after": cursor} if cursor else None
+            resp = await self._http_client.get(
+                f"{HELIX_BASE}/eventsub/subscriptions",
+                headers=headers,
+                params=params,
+            )
+            if resp.status_code >= 300:
+                raise TwitchApiError(f"Failed listing subscriptions: {resp.text}")
+            payload = resp.json()
+            out.extend(payload.get("data", []))
+            cursor = payload.get("pagination", {}).get("cursor")
+            if not cursor:
+                break
         return out
 
     async def create_eventsub_subscription(
@@ -221,8 +219,11 @@ class TwitchClient:
             "condition": condition,
             "transport": transport,
         }
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.post(f"{HELIX_BASE}/eventsub/subscriptions", headers=headers, json=body)
+        resp = await self._http_client.post(
+            f"{HELIX_BASE}/eventsub/subscriptions",
+            headers=headers,
+            json=body,
+        )
         if resp.status_code == 409:
             # Twitch returns 409 Conflict with message "subscription already exists" when a subscription
             # with the same type/condition/transport already exists. Treat as idempotent create.
@@ -275,12 +276,11 @@ class TwitchClient:
     async def delete_eventsub_subscription(self, subscription_id: str, access_token: str | None = None) -> None:
         token = access_token or await self.app_access_token()
         headers = {"Authorization": f"Bearer {token}", "Client-Id": self.client_id}
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.delete(
-                f"{HELIX_BASE}/eventsub/subscriptions",
-                headers=headers,
-                params={"id": subscription_id},
-            )
+        resp = await self._http_client.delete(
+            f"{HELIX_BASE}/eventsub/subscriptions",
+            headers=headers,
+            params={"id": subscription_id},
+        )
         if resp.status_code >= 300:
             raise TwitchApiError(f"Failed deleting subscription: {resp.text}")
 
@@ -304,8 +304,7 @@ class TwitchClient:
         }
         if reply_parent_message_id:
             body["reply_parent_message_id"] = reply_parent_message_id
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.post(f"{HELIX_BASE}/chat/messages", headers=headers, json=body)
+        resp = await self._http_client.post(f"{HELIX_BASE}/chat/messages", headers=headers, json=body)
         if resp.status_code >= 300:
             raise TwitchApiError(f"Failed sending chat message: {resp.text}")
         data = resp.json().get("data", [])
@@ -331,8 +330,7 @@ class TwitchClient:
             "duration": duration,
             "has_delay": "true" if has_delay else "false",
         }
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.post(f"{HELIX_BASE}/clips", headers=headers, params=params)
+        resp = await self._http_client.post(f"{HELIX_BASE}/clips", headers=headers, params=params)
         if resp.status_code >= 300:
             raise TwitchApiError(f"Failed creating clip: {resp.text}")
         data = resp.json().get("data", [])
@@ -352,8 +350,7 @@ class TwitchClient:
             "Client-Id": self.client_id,
         }
         params = [("id", clip_id) for clip_id in clip_ids]
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(f"{HELIX_BASE}/clips", headers=headers, params=params)
+        resp = await self._http_client.get(f"{HELIX_BASE}/clips", headers=headers, params=params)
         if resp.status_code >= 300:
             raise TwitchApiError(f"Failed getting clips: {resp.text}")
         return resp.json().get("data", [])
@@ -361,8 +358,7 @@ class TwitchClient:
     async def get_global_chat_badges(self, access_token: str | None = None) -> dict[str, Any]:
         token = access_token or await self.app_access_token()
         headers = {"Authorization": f"Bearer {token}", "Client-Id": self.client_id}
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(f"{HELIX_BASE}/chat/badges/global", headers=headers)
+        resp = await self._http_client.get(f"{HELIX_BASE}/chat/badges/global", headers=headers)
         if resp.status_code >= 300:
             raise TwitchApiError(f"Failed getting global chat badges: {resp.text}")
         return resp.json()
@@ -370,12 +366,11 @@ class TwitchClient:
     async def get_channel_chat_badges(self, broadcaster_id: str, access_token: str | None = None) -> dict[str, Any]:
         token = access_token or await self.app_access_token()
         headers = {"Authorization": f"Bearer {token}", "Client-Id": self.client_id}
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(
-                f"{HELIX_BASE}/chat/badges",
-                headers=headers,
-                params={"broadcaster_id": broadcaster_id},
-            )
+        resp = await self._http_client.get(
+            f"{HELIX_BASE}/chat/badges",
+            headers=headers,
+            params={"broadcaster_id": broadcaster_id},
+        )
         if resp.status_code >= 300:
             raise TwitchApiError(f"Failed getting channel chat badges: {resp.text}")
         return resp.json()
@@ -383,8 +378,7 @@ class TwitchClient:
     async def get_global_emotes(self, access_token: str | None = None) -> dict[str, Any]:
         token = access_token or await self.app_access_token()
         headers = {"Authorization": f"Bearer {token}", "Client-Id": self.client_id}
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(f"{HELIX_BASE}/chat/emotes/global", headers=headers)
+        resp = await self._http_client.get(f"{HELIX_BASE}/chat/emotes/global", headers=headers)
         if resp.status_code >= 300:
             raise TwitchApiError(f"Failed getting global emotes: {resp.text}")
         return resp.json()
@@ -392,12 +386,11 @@ class TwitchClient:
     async def get_channel_emotes(self, broadcaster_id: str, access_token: str | None = None) -> dict[str, Any]:
         token = access_token or await self.app_access_token()
         headers = {"Authorization": f"Bearer {token}", "Client-Id": self.client_id}
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(
-                f"{HELIX_BASE}/chat/emotes",
-                headers=headers,
-                params={"broadcaster_id": broadcaster_id},
-            )
+        resp = await self._http_client.get(
+            f"{HELIX_BASE}/chat/emotes",
+            headers=headers,
+            params={"broadcaster_id": broadcaster_id},
+        )
         if resp.status_code >= 300:
             raise TwitchApiError(f"Failed getting channel emotes: {resp.text}")
         return resp.json()
