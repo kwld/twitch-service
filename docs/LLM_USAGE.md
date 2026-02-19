@@ -319,6 +319,28 @@ Returns:
 - Service automatically includes required broadcaster scopes for those event types in `requested_scopes`.
 - If omitted, request falls back to baseline `channel:bot`.
 
+### `POST /v1/broadcaster-authorizations/start-minimal`
+Request:
+```json
+{
+  "bot_account_id": "uuid",
+  "redirect_url": "https://your-service.example.com/oauth/done"
+}
+```
+Returns:
+```json
+{
+  "state": "string",
+  "authorize_url": "https://id.twitch.tv/oauth2/authorize?...",
+  "requested_scopes": ["channel:bot"],
+  "expires_in_seconds": 600
+}
+```
+
+Behavior:
+- always requests only baseline broadcaster scope `channel:bot`.
+- use this for minimal channel authorization, for example enabling app-token chat send path for bot-tag eligible messages.
+
 ### `GET /v1/broadcaster-authorizations`
 Returns broadcaster grants for this service:
 - includes `broadcaster_user_id`, `broadcaster_login`, `scopes`, timestamps.

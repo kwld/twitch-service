@@ -1639,6 +1639,91 @@ async def _remote_list_active_subscriptions(
     print(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
+async def _remote_test_broadcaster_scope_flows(
+    session: PromptSession,
+    client: httpx.AsyncClient,
+    client_id: str,
+    client_secret: str,
+) -> None:
+    bots_resp = await client.get(
+        "/v1/bots/accessible",
+        headers=_service_headers(client_id, client_secret),
+    )
+    if bots_resp.status_code >= 300:
+        print(f"Request failed: HTTP {bots_resp.status_code} {bots_resp.text[:400]}")
+        return
+    bots = list(bots_resp.json())
+    if not bots:
+        print("No accessible bots for this service.")
+        return
+
+    print("\nAccessible bots:")
+    for idx, bot in enumerate(bots, start=1):
+        print(
+            f"{idx}) id={bot.get('id')} name={bot.get('name')} "
+            f"login={bot.get('twitch_login')} enabled={bot.get('enabled')}"
+        )
+
+    raw_choice = (await session.prompt_async("Select bot (number or UUID): ")).strip()
+    bot_id = raw_choice
+    if raw_choice.isdigit():
+        selected_idx = int(raw_choice) - 1
+        if selected_idx < 0 or selected_idx >= len(bots):
+            print("Invalid bot selection.")
+            return
+        bot_id = str(bots[selected_idx].get("id", "")).strip()
+    if not bot_id:
+        print("Bot id is required.")
+        return
+
+    redirect_url = (await session.prompt_async("Redirect URL (optional): ")).strip() or None
+    raw_event_types = (
+        await session.prompt_async(
+            "Event types CSV for full scope test (blank = default probe set): "
+        )
+    ).strip()
+    event_types = [x.strip() for x in raw_event_types.split(",") if x.strip()]
+    if not event_types:
+        event_types = [
+            "channel.ad_break.begin",
+            "channel.poll.begin",
+            "channel.prediction.begin",
+            "channel.goal.begin",
+            "channel.charity_campaign.start",
+            "channel.hype_train.begin",
+            "channel.channel_points_custom_reward_redemption.add",
+        ]
+
+    minimal_payload: dict[str, object] = {"bot_account_id": bot_id}
+    full_payload: dict[str, object] = {"bot_account_id": bot_id, "event_types": event_types}
+    if redirect_url:
+        minimal_payload["redirect_url"] = redirect_url
+        full_payload["redirect_url"] = redirect_url
+
+    minimal_resp = await client.post(
+        "/v1/broadcaster-authorizations/start-minimal",
+        json=minimal_payload,
+        headers=_service_headers(client_id, client_secret),
+    )
+    full_resp = await client.post(
+        "/v1/broadcaster-authorizations/start",
+        json=full_payload,
+        headers=_service_headers(client_id, client_secret),
+    )
+
+    print("\nMinimal broadcaster authorization scope test:")
+    if minimal_resp.status_code >= 300:
+        print(f"HTTP {minimal_resp.status_code}: {minimal_resp.text[:500]}")
+    else:
+        print(json.dumps(minimal_resp.json(), indent=2, ensure_ascii=False))
+
+    print("\nEvent-aware broadcaster authorization scope test:")
+    if full_resp.status_code >= 300:
+        print(f"HTTP {full_resp.status_code}: {full_resp.text[:500]}")
+    else:
+        print(json.dumps(full_resp.json(), indent=2, ensure_ascii=False))
+
+
 async def _remote_list_bots_admin(client: httpx.AsyncClient, admin_api_key: str) -> None:
     if not admin_api_key:
         print("CLI_ADMIN_API_KEY is required for this action.")
@@ -1703,8 +1788,9 @@ async def remote_menu_loop(
                 "5) List subscriptions (service auth)\n"
                 "6) List subscription transports (service auth)\n"
                 "7) List active subscriptions (service auth)\n"
-                "8) Listen on /ws/events (ws_token flow)\n"
-                "9) Exit\n"
+                "8) Test broadcaster scopes (minimal + event-aware)\n"
+                "9) Listen on /ws/events (ws_token flow)\n"
+                "10) Exit\n"
             )
             choice = (await session.prompt_async("Select option: ")).strip()
             if choice == "1":
@@ -1752,9 +1838,20 @@ async def remote_menu_loop(
                 if not service_client_id or not service_client_secret:
                     print("CLI_SERVICE_CLIENT_ID and CLI_SERVICE_CLIENT_SECRET are required.")
                     continue
-                await _remote_ws_listen_once(client, api_base_url, service_client_id, service_client_secret)
+                await _remote_test_broadcaster_scope_flows(
+                    session,
+                    client,
+                    service_client_id,
+                    service_client_secret,
+                )
                 continue
             if choice == "9":
+                if not service_client_id or not service_client_secret:
+                    print("CLI_SERVICE_CLIENT_ID and CLI_SERVICE_CLIENT_SECRET are required.")
+                    continue
+                await _remote_ws_listen_once(client, api_base_url, service_client_id, service_client_secret)
+                continue
+            if choice == "10":
                 return
             print("Invalid option.")
 

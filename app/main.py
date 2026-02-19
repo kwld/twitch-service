@@ -73,6 +73,7 @@ from app.schemas import (
     SendChatMessageRequest,
     SendChatMessageResponse,
     StartBroadcasterAuthorizationRequest,
+    StartMinimalBroadcasterAuthorizationRequest,
     StartBroadcasterAuthorizationResponse,
     StartUserAuthorizationRequest,
     StartUserAuthorizationResponse,
@@ -1441,6 +1442,49 @@ async def list_active_twitch_subscriptions_for_service(
     )
 
 
+async def _start_broadcaster_authorization_for_scopes(
+    *,
+    service: ServiceAccount,
+    bot_account_id: uuid.UUID,
+    redirect_url: str | None,
+    requested_scopes: list[str],
+) -> StartBroadcasterAuthorizationResponse:
+    async with session_factory() as session:
+        bot = await session.get(BotAccount, bot_account_id)
+        if not bot:
+            raise HTTPException(status_code=404, detail="Bot not found")
+        if not bot.enabled:
+            raise HTTPException(status_code=409, detail="Bot is disabled")
+        await _ensure_service_can_access_bot(session, service.id, bot_account_id)
+
+        state = secrets.token_urlsafe(24)
+        scopes_csv = ",".join(requested_scopes)
+        session.add(
+            BroadcasterAuthorizationRequest(
+                state=state,
+                service_account_id=service.id,
+                bot_account_id=bot_account_id,
+                requested_scopes_csv=scopes_csv,
+                redirect_url=redirect_url,
+                status="pending",
+            )
+        )
+        await session.commit()
+
+    scopes_str = " ".join(requested_scopes)
+    authorize_url = twitch_client.build_authorize_url_with_scopes(
+        state=state,
+        scopes=scopes_str,
+        force_verify=True,
+    )
+    return StartBroadcasterAuthorizationResponse(
+        state=state,
+        authorize_url=authorize_url,
+        requested_scopes=requested_scopes,
+        expires_in_seconds=600,
+    )
+
+
 @app.post(
     "/v1/broadcaster-authorizations/start",
     response_model=StartBroadcasterAuthorizationResponse,
@@ -1464,39 +1508,28 @@ async def start_broadcaster_authorization(
         requested_scope_set.update(recommended_broadcaster_scopes(event_type))
     requested_scopes = sorted(requested_scope_set)
 
-    async with session_factory() as session:
-        bot = await session.get(BotAccount, req.bot_account_id)
-        if not bot:
-            raise HTTPException(status_code=404, detail="Bot not found")
-        if not bot.enabled:
-            raise HTTPException(status_code=409, detail="Bot is disabled")
-        await _ensure_service_can_access_bot(session, service.id, req.bot_account_id)
-
-        state = secrets.token_urlsafe(24)
-        scopes_csv = ",".join(requested_scopes)
-        session.add(
-            BroadcasterAuthorizationRequest(
-                state=state,
-                service_account_id=service.id,
-                bot_account_id=req.bot_account_id,
-                requested_scopes_csv=scopes_csv,
-                redirect_url=str(req.redirect_url) if req.redirect_url else None,
-                status="pending",
-            )
-        )
-        await session.commit()
-
-    scopes_str = " ".join(requested_scopes)
-    authorize_url = twitch_client.build_authorize_url_with_scopes(
-        state=state,
-        scopes=scopes_str,
-        force_verify=True,
-    )
-    return StartBroadcasterAuthorizationResponse(
-        state=state,
-        authorize_url=authorize_url,
+    return await _start_broadcaster_authorization_for_scopes(
+        service=service,
+        bot_account_id=req.bot_account_id,
+        redirect_url=str(req.redirect_url) if req.redirect_url else None,
         requested_scopes=requested_scopes,
-        expires_in_seconds=600,
+    )
+
+
+@app.post(
+    "/v1/broadcaster-authorizations/start-minimal",
+    response_model=StartBroadcasterAuthorizationResponse,
+)
+async def start_broadcaster_authorization_minimal(
+    req: StartMinimalBroadcasterAuthorizationRequest,
+    service: ServiceAccount = Depends(_service_auth),
+):
+    requested_scopes = sorted(set(BROADCASTER_AUTH_SCOPES))
+    return await _start_broadcaster_authorization_for_scopes(
+        service=service,
+        bot_account_id=req.bot_account_id,
+        redirect_url=str(req.redirect_url) if req.redirect_url else None,
+        requested_scopes=requested_scopes,
     )
 
 

@@ -127,6 +127,7 @@ bash ./scripts/run-dev.sh 8080
 - `GET /v1/interests` (service)
 - `GET /v1/bots/accessible` (service)
 - `POST /v1/broadcaster-authorizations/start` (service)
+- `POST /v1/broadcaster-authorizations/start-minimal` (service)
 - `GET /v1/broadcaster-authorizations` (service)
 - `POST /v1/user-auth/start` (service)
 - `GET /v1/user-auth/session/{state}` (service)
@@ -340,12 +341,14 @@ Duration must be between 5 and 60 seconds.
 ## Streamer Authorization Flow (Bot In Streamer Channel)
 Yes, the required redirect API is implemented. Broadcaster authorization is handled by:
 - `POST /v1/broadcaster-authorizations/start` (service starts flow and gets Twitch `authorize_url`)
+- `POST /v1/broadcaster-authorizations/start-minimal` (service starts minimal `channel:bot` flow)
 - `GET /oauth/callback` (Twitch redirects here after streamer consent)
 - `GET /v1/broadcaster-authorizations` (service checks stored authorizations)
 
 Use this flow for each streamer channel where the bot should act as a cloud bot:
 1. Ensure bot account OAuth token includes: `user:read:chat`, `user:write:chat`, `user:bot`, `clips:edit`.
 2. Service calls `POST /v1/broadcaster-authorizations/start` with `bot_account_id`.
+   - For minimal bot setup only, call `POST /v1/broadcaster-authorizations/start-minimal`.
    - Optional: include `redirect_url` so callback redirects back to your app after consent.
    - Optional: include `event_types` so this service requests the broadcaster scopes required for those EventSub types.
 3. Redirect streamer in browser to returned `authorize_url`.

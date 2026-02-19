@@ -151,6 +151,11 @@ class StartBroadcasterAuthorizationRequest(BaseModel):
     event_types: list[str] | None = None
 
 
+class StartMinimalBroadcasterAuthorizationRequest(BaseModel):
+    bot_account_id: uuid.UUID
+    redirect_url: HttpUrl | None = None
+
+
 class StartBroadcasterAuthorizationResponse(BaseModel):
     state: str
     authorize_url: str
