@@ -50,7 +50,7 @@ services:
       - ./logs:/var/log/twitch-service
       - /var/run/docker.sock:/var/run/docker.sock:ro
     ports:
-      - "12345:12345"
+      - "${ALLOY_PORT:-12345}:12345"
 
 volumes:
   postgres_data:

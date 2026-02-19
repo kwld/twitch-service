@@ -14,14 +14,14 @@ discovery.docker "containers" {
 discovery.relabel "container_logs" {
   targets = discovery.docker.containers.targets
 
-  # Scrape only containers explicitly labeled for Loki collection.
+  // Scrape only containers explicitly labeled for Loki collection.
   rule {
     source_labels = ["__meta_docker_container_label_observability_loki"]
     regex         = "true"
     action        = "keep"
   }
 
-  # Optional app-specific filter (set label to "app" to keep only app logs).
+  // Optional app-specific filter (set label to "app" to keep only app logs).
   rule {
     source_labels = ["__meta_docker_container_label_observability_loki_group"]
     regex         = "app|infra|all"
