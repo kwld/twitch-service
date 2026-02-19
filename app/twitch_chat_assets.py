@@ -242,11 +242,44 @@ class TwitchChatAssetCache:
             unique_badges = sorted(set(needed_badges))
             unique_emotes = sorted(set(needed_emotes))
 
+            # First-message safety: if specific badges are missing in cache, try one immediate
+            # refresh so clients can render Twitch-native badge images reliably.
+            missing_badges = [k for k in unique_badges if k not in badge_lookup]
+            if missing_badges:
+                try:
+                    await asyncio.gather(
+                        self._refresh_global_badges(),
+                        self._refresh_channel_badges(broadcaster_id),
+                    )
+                    global_badges = (await self._get("global_badges", None)) or global_badges
+                    channel_badges = (await self._get("channel_badges", broadcaster_id)) or channel_badges
+                    badge_lookup = {**self._badge_map(global_badges.value), **self._badge_map(channel_badges.value)}
+                except Exception:
+                    pass
+
             resolved_badges = [badge_lookup[k] for k in unique_badges if k in badge_lookup]
             resolved_emotes = [emote_lookup[eid] for eid in unique_emotes if eid in emote_lookup]
 
             missing_badges = [k for k in unique_badges if k not in badge_lookup]
             missing_emotes = [eid for eid in unique_emotes if eid not in emote_lookup]
+
+            badge_image_map: dict[str, str] = {}
+            badge_image_map_by_scale: dict[str, dict[str, str | None]] = {}
+            for badge in resolved_badges:
+                key = f"{badge.get('set_id', '')}/{badge.get('id', '')}"
+                if not key or key == "/":
+                    continue
+                one_x = badge.get("image_url_1x")
+                two_x = badge.get("image_url_2x")
+                four_x = badge.get("image_url_4x")
+                preferred = four_x or two_x or one_x
+                if preferred:
+                    badge_image_map[key] = str(preferred)
+                badge_image_map_by_scale[key] = {
+                    "1x": str(one_x) if one_x else None,
+                    "2x": str(two_x) if two_x else None,
+                    "4x": str(four_x) if four_x else None,
+                }
 
             if not resolved_badges and not resolved_emotes:
                 return {}
@@ -254,6 +287,8 @@ class TwitchChatAssetCache:
             return {
                 "badges": resolved_badges,
                 "emotes": resolved_emotes,
+                "badge_image_map": badge_image_map,
+                "badge_image_map_by_scale": badge_image_map_by_scale,
                 "missing": {"badges": missing_badges, "emotes": missing_emotes},
             }
         except TwitchApiError:
