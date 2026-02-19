@@ -103,26 +103,28 @@ LLM rule:
 ## 5) How Other Apps Subscribe To Twitch Events
 Use this order for a reliable integration:
 1. Authenticate service calls with `X-Client-Id` + `X-Client-Secret`.
-1. Discover available bots via `GET /v1/bots/accessible` and pick one allowed bot.
-1. Fetch supported event types via `GET /v1/eventsub/subscription-types`.
-1. If your event type needs broadcaster consent for the selected bot, run:
+2. Discover available bots via `GET /v1/bots/accessible` and pick one allowed bot.
+3. Fetch supported event types via `GET /v1/eventsub/subscription-types`.
+4. If your event type needs broadcaster consent for the selected bot, run:
    - `POST /v1/broadcaster-authorizations/start`
    - complete Twitch OAuth redirect
    - confirm with `GET /v1/broadcaster-authorizations`.
-1. Create subscription intent with `POST /v1/interests`:
+5. Read current interests with `GET /v1/interests` and compare against your desired set.
+6. Create missing subscription intent(s) with `POST /v1/interests`:
    - choose downstream `transport`:
      - `websocket`: receive events over `WS /ws/events`
      - `webhook`: receive events via `webhook_url`
-1. Keep interests alive with heartbeat:
+7. Keep interests alive with heartbeat:
    - preferred: `POST /v1/interests/heartbeat` (single call refreshes all service interests),
    - fallback: `POST /v1/interests/{interest_id}/heartbeat`.
-1. Heartbeat cadence:
+8. Heartbeat cadence:
    - send every 30 minutes or sooner,
    - recommended: every 10 to 20 minutes for jitter tolerance.
-1. Remove unused subscriptions with `DELETE /v1/interests/{interest_id}`.
+9. Remove unused subscriptions with `DELETE /v1/interests/{interest_id}`.
 
 Notes:
 - `POST /v1/interests` deduplicates by service/bot/event/broadcaster/transport/webhook URL.
+- even with dedupe, clients should not blindly post interests in a loop; read first with `GET /v1/interests` and post only missing keys.
 - Services choose only downstream delivery transport (`websocket` or `webhook`) from this bridge.
 - Upstream Twitch transport is selected automatically by the bridge and is independent of downstream transport.
 - Upstream policy:
@@ -226,6 +228,10 @@ Side effects:
 - if upstream ensure fails (for example missing broadcaster authorization or unsupported Twitch condition fields), the API removes the rejected interest and emits `interest.rejected` to the service's selected local transport.
 - rejected interests are not returned by listing endpoints.
 - the same rejection/removal rule is applied during manager startup/session reconciliation for previously persisted interests that can no longer be ensured upstream.
+
+LLM rule:
+- do not blindly call `POST /v1/interests` repeatedly.
+- first call `GET /v1/interests`, build desired-vs-existing diff, then create only missing interests.
 
 ### `DELETE /v1/interests/{interest_id}`
 - deletes interest only if owned by service.
