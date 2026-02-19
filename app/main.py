@@ -662,6 +662,7 @@ async def lifespan(_: FastAPI):
         yield
     finally:
         await eventsub_manager.stop()
+        await event_hub.close()
         await engine.dispose()
 
 

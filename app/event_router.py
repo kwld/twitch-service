@@ -85,6 +85,10 @@ class LocalEventHub:
     def __init__(self) -> None:
         self._clients: dict[uuid.UUID, set[WebSocket]] = defaultdict(set)
         self._lock = asyncio.Lock()
+        self._http_client = httpx.AsyncClient(
+            timeout=10.0,
+            limits=httpx.Limits(max_connections=200, max_keepalive_connections=50),
+        )
         self.on_service_connect = None
         self.on_service_disconnect = None
         self.on_service_ws_event = None
@@ -116,12 +120,11 @@ class LocalEventHub:
         if not sockets:
             return
         text = json.dumps(payload, default=str)
-        dead: list[WebSocket] = []
-        for ws in sockets:
-            try:
-                await ws.send_text(text)
-            except Exception:
-                dead.append(ws)
+        send_results = await asyncio.gather(
+            *(ws.send_text(text) for ws in sockets),
+            return_exceptions=True,
+        )
+        dead = [ws for ws, result in zip(sockets, send_results, strict=False) if isinstance(result, Exception)]
         if dead:
             async with self._lock:
                 for ws in dead:
@@ -136,10 +139,12 @@ class LocalEventHub:
         payload: dict,
         timeout: int = 10,
     ) -> None:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            await client.post(url, json=payload)
+        await self._http_client.post(url, json=payload, timeout=timeout)
         if self.on_service_webhook_event:
             await self.on_service_webhook_event(service_account_id)
+
+    async def close(self) -> None:
+        await self._http_client.aclose()
 
     def envelope(self, message_id: str, event_type: str, event: dict) -> dict:
         return {

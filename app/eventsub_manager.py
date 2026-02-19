@@ -72,6 +72,8 @@ class EventSubManager:
             tuple[uuid.UUID, uuid.UUID, str, str, str], datetime
         ] = {}
         self._subscription_error_lock = asyncio.Lock()
+        self._fanout_concurrency = 32
+        self._fanout_semaphore = asyncio.Semaphore(self._fanout_concurrency)
         self._trace_payload_max_chars = 12000
         self._audit_payload_max_chars = 8000
         self._active_subscriptions_cache_ttl = timedelta(seconds=30)
@@ -843,6 +845,7 @@ class EventSubManager:
         if not interests:
             return
         error_code, hint = self._classify_subscription_failure(reason)
+        tasks = []
         for interest in interests:
             if not await self._should_emit_subscription_error(interest.service_account_id, key, error_code):
                 continue
@@ -861,38 +864,30 @@ class EventSubManager:
                     "upstream_transport": upstream_transport,
                 },
             }
-            await self._audit_log(
-                level="error",
-                payload={
-                    "kind": "eventsub_subscription_error",
-                    "service_account_id": str(interest.service_account_id),
-                    "bot_account_id": str(key.bot_account_id),
-                    "event_type": key.event_type,
-                    "broadcaster_user_id": key.broadcaster_user_id,
-                    "direction": "outgoing",
-                    "transport": interest.transport,
-                    "target": interest.webhook_url if interest.transport == "webhook" else "/ws/events",
-                    "error_code": error_code,
-                    "reason": reason,
-                },
-            )
-            await self._record_service_trace(
-                service_account_id=interest.service_account_id,
-                direction="outgoing",
-                local_transport=interest.transport,
-                event_type="subscription.error",
-                target=interest.webhook_url if interest.transport == "webhook" else "/ws/events",
-                payload=envelope,
-            )
-            if interest.transport == "webhook" and interest.webhook_url:
-                with suppress(Exception):
-                    await self.event_hub.publish_webhook(
-                        interest.service_account_id,
-                        interest.webhook_url,
-                        envelope,
+            tasks.append(
+                asyncio.create_task(
+                    self._deliver_envelope_to_interest(
+                        interest=interest,
+                        envelope=envelope,
+                        event_type="subscription.error",
+                        audit_level="error",
+                        audit_payload={
+                            "kind": "eventsub_subscription_error",
+                            "service_account_id": str(interest.service_account_id),
+                            "bot_account_id": str(key.bot_account_id),
+                            "event_type": key.event_type,
+                            "broadcaster_user_id": key.broadcaster_user_id,
+                            "direction": "outgoing",
+                            "transport": interest.transport,
+                            "target": interest.webhook_url if interest.transport == "webhook" else "/ws/events",
+                            "error_code": error_code,
+                            "reason": reason,
+                        },
                     )
-            else:
-                await self.event_hub.publish_to_service(interest.service_account_id, envelope)
+                )
+            )
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def handle_webhook_notification(self, payload: dict, message_id: str = "") -> None:
         await self._forward_notification_payload(payload, message_id, incoming_transport="twitch_webhook")
@@ -977,15 +972,21 @@ class EventSubManager:
                 },
             )
             source_target = "twitch:eventsub"
-            for service_id in {interest.service_account_id for interest in interests}:
-                await self._record_service_trace(
-                    service_account_id=service_id,
-                    direction="incoming",
-                    local_transport=incoming_transport,
-                    event_type=event_type,
-                    target=source_target,
-                    payload=source_payload,
+            incoming_trace_tasks = [
+                asyncio.create_task(
+                    self._record_service_trace(
+                        service_account_id=service_id,
+                        direction="incoming",
+                        local_transport=incoming_transport,
+                        event_type=event_type,
+                        target=source_target,
+                        payload=source_payload,
+                    )
                 )
+                for service_id in {interest.service_account_id for interest in interests}
+            ]
+            if incoming_trace_tasks:
+                await asyncio.gather(*incoming_trace_tasks, return_exceptions=True)
         envelope = self.event_hub.envelope(
             message_id=message_id,
             event_type=event_type,
@@ -997,38 +998,30 @@ class EventSubManager:
             if enriched:
                 envelope["twitch_chat_assets"] = enriched
         await self._update_channel_state_from_event(bot.id, event_type, broadcaster_user_id, event)
-        for interest in interests:
-            await self._audit_log(
-                level="info",
-                payload={
-                    "kind": "eventsub_outgoing",
-                    "service_account_id": str(interest.service_account_id),
-                    "bot_account_id": str(bot.id),
-                    "event_type": event_type,
-                    "broadcaster_user_id": broadcaster_user_id,
-                    "direction": "outgoing",
-                    "transport": interest.transport,
-                    "target": interest.webhook_url if interest.transport == "webhook" else "/ws/events",
-                    "payload": envelope,
-                },
+        outgoing_tasks = [
+            asyncio.create_task(
+                self._deliver_envelope_to_interest(
+                    interest=interest,
+                    envelope=envelope,
+                    event_type=event_type,
+                    audit_level="info",
+                    audit_payload={
+                        "kind": "eventsub_outgoing",
+                        "service_account_id": str(interest.service_account_id),
+                        "bot_account_id": str(bot.id),
+                        "event_type": event_type,
+                        "broadcaster_user_id": broadcaster_user_id,
+                        "direction": "outgoing",
+                        "transport": interest.transport,
+                        "target": interest.webhook_url if interest.transport == "webhook" else "/ws/events",
+                        "payload": envelope,
+                    },
+                )
             )
-            await self._record_service_trace(
-                service_account_id=interest.service_account_id,
-                direction="outgoing",
-                local_transport=interest.transport,
-                event_type=event_type,
-                target=interest.webhook_url if interest.transport == "webhook" else "/ws/events",
-                payload=envelope,
-            )
-            if interest.transport == "webhook" and interest.webhook_url:
-                with suppress(Exception):
-                    await self.event_hub.publish_webhook(
-                        interest.service_account_id,
-                        interest.webhook_url,
-                        envelope,
-                    )
-            else:
-                await self.event_hub.publish_to_service(interest.service_account_id, envelope)
+            for interest in interests
+        ]
+        if outgoing_tasks:
+            await asyncio.gather(*outgoing_tasks, return_exceptions=True)
 
     async def reject_interests_for_key(
         self,
@@ -1040,6 +1033,7 @@ class EventSubManager:
         if not interests:
             return 0
         transport = upstream_transport or self._transport_for_event(key.event_type)
+        notify_tasks = []
         for interest in interests:
             envelope = {
                 "id": uuid.uuid4().hex,
@@ -1056,37 +1050,29 @@ class EventSubManager:
                     "reason": reason,
                 },
             }
-            await self._audit_log(
-                level="warning",
-                payload={
-                    "kind": "interest_rejected",
-                    "service_account_id": str(interest.service_account_id),
-                    "bot_account_id": str(key.bot_account_id),
-                    "event_type": key.event_type,
-                    "broadcaster_user_id": key.broadcaster_user_id,
-                    "direction": "outgoing",
-                    "transport": interest.transport,
-                    "target": interest.webhook_url if interest.transport == "webhook" else "/ws/events",
-                    "reason": reason,
-                },
-            )
-            await self._record_service_trace(
-                service_account_id=interest.service_account_id,
-                direction="outgoing",
-                local_transport=interest.transport,
-                event_type="interest.rejected",
-                target=interest.webhook_url if interest.transport == "webhook" else "/ws/events",
-                payload=envelope,
-            )
-            if interest.transport == "webhook" and interest.webhook_url:
-                with suppress(Exception):
-                    await self.event_hub.publish_webhook(
-                        interest.service_account_id,
-                        interest.webhook_url,
-                        envelope,
+            notify_tasks.append(
+                asyncio.create_task(
+                    self._deliver_envelope_to_interest(
+                        interest=interest,
+                        envelope=envelope,
+                        event_type="interest.rejected",
+                        audit_level="warning",
+                        audit_payload={
+                            "kind": "interest_rejected",
+                            "service_account_id": str(interest.service_account_id),
+                            "bot_account_id": str(key.bot_account_id),
+                            "event_type": key.event_type,
+                            "broadcaster_user_id": key.broadcaster_user_id,
+                            "direction": "outgoing",
+                            "transport": interest.transport,
+                            "target": interest.webhook_url if interest.transport == "webhook" else "/ws/events",
+                            "reason": reason,
+                        },
                     )
-            else:
-                await self.event_hub.publish_to_service(interest.service_account_id, envelope)
+                )
+            )
+        if notify_tasks:
+            await asyncio.gather(*notify_tasks, return_exceptions=True)
 
         interest_ids = [interest.id for interest in interests]
         async with self.session_factory() as session:
@@ -1107,7 +1093,12 @@ class EventSubManager:
         return len(interests)
 
     async def _audit_log(self, level: str, payload: dict) -> None:
-        enriched_payload = await self._enrich_audit_payload(payload)
+        kind = str(payload.get("kind", ""))
+        # High-volume event fanout logs skip expensive DB/Twitch enrichment lookups.
+        if kind in {"eventsub_incoming", "eventsub_outgoing"}:
+            enriched_payload = payload
+        else:
+            enriched_payload = await self._enrich_audit_payload(payload)
         record = self._redact_payload(enriched_payload)
         if isinstance(record, dict):
             record.setdefault("timestamp", datetime.now(UTC).isoformat())
@@ -1326,6 +1317,39 @@ class EventSubManager:
                 await session.commit()
         except Exception as exc:
             logger.debug("Skipping service event trace write: %s", exc)
+
+    async def _deliver_envelope_to_interest(
+        self,
+        *,
+        interest: ServiceInterest,
+        envelope: dict,
+        event_type: str,
+        audit_level: str,
+        audit_payload: dict,
+    ) -> None:
+        async with self._fanout_semaphore:
+            # Prioritize delivery path; traces/logging are secondary.
+            if interest.transport == "webhook" and interest.webhook_url:
+                with suppress(Exception):
+                    await self.event_hub.publish_webhook(
+                        interest.service_account_id,
+                        interest.webhook_url,
+                        envelope,
+                    )
+            else:
+                await self.event_hub.publish_to_service(interest.service_account_id, envelope)
+            await asyncio.gather(
+                self._audit_log(level=audit_level, payload=audit_payload),
+                self._record_service_trace(
+                    service_account_id=interest.service_account_id,
+                    direction="outgoing",
+                    local_transport=interest.transport,
+                    event_type=event_type,
+                    target=interest.webhook_url if interest.transport == "webhook" else "/ws/events",
+                    payload=envelope,
+                ),
+                return_exceptions=True,
+            )
 
     async def _handle_revocation(self, payload: dict) -> None:
         sub = payload.get("subscription", {})
