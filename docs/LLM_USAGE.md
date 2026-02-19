@@ -646,29 +646,31 @@ Interest rejection notification:
 
 LLM handling guideline for `subscription.error`:
 1. Treat it as operational failure of upstream subscription state, not as a user-content event.
-1. Parse `event.error_code` first, then route remediation:
+2. Parse `event.error_code` first, then route remediation:
    - `insufficient_permissions`: run broadcaster authorization flow for the same `(bot_account_id, broadcaster_user_id)`.
    - `missing_scope`: re-run bot OAuth setup to refresh scopes, then re-create interest.
    - `unauthorized`: verify selected bot is allowed for your service and still enabled; then retry with valid bot/auth.
    - `subscription_create_failed`: inspect `event.reason`, then retry with bounded backoff.
-1. Do not hard-loop retries.
+3. Do not hard-loop retries.
    - Use capped retry attempts with exponential backoff (for example 3 attempts over a few minutes).
-1. Preserve subscription intent.
+4. Preserve subscription intent.
    - Keep or recreate the logical interest after remediation so manager can ensure upstream subscription again.
-1. Surface operator diagnostics.
+5. Surface operator diagnostics.
    - Log full envelope, include `bot_account_id`, `event_type`, `broadcaster_user_id`, `upstream_transport`, `reason`.
-1. Escalate when persistent.
+6. Escalate when persistent.
    - If the same key continues failing after remediation/retries, alert human operator and stop auto-retry for that key until manual action.
 
 LLM handling guideline for `interest.rejected`:
 1. Treat it as definitive rejection of the newly created interest.
-1. Do not assume the interest still exists in `GET /v1/interests`.
-1. Parse `event.reason` and run remediation (broadcaster auth, scope refresh, supported event type).
-1. Re-create the interest only after remediation.
+2. Do not assume the interest still exists in `GET /v1/interests`.
+3. Parse `event.reason` and run remediation (broadcaster auth, scope refresh, supported event type).
+4. Re-create the interest only after remediation.
 
 Optional enrichment (backward compatible):
 - For `type` starting with `channel.chat.` the envelope may include:
   - `twitch_chat_assets`: best-effort lookup payload containing badge/emote image metadata referenced by the message.
+    - includes `badge_image_map` (`set_id/version_id -> preferred Twitch image URL`) when badge metadata is resolved.
+    - includes `badge_image_map_by_scale` (`set_id/version_id -> {1x,2x,4x}`).
   - Old clients should ignore unknown top-level keys.
 
 ## 9) Upstream Twitch EventSub Routing
@@ -706,21 +708,21 @@ LLM rule:
 
 ## 11) Strict LLM Playbook
 1. Authenticate once with `GET /v1/interests`.
-1. Fetch `GET /v1/bots/accessible`; choose only listed bot.
-1. Fetch catalog `GET /v1/eventsub/subscription-types`.
-1. If your product requires Twitch end-user login, run service user-auth (`/v1/user-auth/start` then poll `/v1/user-auth/session/{state}`).
-1. If target channel requires channel grant, start and complete broadcaster auth.
-1. Create interests.
-1. If you need authoritative live status for interested channels, call `GET /v1/twitch/streams/status/interested?refresh=true` (or use `/v1/twitch/streams/live-test` for a single channel).
-1. For websocket delivery, mint token via `POST /v1/ws-token`, then open `WS /ws/events?ws_token=...`.
-1. Open webhook receiver if using webhook transport.
-1. Heartbeat interests while active.
-1. If you receive `interest.rejected`, treat that interest as removed; remediate and recreate only if still needed.
-1. If you receive `subscription.error`, surface it to operators and run remediation (grant broadcaster authorization, refresh bot scopes, or switch bot).
-1. On each incoming webhook, verify it is still desired; if not desired, delete matching webhook interests immediately.
-1. Send chat with chosen `auth_mode`.
-1. Create clips with `POST /v1/twitch/clips` when needed.
-1. Delete interests when no longer needed.
+2. Fetch `GET /v1/bots/accessible`; choose only listed bot.
+3. Fetch catalog `GET /v1/eventsub/subscription-types`.
+4. If your product requires Twitch end-user login, run service user-auth (`/v1/user-auth/start` then poll `/v1/user-auth/session/{state}`).
+5. If target channel requires channel grant, start and complete broadcaster auth.
+6. Read `GET /v1/interests` and create only missing interests with `POST /v1/interests`.
+7. If you need authoritative live status for interested channels, call `GET /v1/twitch/streams/status/interested?refresh=true` (or use `/v1/twitch/streams/live-test` for a single channel).
+8. For websocket delivery, mint token via `POST /v1/ws-token`, then open `WS /ws/events?ws_token=...`.
+9. Open webhook receiver if using webhook transport.
+10. Heartbeat interests while active (prefer `POST /v1/interests/heartbeat`).
+11. If you receive `interest.rejected`, treat that interest as removed; remediate and recreate only if still needed.
+12. If you receive `subscription.error`, surface it to operators and run remediation (grant broadcaster authorization, refresh bot scopes, or switch bot).
+13. On each incoming webhook, verify it is still desired; if not desired, delete matching webhook interests immediately.
+14. Send chat with chosen `auth_mode`.
+15. Create clips with `POST /v1/twitch/clips` when needed.
+16. Delete interests when no longer needed.
 
 ## 12) Non-Service Endpoints (Admin/Operator)
 For completeness:
