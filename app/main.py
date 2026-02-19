@@ -486,7 +486,7 @@ async def custom_swagger_ui_html():
     content = base_html.body.decode("utf-8")
     content = content.replace(
         "</head>",
-        '  <link rel="stylesheet" type="text/css" href="/static/swagger-dark.css?v=1">\n</head>',
+        '  <link rel="stylesheet" type="text/css" href="/static/swagger-dark.css?v=2">\n</head>',
     )
     return HTMLResponse(content=content)
 
