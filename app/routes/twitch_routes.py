@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from collections.abc import Awaitable, Callable
@@ -11,6 +13,8 @@ from sqlalchemy import select
 from app.bot_auth import ensure_bot_access_token
 from app.models import BotAccount, ChannelState, ServiceAccount, ServiceInterest
 from app.schemas import CreateClipRequest, CreateClipResponse, SendChatMessageRequest, SendChatMessageResponse
+
+logger = logging.getLogger(__name__)
 
 
 def register_twitch_routes(
@@ -448,6 +452,7 @@ def register_twitch_routes(
         req: SendChatMessageRequest,
         service: ServiceAccount = Depends(service_auth),
     ):
+        started = time.perf_counter()
         broadcaster_user_id = req.broadcaster_user_id.strip()
         async with session_factory() as session:
             await ensure_service_can_access_bot(session, service.id, req.bot_account_id)
@@ -533,7 +538,7 @@ def register_twitch_routes(
             bot_badge_reason = "App-token send path used; badge eligibility depends on channel authorization/mod status."
 
         drop_reason = result.get("drop_reason") or {}
-        return SendChatMessageResponse(
+        response = SendChatMessageResponse(
             broadcaster_user_id=broadcaster_user_id,
             sender_user_id=bot.twitch_user_id,
             message_id=result.get("message_id", ""),
@@ -544,12 +549,23 @@ def register_twitch_routes(
             drop_reason_code=drop_reason.get("code"),
             drop_reason_message=drop_reason.get("message"),
         )
+        logger.info(
+            "Chat send completed: service=%s bot=%s broadcaster=%s auth_mode_req=%s auth_mode_used=%s duration_ms=%d",
+            service.id,
+            req.bot_account_id,
+            broadcaster_user_id,
+            req.auth_mode,
+            auth_mode_used,
+            int((time.perf_counter() - started) * 1000),
+        )
+        return response
 
     @app.post("/v1/twitch/clips", response_model=CreateClipResponse)
     async def create_twitch_clip(
         req: CreateClipRequest,
         service: ServiceAccount = Depends(service_auth),
     ):
+        started = time.perf_counter()
         broadcaster_user_id = req.broadcaster_user_id.strip()
         async with session_factory() as session:
             await ensure_service_can_access_bot(session, service.id, req.bot_account_id)
@@ -597,7 +613,7 @@ def register_twitch_routes(
                 break
 
         if not ready_clip:
-            return CreateClipResponse(
+            result = CreateClipResponse(
                 clip_id=clip_id,
                 edit_url=str(create_payload.get("edit_url", "")),
                 status="processing",
@@ -605,8 +621,16 @@ def register_twitch_routes(
                 duration=req.duration,
                 broadcaster_user_id=broadcaster_user_id,
             )
+            logger.info(
+                "Clip request completed (processing): service=%s bot=%s broadcaster=%s duration_ms=%d",
+                service.id,
+                req.bot_account_id,
+                broadcaster_user_id,
+                int((time.perf_counter() - started) * 1000),
+            )
+            return result
 
-        return CreateClipResponse(
+        result = CreateClipResponse(
             clip_id=clip_id,
             edit_url=str(create_payload.get("edit_url", "")),
             status="ready",
@@ -618,3 +642,11 @@ def register_twitch_routes(
             embed_url=ready_clip.get("embed_url"),
             thumbnail_url=ready_clip.get("thumbnail_url"),
         )
+        logger.info(
+            "Clip request completed (ready): service=%s bot=%s broadcaster=%s duration_ms=%d",
+            service.id,
+            req.bot_account_id,
+            broadcaster_user_id,
+            int((time.perf_counter() - started) * 1000),
+        )
+        return result
