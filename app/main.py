@@ -21,7 +21,9 @@ from fastapi import (
     Request,
     status,
 )
+from fastapi.openapi.docs import get_swagger_ui_html, get_swagger_ui_oauth2_redirect_html
 from fastapi.responses import Response
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 
@@ -467,10 +469,26 @@ async def lifespan(_: FastAPI):
 app = FastAPI(
     title="Twitch EventSub Service",
     lifespan=lifespan,
-    docs_url="/api-docs",
+    docs_url=None,
     openapi_url="/api-docs/openapi.json",
     redoc_url="/api-redoc",
 )
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
+
+
+@app.get("/api-docs", include_in_schema=False)
+async def custom_swagger_ui_html():
+    return get_swagger_ui_html(
+        openapi_url=app.openapi_url,
+        title=f"{app.title} - API Docs",
+        oauth2_redirect_url="/api-docs/oauth2-redirect",
+        swagger_css_url="/static/swagger-dark.css",
+    )
+
+
+@app.get("/api-docs/oauth2-redirect", include_in_schema=False)
+async def swagger_ui_redirect():
+    return get_swagger_ui_oauth2_redirect_html()
 
 
 @app.middleware("http")

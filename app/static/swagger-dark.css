@@ -1,0 +1,127 @@
+html {
+  box-sizing: border-box;
+  overflow-y: scroll;
+}
+
+*,
+*:before,
+*:after {
+  box-sizing: inherit;
+}
+
+body {
+  margin: 0;
+  background: #0f172a;
+}
+
+.swagger-ui {
+  color: #e2e8f0;
+}
+
+.swagger-ui .topbar {
+  background-color: #0b1220;
+  border-bottom: 1px solid #1f2a44;
+}
+
+.swagger-ui .topbar .download-url-wrapper .select-label select,
+.swagger-ui .topbar .download-url-wrapper input[type=text] {
+  background: #111827;
+  color: #e2e8f0;
+  border-color: #334155;
+}
+
+.swagger-ui .scheme-container {
+  background: #111827;
+  box-shadow: none;
+  border: 1px solid #1f2937;
+}
+
+.swagger-ui .info .title,
+.swagger-ui .opblock-tag,
+.swagger-ui .opblock-summary-path,
+.swagger-ui .opblock-summary-description,
+.swagger-ui .response-col_status,
+.swagger-ui .response-col_description,
+.swagger-ui .parameter__name,
+.swagger-ui .parameter__type,
+.swagger-ui .tab li,
+.swagger-ui label,
+.swagger-ui p,
+.swagger-ui h1,
+.swagger-ui h2,
+.swagger-ui h3,
+.swagger-ui h4,
+.swagger-ui h5 {
+  color: #e2e8f0;
+}
+
+.swagger-ui .opblock.opblock-get {
+  background: rgba(14, 116, 144, 0.18);
+  border-color: #0e7490;
+}
+
+.swagger-ui .opblock.opblock-post {
+  background: rgba(22, 101, 52, 0.2);
+  border-color: #166534;
+}
+
+.swagger-ui .opblock.opblock-delete {
+  background: rgba(153, 27, 27, 0.2);
+  border-color: #991b1b;
+}
+
+.swagger-ui .opblock.opblock-put,
+.swagger-ui .opblock.opblock-patch {
+  background: rgba(146, 64, 14, 0.2);
+  border-color: #92400e;
+}
+
+.swagger-ui .opblock .opblock-summary-method {
+  color: #f8fafc;
+}
+
+.swagger-ui .opblock .opblock-section-header {
+  background: #0f172a;
+  border-color: #1f2937;
+}
+
+.swagger-ui .responses-inner h4,
+.swagger-ui .responses-inner h5 {
+  color: #cbd5e1;
+}
+
+.swagger-ui .model-box,
+.swagger-ui section.models {
+  background: #0b1220;
+  border-color: #1f2937;
+}
+
+.swagger-ui section.models h4 {
+  color: #e2e8f0;
+}
+
+.swagger-ui textarea,
+.swagger-ui input[type=text],
+.swagger-ui select {
+  background: #111827;
+  color: #e2e8f0;
+  border-color: #334155;
+}
+
+.swagger-ui .btn {
+  border-color: #334155;
+  color: #e2e8f0;
+  background: #1e293b;
+}
+
+.swagger-ui .btn.execute {
+  background: #0369a1;
+  border-color: #0369a1;
+}
+
+.swagger-ui .highlight-code,
+.swagger-ui pre,
+.swagger-ui .microlight {
+  background: #0b1220 !important;
+  color: #d1d5db !important;
+}
