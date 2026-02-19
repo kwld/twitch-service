@@ -348,6 +348,7 @@ async def _ensure_default_stream_interests(
     broadcaster_user_id: str,
 ) -> list[ServiceInterest]:
     created: list[ServiceInterest] = []
+    now = datetime.now(UTC)
     async with session_factory() as session:
         for event_type in DEFAULT_STREAM_EVENTS:
             existing = await session.scalar(
@@ -367,6 +368,7 @@ async def _ensure_default_stream_interests(
                 broadcaster_user_id=broadcaster_user_id,
                 transport="websocket",
                 webhook_url=None,
+                last_heartbeat_at=now,
             )
             session.add(interest)
             try:
@@ -417,6 +419,33 @@ async def lifespan(_: FastAPI):
             )
         except Exception as exc:
             logger.warning("Skipping redirect_url compatibility migration: %s", exc)
+        try:
+            await conn.execute(
+                text(
+                    "ALTER TABLE service_interests "
+                    "ADD COLUMN IF NOT EXISTS last_heartbeat_at TIMESTAMPTZ"
+                )
+            )
+            await conn.execute(
+                text(
+                    "ALTER TABLE service_interests "
+                    "ADD COLUMN IF NOT EXISTS stale_marked_at TIMESTAMPTZ"
+                )
+            )
+            await conn.execute(
+                text(
+                    "ALTER TABLE service_interests "
+                    "ADD COLUMN IF NOT EXISTS delete_after TIMESTAMPTZ"
+                )
+            )
+            await conn.execute(
+                text(
+                    "UPDATE service_interests "
+                    "SET last_heartbeat_at = COALESCE(last_heartbeat_at, updated_at)"
+                )
+            )
+        except Exception as exc:
+            logger.warning("Skipping service_interests lease compatibility migration: %s", exc)
     async with session_factory() as session:
         await session.execute(
             text(

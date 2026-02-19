@@ -108,6 +108,10 @@ class ServiceInterest(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
 
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    stale_marked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    delete_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     service_account: Mapped["ServiceAccount"] = relationship(back_populates="interests")
     bot_account: Mapped["BotAccount"] = relationship(back_populates="interests")
 
@@ -328,3 +332,4 @@ class ServiceEventTrace(Base):
     )
 
     service_account: Mapped["ServiceAccount"] = relationship(back_populates="event_traces")
+

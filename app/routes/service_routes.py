@@ -562,10 +562,15 @@ def register_service_routes(
             created_interest = False
             if existing:
                 interest = existing
-                interest.updated_at = datetime.now(UTC)
+                now = datetime.now(UTC)
+                interest.updated_at = now
+                interest.last_heartbeat_at = now
+                interest.stale_marked_at = None
+                interest.delete_after = None
                 await session.commit()
                 await session.refresh(interest)
             else:
+                now = datetime.now(UTC)
                 interest = ServiceInterest(
                     service_account_id=service.id,
                     bot_account_id=req.bot_account_id,
@@ -573,6 +578,7 @@ def register_service_routes(
                     broadcaster_user_id=broadcaster_user_id,
                     transport=req.transport,
                     webhook_url=webhook_url,
+                    last_heartbeat_at=now,
                 )
                 session.add(interest)
                 try:
@@ -667,5 +673,27 @@ def register_service_routes(
             now = datetime.now(UTC)
             for target in touch_targets:
                 target.updated_at = now
+                target.last_heartbeat_at = now
+                target.stale_marked_at = None
+                target.delete_after = None
+            await session.commit()
+        return {"ok": True, "touched": len(touch_targets)}
+
+    @app.post("/v1/interests/heartbeat")
+    async def heartbeat_all_interests(service: ServiceAccount = Depends(service_auth)):
+        async with session_factory() as session:
+            touch_targets = list(
+                (
+                    await session.scalars(
+                        select(ServiceInterest).where(ServiceInterest.service_account_id == service.id)
+                    )
+                ).all()
+            )
+            now = datetime.now(UTC)
+            for target in touch_targets:
+                target.updated_at = now
+                target.last_heartbeat_at = now
+                target.stale_marked_at = None
+                target.delete_after = None
             await session.commit()
         return {"ok": True, "touched": len(touch_targets)}

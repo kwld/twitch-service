@@ -32,7 +32,11 @@ from app.twitch_chat_assets import TwitchChatAssetCache
 
 logger = logging.getLogger(__name__)
 eventsub_audit_logger = logging.getLogger("eventsub.audit")
-WS_LISTENER_COOLDOWN = timedelta(minutes=5)
+WS_LISTENER_COOLDOWN = timedelta(minutes=15)
+INTEREST_DISCONNECT_GRACE = timedelta(minutes=15)
+INTEREST_HEARTBEAT_TIMEOUT = timedelta(minutes=30)
+INTEREST_UNSUBSCRIBE_AFTER_STALE = timedelta(hours=24)
+INTEREST_CLEANUP_INTERVAL_SECONDS = 60
 
 
 class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
@@ -161,21 +165,52 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
                 await session.delete(state)
                 await session.commit()
 
-    async def prune_stale_interests(self, max_age: timedelta) -> int:
-        threshold = datetime.now(UTC) - max_age
+    async def prune_stale_interests(self) -> int:
+        now = datetime.now(UTC)
         removed = 0
+        stale: list[ServiceInterest] = []
         async with self.session_factory() as session:
-            stale = list(
-                (
-                    await session.scalars(
-                        select(ServiceInterest).where(ServiceInterest.updated_at < threshold)
-                    )
-                ).all()
-            )
+            interests = list((await session.scalars(select(ServiceInterest))).all())
+            stats_rows = list((await session.scalars(select(ServiceRuntimeStats))).all())
+            stats_by_service = {
+                row.service_account_id: row
+                for row in stats_rows
+            }
+
+            for interest in interests:
+                stats = stats_by_service.get(interest.service_account_id)
+                active_ws = bool(stats and (stats.active_ws_connections or 0) > 0)
+                disconnect_in_grace = False
+                if stats and stats.last_disconnected_at:
+                    disconnect_in_grace = (now - stats.last_disconnected_at) <= INTEREST_DISCONNECT_GRACE
+                heartbeat_at = interest.last_heartbeat_at or interest.updated_at or interest.created_at
+                heartbeat_fresh = (now - heartbeat_at) <= INTEREST_HEARTBEAT_TIMEOUT
+
+                if active_ws or disconnect_in_grace or heartbeat_fresh:
+                    if interest.stale_marked_at is not None or interest.delete_after is not None:
+                        interest.stale_marked_at = None
+                        interest.delete_after = None
+                    continue
+
+                if interest.stale_marked_at is None:
+                    interest.stale_marked_at = now
+                if interest.delete_after is None:
+                    interest.delete_after = interest.stale_marked_at + INTEREST_UNSUBSCRIBE_AFTER_STALE
+                if now >= interest.delete_after:
+                    stale.append(interest)
+
             for interest in stale:
                 await session.delete(interest)
             await session.commit()
+
         for interest in stale:
+            logger.info(
+                "Unsubscribing stale interest after extended inactivity: service_id=%s interest_id=%s event_type=%s broadcaster=%s",
+                interest.service_account_id,
+                interest.id,
+                interest.event_type,
+                interest.broadcaster_user_id,
+            )
             key, still_used = await self.registry.remove(interest)
             await self.on_interest_removed(key, still_used)
             removed += 1
@@ -184,10 +219,10 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
     async def _cleanup_stale_interests_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                await self.prune_stale_interests(max_age=timedelta(hours=1))
+                await self.prune_stale_interests()
             except Exception as exc:
                 logger.warning("Failed stale interest cleanup: %s", exc)
-            await asyncio.sleep(300)
+            await asyncio.sleep(INTEREST_CLEANUP_INTERVAL_SECONDS)
 
     async def _load_interests(self) -> None:
         async with self.session_factory() as session:
@@ -204,7 +239,10 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
                     continue
                 remaining = await self._websocket_listener_cooldown_remaining()
                 if remaining is not None and remaining.total_seconds() <= 0:
-                    await self._disable_websocket_transport_subscriptions()
+                    logger.info(
+                        "No service websocket listeners for %ss; suspending EventSub websocket connection",
+                        int(WS_LISTENER_COOLDOWN.total_seconds()),
+                    )
                     self._session_id = None
                     await asyncio.sleep(5)
                     continue
@@ -240,10 +278,9 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
                 remaining = await self._websocket_listener_cooldown_remaining()
                 if remaining is not None and remaining.total_seconds() <= 0:
                     logger.info(
-                        "No service websocket listeners for %ss; suspending websocket EventSub subscriptions",
+                        "No service websocket listeners for %ss; suspending EventSub websocket connection",
                         int(WS_LISTENER_COOLDOWN.total_seconds()),
                     )
-                    await self._disable_websocket_transport_subscriptions()
                     await ws.close()
                     self._session_id = None
                     return
