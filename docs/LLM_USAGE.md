@@ -70,6 +70,7 @@ LLM rule:
 - `POST /v1/interests`
 - `DELETE /v1/interests/{interest_id}`
 - `POST /v1/interests/{interest_id}/heartbeat`
+- `POST /v1/interests/heartbeat`
 
 ### Broadcaster authorization
 - `POST /v1/broadcaster-authorizations/start`
@@ -112,7 +113,12 @@ Use this order for a reliable integration:
    - choose downstream `transport`:
      - `websocket`: receive events over `WS /ws/events`
      - `webhook`: receive events via `webhook_url`
-1. Keep interests alive with `POST /v1/interests/{interest_id}/heartbeat`.
+1. Keep interests alive with heartbeat:
+   - preferred: `POST /v1/interests/heartbeat` (single call refreshes all service interests),
+   - fallback: `POST /v1/interests/{interest_id}/heartbeat`.
+1. Heartbeat cadence:
+   - send every 30 minutes or sooner,
+   - recommended: every 10 to 20 minutes for jitter tolerance.
 1. Remove unused subscriptions with `DELETE /v1/interests/{interest_id}`.
 
 Notes:
@@ -228,7 +234,23 @@ Side effects:
 
 ### `POST /v1/interests/{interest_id}/heartbeat`
 - touches `updated_at` on all interests for same `(service, bot, broadcaster)` as target interest.
-- stale interests are auto-pruned by manager after 1 hour inactivity.
+- also refreshes internal lease fields used for delayed unsubscribe.
+
+### `POST /v1/interests/heartbeat`
+- touches all interests owned by authenticated service.
+- also refreshes internal lease fields used for delayed unsubscribe.
+
+Stale-unsubscribe lifecycle (current behavior):
+- when service websocket listeners disconnect, interest deletion is not immediate.
+- grace window after disconnect: 15 minutes.
+- heartbeat freshness window: 30 minutes.
+- after grace + heartbeat timeout are both missed, interest is marked stale (persisted in DB).
+- stale interests are unsubscribed only after 24 hours without reconnect/heartbeat.
+- this state is persisted and survives restarts/crashes.
+
+LLM rule:
+- do not implement unsubscribe-on-disconnect logic in client apps.
+- keep heartbeats running even while reconnecting websocket clients.
 
 ### `GET /v1/eventsub/subscription-types`
 Returns:
@@ -452,6 +474,17 @@ Behavior:
   - returns cached state only,
   - returns `404` if cache row does not exist,
   - returns `source=\"cache\"`.
+
+Operational guidance:
+- this endpoint is async, but aggressive fan-out polling can still create upstream Twitch API pressure and increase latency for other operations (for example chat sends).
+- prefer `GET /v1/twitch/streams/status` with batched `broadcaster_user_ids` whenever possible.
+- if `live-test` is needed:
+  - send numeric `broadcaster_user_id` instead of login whenever possible,
+  - avoid high-frequency bursts,
+  - use `refresh=false` unless a fresh Twitch read is strictly required.
+- server-side protection is present:
+  - login-to-user resolution is cached,
+  - repeated refreshes for same bot+broadcaster within a short interval return cached state instead of re-querying Twitch.
 
 ### `POST /v1/twitch/chat/messages`
 Request:
