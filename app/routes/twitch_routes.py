@@ -550,8 +550,9 @@ def register_twitch_routes(
             drop_reason_message=drop_reason.get("message"),
         )
         logger.info(
-            "Chat send completed: service=%s bot=%s broadcaster=%s auth_mode_req=%s auth_mode_used=%s duration_ms=%d",
+            "Chat send completed: service=%s client_id=%s bot=%s broadcaster=%s auth_mode_req=%s auth_mode_used=%s duration_ms=%d",
             service.id,
+            service.client_id,
             req.bot_account_id,
             broadcaster_user_id,
             req.auth_mode,
@@ -622,8 +623,9 @@ def register_twitch_routes(
                 broadcaster_user_id=broadcaster_user_id,
             )
             logger.info(
-                "Clip request completed (processing): service=%s bot=%s broadcaster=%s duration_ms=%d",
+                "Clip request completed (processing): service=%s client_id=%s bot=%s broadcaster=%s duration_ms=%d",
                 service.id,
+                service.client_id,
                 req.bot_account_id,
                 broadcaster_user_id,
                 int((time.perf_counter() - started) * 1000),
@@ -643,8 +645,9 @@ def register_twitch_routes(
             thumbnail_url=ready_clip.get("thumbnail_url"),
         )
         logger.info(
-            "Clip request completed (ready): service=%s bot=%s broadcaster=%s duration_ms=%d",
+            "Clip request completed (ready): service=%s client_id=%s bot=%s broadcaster=%s duration_ms=%d",
             service.id,
+            service.client_id,
             req.bot_account_id,
             broadcaster_user_id,
             int((time.perf_counter() - started) * 1000),
