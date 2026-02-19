@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from collections.abc import Awaitable, Callable
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -24,6 +24,46 @@ def register_twitch_routes(
     ensure_service_can_access_bot: Callable[[object, uuid.UUID, uuid.UUID], Awaitable[None]],
     normalize_broadcaster_id_or_login: Callable[[str], str],
 ) -> None:
+    live_test_refresh_min_interval = timedelta(seconds=20)
+    login_cache_ttl = timedelta(hours=6)
+    login_cache: dict[str, tuple[str, str, datetime]] = {}
+    login_cache_guard = asyncio.Lock()
+    login_lookup_locks: dict[str, asyncio.Lock] = {}
+
+    async def _resolve_login_with_cache(token: str, login: str) -> tuple[str, str]:
+        normalized = login.strip().lower()
+        if not normalized:
+            raise HTTPException(status_code=422, detail="Broadcaster login is required")
+        now = datetime.now(UTC)
+        async with login_cache_guard:
+            cached = login_cache.get(normalized)
+            if cached and cached[2] > now:
+                return cached[0], cached[1]
+            lookup_lock = login_lookup_locks.get(normalized)
+            if not lookup_lock:
+                lookup_lock = asyncio.Lock()
+                login_lookup_locks[normalized] = lookup_lock
+        async with lookup_lock:
+            now = datetime.now(UTC)
+            async with login_cache_guard:
+                cached = login_cache.get(normalized)
+                if cached and cached[2] > now:
+                    return cached[0], cached[1]
+            users = await twitch_client.get_users_by_query(token, logins=[normalized])
+            if not users:
+                raise HTTPException(status_code=404, detail="Broadcaster login not found")
+            resolved_user_id = str(users[0].get("id", "")).strip()
+            if not resolved_user_id:
+                raise HTTPException(status_code=502, detail="Twitch user lookup returned empty id")
+            resolved_login = str(users[0].get("login", normalized)).strip().lower()
+            async with login_cache_guard:
+                login_cache[normalized] = (
+                    resolved_user_id,
+                    resolved_login,
+                    now + login_cache_ttl,
+                )
+            return resolved_user_id, resolved_login
+
     @app.get("/v1/twitch/profiles")
     async def twitch_profiles(
         bot_account_id: uuid.UUID,
@@ -255,13 +295,7 @@ def register_twitch_routes(
             token = await ensure_bot_access_token(session, twitch_client, bot)
 
             if resolved_login and not resolved_user_id:
-                users = await twitch_client.get_users_by_query(token, logins=[resolved_login])
-                if not users:
-                    raise HTTPException(status_code=404, detail="Broadcaster login not found")
-                resolved_user_id = str(users[0].get("id", "")).strip()
-                if not resolved_user_id:
-                    raise HTTPException(status_code=502, detail="Twitch user lookup returned empty id")
-                resolved_login = str(users[0].get("login", resolved_login)).strip().lower()
+                resolved_user_id, resolved_login = await _resolve_login_with_cache(token, resolved_login)
 
             state = await session.scalar(
                 select(ChannelState).where(
@@ -269,10 +303,18 @@ def register_twitch_routes(
                     ChannelState.broadcaster_user_id == resolved_user_id,
                 )
             )
-            if refresh:
+            now = datetime.now(UTC)
+            should_refresh = refresh
+            if (
+                refresh
+                and state
+                and state.last_checked_at
+                and (now - state.last_checked_at) < live_test_refresh_min_interval
+            ):
+                should_refresh = False
+            if should_refresh:
                 streams = await twitch_client.get_streams_by_user_ids(token, [resolved_user_id])
                 stream = streams[0] if streams else None
-                now = datetime.now(UTC)
                 if not state:
                     state = ChannelState(
                         bot_account_id=bot_account_id,
@@ -315,7 +357,7 @@ def register_twitch_routes(
                 "game_name": state.game_name,
                 "started_at": state.started_at.isoformat() if state.started_at else None,
                 "last_checked_at": state.last_checked_at.isoformat() if state.last_checked_at else None,
-                "source": "twitch" if refresh else "cache",
+                "source": "twitch" if should_refresh else "cache",
             }
 
     @app.get("/v1/twitch/streams/live-public")
