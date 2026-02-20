@@ -12,10 +12,10 @@ This plan focuses on high-impact reliability and security improvements without c
   - IP allowlist parsing/checking,
   - webhook target URL validation,
   - payload redaction utilities.
+- Add Alembic migrations and remove runtime schema mutation from app startup.
 - Remove stale websocket auth documentation that referenced unsupported `client_id/client_secret` query auth.
 
 ## Phase 2 (Next)
-- Add DB migrations (Alembic) and stop relying on startup `create_all` for schema evolution.
 - Encrypt sensitive OAuth token columns at rest (application-level encryption key + rotation procedure).
 - Add integration tests for:
   - ws-token auth flow,
@@ -28,4 +28,3 @@ This plan focuses on high-impact reliability and security improvements without c
   - fanout service,
   - audit/trace service.
 - Add structured metrics for subscription churn, fanout failures, and Twitch API latency.
-

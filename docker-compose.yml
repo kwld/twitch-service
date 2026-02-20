@@ -34,6 +34,10 @@ services:
       - ./logs:/var/log/twitch-service
     ports:
       - "${APP_PORT:-8080}:${APP_PORT:-8080}"
+    command:
+      - sh
+      - -c
+      - python -m alembic upgrade head && twitch-eventsub-api
 
   alloy:
     image: grafana/alloy:latest

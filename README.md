@@ -69,7 +69,11 @@ Flow:
    ```bash
    docker compose up -d db
    ```
-4. Start API:
+4. Apply DB migrations:
+   ```bash
+   python -m alembic upgrade head
+   ```
+5. Start API:
    ```bash
    twitch-eventsub-api
    ```

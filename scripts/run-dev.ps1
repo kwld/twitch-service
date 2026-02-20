@@ -46,6 +46,25 @@ function Test-LokiEnabled {
   return $true
 }
 
+function Invoke-MigrationsWithRetry {
+  param(
+    [int]$Attempts = 30,
+    [int]$DelaySeconds = 2
+  )
+
+  for ($try = 1; $try -le $Attempts; $try++) {
+    python -m alembic upgrade head
+    if ($LASTEXITCODE -eq 0) {
+      return
+    }
+    Write-Warning "Migration attempt $try/$Attempts failed; retrying in ${DelaySeconds}s..."
+    Start-Sleep -Seconds $DelaySeconds
+  }
+
+  Write-Error "Failed to apply database migrations after $Attempts attempts."
+  exit 1
+}
+
 if (!(Test-Path $envPath)) {
   Write-Error "Missing $envPath. Copy $envExamplePath to $envPath and fill required values."
   exit 1
@@ -84,6 +103,8 @@ if (-not [string]::IsNullOrWhiteSpace($ngrokAuthtoken)) {
   Start-Process -NoNewWindow -FilePath "ngrok" -ArgumentList "http", $Port | Out-Null
   Write-Host "Started ngrok on port $Port"
 }
+
+Invoke-MigrationsWithRetry
 
 uvicorn app.main:app --reload --host 0.0.0.0 --port $Port
 exit $LASTEXITCODE

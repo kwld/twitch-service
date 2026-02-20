@@ -11,6 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md /workspace/
+COPY alembic.ini /workspace/
+COPY migrations /workspace/migrations
 COPY app /workspace/app
 
 RUN pip install --no-cache-dir --upgrade pip && \

@@ -10,7 +10,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from urllib.parse import parse_qsl, urlencode, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import uvicorn
 from fastapi import (
@@ -44,7 +44,6 @@ from app.db import create_engine_and_session
 from app.event_router import InterestRegistry, LocalEventHub
 from app.eventsub_manager import EventSubManager
 from app.models import (
-    Base,
     BotAccount,
     ChannelState,
     ServiceAccount,
@@ -385,69 +384,6 @@ async def _ensure_default_stream_interests(
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        # Legacy compatibility: older builds stored invalid EventSub types.
-        await conn.execute(
-            text(
-                "UPDATE service_interests SET event_type = 'stream.online' "
-                "WHERE event_type = 'channel.online'"
-            )
-        )
-        await conn.execute(
-            text(
-                "UPDATE service_interests SET event_type = 'stream.offline' "
-                "WHERE event_type = 'channel.offline'"
-            )
-        )
-        await conn.execute(
-            text(
-                "UPDATE twitch_subscriptions SET event_type = 'stream.online' "
-                "WHERE event_type = 'channel.online'"
-            )
-        )
-        await conn.execute(
-            text(
-                "UPDATE twitch_subscriptions SET event_type = 'stream.offline' "
-                "WHERE event_type = 'channel.offline'"
-            )
-        )
-        try:
-            await conn.execute(
-                text(
-                    "ALTER TABLE broadcaster_authorization_requests "
-                    "ADD COLUMN IF NOT EXISTS redirect_url TEXT"
-                )
-            )
-        except Exception as exc:
-            logger.warning("Skipping redirect_url compatibility migration: %s", exc)
-        try:
-            await conn.execute(
-                text(
-                    "ALTER TABLE service_interests "
-                    "ADD COLUMN IF NOT EXISTS last_heartbeat_at TIMESTAMPTZ"
-                )
-            )
-            await conn.execute(
-                text(
-                    "ALTER TABLE service_interests "
-                    "ADD COLUMN IF NOT EXISTS stale_marked_at TIMESTAMPTZ"
-                )
-            )
-            await conn.execute(
-                text(
-                    "ALTER TABLE service_interests "
-                    "ADD COLUMN IF NOT EXISTS delete_after TIMESTAMPTZ"
-                )
-            )
-            await conn.execute(
-                text(
-                    "UPDATE service_interests "
-                    "SET last_heartbeat_at = COALESCE(last_heartbeat_at, updated_at)"
-                )
-            )
-        except Exception as exc:
-            logger.warning("Skipping service_interests lease compatibility migration: %s", exc)
     async with session_factory() as session:
         await session.execute(
             text(

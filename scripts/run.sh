@@ -38,6 +38,22 @@ is_loki_enabled() {
   return 0
 }
 
+run_migrations_with_retry() {
+  local attempts=30
+  local delay_seconds=2
+  local try=1
+  while (( try <= attempts )); do
+    if python -m alembic upgrade head; then
+      return 0
+    fi
+    echo "Migration attempt ${try}/${attempts} failed; retrying in ${delay_seconds}s..."
+    sleep "${delay_seconds}"
+    ((try++))
+  done
+  echo "Failed to apply database migrations after ${attempts} attempts."
+  return 1
+}
+
 if [[ ! -f "${ENV_FILE}" ]]; then
   echo "Missing ${ENV_FILE}."
   echo "Copy ${ENV_EXAMPLE_FILE} to ${ENV_FILE} and fill required values."
@@ -67,4 +83,5 @@ if is_loki_enabled; then
 else
   docker compose up -d db
 fi
+run_migrations_with_retry
 twitch-eventsub-api

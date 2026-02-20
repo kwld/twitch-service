@@ -53,7 +53,14 @@ Verify DB container is running:
 docker compose ps
 ```
 
-## 5) Start The API
+## 5) Apply Database Migrations
+From repo root:
+
+```powershell
+python -m alembic upgrade head
+```
+
+## 6) Start The API
 From repo root:
 
 ```powershell
@@ -68,7 +75,7 @@ Quick health check in another terminal:
 Invoke-RestMethod http://localhost:8080/health
 ```
 
-## 6) Create Service Credentials For The Test App
+## 7) Create Service Credentials For The Test App
 In a new terminal, create a service account through admin API:
 
 ```powershell
@@ -83,7 +90,7 @@ Save:
 
 They are needed by the test app.
 
-## 7) Ensure You Have At Least One Bot Account
+## 8) Ensure You Have At Least One Bot Account
 The test app needs a bot to create interests and send messages.
 
 Open the CLI:
@@ -94,7 +101,7 @@ twitch-eventsub-cli console
 
 Use the bot setup flow in the console to add/authorize a bot account if none exists yet.
 
-## 8) Configure Test App Environment
+## 9) Configure Test App Environment
 From repo root:
 
 ```powershell
@@ -110,7 +117,7 @@ Set in `test-app/.env`:
 Alternative (recommended for local secrets you never want to commit):
 - create `test-app/.env.test` instead of `test-app/.env` (the test app loads `.env.test` first when present).
 
-## 9) Install And Start Test App
+## 10) Install And Start Test App
 From `test-app/`:
 
 ```powershell
@@ -121,7 +128,7 @@ npm start
 Open:
 - `http://localhost:9090`
 
-## 10) End-To-End Browser Flow
+## 11) End-To-End Browser Flow
 In the test app UI:
 1. Click refresh/status to verify service auth works.
 2. Load/select an accessible bot.
@@ -143,7 +150,7 @@ Expected envelope fields include:
 - `event_timestamp`
 - `event`
 
-## 11) Optional: Webhook Delivery Test
+## 12) Optional: Webhook Delivery Test
 1. Expose test app publicly (for example with ngrok).
 2. Set `TEST_WEBHOOK_PUBLIC_URL` in `test-app/.env` to `<public-url>/service-webhook`.
 3. Restart test app.
@@ -151,7 +158,7 @@ Expected envelope fields include:
 5. Trigger event and verify `[webhook]` log entries in the test app UI.
 6. If you observe webhook events that are no longer desired, delete matching webhook interests via `DELETE /v1/interests/{interest_id}`.
 
-## 12) Stop Everything
+## 13) Stop Everything
 API: `Ctrl+C` in API terminal.
 
 Test app: `Ctrl+C` in test app terminal.

@@ -45,6 +45,9 @@ Podman:
 podman compose -f docker-compose.yml up -d --build
 ```
 
+Note:
+- The app container now runs `python -m alembic upgrade head` before starting the API process.
+
 ## 6) Verify deployment
 - Health endpoint: `GET http://<host>:8080/health`
 - Logs:

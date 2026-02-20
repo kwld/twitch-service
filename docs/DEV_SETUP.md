@@ -38,6 +38,8 @@ This starts:
 - `app` (API on `localhost:8080`, hot reload enabled)
 - `ngrok` (inspector on `http://localhost:4040`)
 
+The app service runs `python -m alembic upgrade head` before `uvicorn`.
+
 ## 4) Get the public ngrok URL
 Open `http://localhost:4040` and copy the HTTPS forwarding URL.
 

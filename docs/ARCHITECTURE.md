@@ -29,7 +29,7 @@ This document describes how the application works from process startup to event 
 
 ## 2) Startup Sequence
 At app startup (`lifespan` in `app/main.py`):
-1. Create DB tables via `Base.metadata.create_all`.
+1. Run DB migrations before startup (`python -m alembic upgrade head`) so schema is current.
 2. `EventSubManager.start()`:
    - load persisted interests from DB into `InterestRegistry`,
    - fetch current Twitch EventSub subscriptions and reconcile local DB subscription rows,
@@ -39,7 +39,7 @@ At app startup (`lifespan` in `app/main.py`):
    - refresh stream states for channels currently represented by interests.
 3. Start EventSub manager loop tasks:
    - websocket manager loop (upstream Twitch EventSub),
-   - stale-interest cleanup loop (every 5 minutes; removes interests older than 1 hour).
+   - stale-interest cleanup loop (every 60 seconds; marks stale after heartbeat timeout and removes after grace window).
 
 At shutdown:
 - stop manager tasks,
