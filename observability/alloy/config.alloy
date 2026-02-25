@@ -2,7 +2,8 @@ local.file_match "eventsub_audit" {
   path_targets = [
     {
       __path__ = "/var/log/twitch-service/eventsub.log",
-      job      = "twitch-eventsub-service",
+      twitch_service_job         = "twitch-eventsub-service",
+      twitch_service_source_type = "eventsub_audit",
     },
   ]
 }
@@ -31,23 +32,28 @@ discovery.relabel "container_logs" {
   rule {
     source_labels = ["__meta_docker_container_name"]
     regex         = "/(.*)"
-    target_label  = "container"
+    target_label  = "twitch_service_container_name"
     replacement   = "$1"
   }
 
   rule {
     source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
-    target_label  = "compose_service"
+    target_label  = "twitch_service_compose_service"
   }
 
   rule {
     source_labels = ["__meta_docker_container_id"]
-    target_label  = "container_id"
+    target_label  = "twitch_service_container_id"
   }
 
   rule {
-    target_label = "job"
+    target_label = "twitch_service_job"
     replacement  = "docker-containers"
+  }
+
+  rule {
+    target_label = "twitch_service_source_type"
+    replacement  = "container"
   }
 }
 
@@ -60,10 +66,11 @@ loki.source.docker "containers" {
 loki.process "container_logs" {
   stage.labels {
     values = {
-      job            = "job",
-      container      = "container",
-      compose_service = "compose_service",
-      container_id   = "container_id",
+      twitch_service_job            = "twitch_service_job",
+      twitch_service_source_type    = "twitch_service_source_type",
+      twitch_service_container_name = "twitch_service_container_name",
+      twitch_service_compose_service = "twitch_service_compose_service",
+      twitch_service_container_id   = "twitch_service_container_id",
     }
   }
 
@@ -78,34 +85,35 @@ loki.source.file "eventsub_audit" {
 loki.process "eventsub_audit" {
   stage.json {
     expressions = {
-      level        = "level",
-      kind         = "kind",
-      event_type   = "event_type",
-      direction    = "direction",
-      transport    = "transport",
-      service_id   = "service_account_id",
-      service_name = "service_name",
-      bot_id       = "bot_account_id",
-      bot_name     = "bot_name",
-      broadcaster  = "broadcaster_user_id",
-      broadcaster_name = "broadcaster_name",
+      twitch_service_log_level       = "level",
+      twitch_service_event_kind      = "kind",
+      twitch_service_event_type      = "event_type",
+      twitch_service_direction       = "direction",
+      twitch_service_transport       = "transport",
+      twitch_service_service_id      = "service_account_id",
+      twitch_service_service_name    = "service_name",
+      twitch_service_bot_id          = "bot_account_id",
+      twitch_service_bot_name        = "bot_name",
+      twitch_service_broadcaster_id  = "broadcaster_user_id",
+      twitch_service_broadcaster_name = "broadcaster_name",
     }
   }
 
   stage.labels {
     values = {
-      level      = "level",
-      kind       = "kind",
-      event_type = "event_type",
-      direction  = "direction",
-      transport  = "transport",
-      service_id = "service_id",
-      service_name = "service_name",
-      bot_id = "bot_id",
-      bot_name = "bot_name",
-      broadcaster = "broadcaster",
-      broadcaster_name = "broadcaster_name",
-      job        = "job",
+      twitch_service_log_level        = "twitch_service_log_level",
+      twitch_service_event_kind       = "twitch_service_event_kind",
+      twitch_service_event_type       = "twitch_service_event_type",
+      twitch_service_direction        = "twitch_service_direction",
+      twitch_service_transport        = "twitch_service_transport",
+      twitch_service_service_id       = "twitch_service_service_id",
+      twitch_service_service_name     = "twitch_service_service_name",
+      twitch_service_bot_id           = "twitch_service_bot_id",
+      twitch_service_bot_name         = "twitch_service_bot_name",
+      twitch_service_broadcaster_id   = "twitch_service_broadcaster_id",
+      twitch_service_broadcaster_name = "twitch_service_broadcaster_name",
+      twitch_service_job              = "twitch_service_job",
+      twitch_service_source_type      = "twitch_service_source_type",
     }
   }
 
@@ -118,6 +126,6 @@ loki.write "remote" {
   }
 
   external_labels = {
-    service = "twitch-eventsub-service",
+    twitch_service_name = "twitch-eventsub-service",
   }
 }
