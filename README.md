@@ -133,6 +133,7 @@ bash ./scripts/run-dev.sh 8080
 - `GET /v1/bots/accessible` (service)
 - `POST /v1/broadcaster-authorizations/start` (service)
 - `POST /v1/broadcaster-authorizations/start-minimal` (service)
+- `POST /v1/eventsub/scopes/resolve` (service)
 - `GET /v1/broadcaster-authorizations` (service)
 - `POST /v1/user-auth/start` (service)
 - `GET /v1/user-auth/session/{state}` (service)
@@ -284,6 +285,12 @@ Twitch webhook callback:
 Catalog source for `GET /v1/eventsub/subscription-types`:
 - https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types/
 
+Scope preflight endpoint:
+- `POST /v1/eventsub/scopes/resolve`
+- resolves effective scope set for `scope_mode=recommended|minimal|custom`,
+  optional `event_types`, optional `custom_scopes`,
+  and `include_base_scope` (default `true`).
+
 ## Loki EventSub Logging (Optional)
 The service writes structured, redacted EventSub audit logs to:
 - `APP_EVENTSUB_LOG_PATH` (default `./logs/eventsub.log`)
@@ -356,10 +363,16 @@ Use this flow for each streamer channel where the bot should act as a cloud bot:
    - For minimal bot setup only, call `POST /v1/broadcaster-authorizations/start-minimal`.
    - Optional: include `redirect_url` so callback redirects back to your app after consent.
    - Optional: include `event_types` so this service requests the broadcaster scopes required for those EventSub types.
-3. Redirect streamer in browser to returned `authorize_url`.
-4. Streamer approves Twitch consent for `channel:bot` plus any event-specific scopes requested by this service.
-5. Twitch redirects to this service at `TWITCH_REDIRECT_URI` (this app handles `/oauth/callback`).
-6. Service verifies with `GET /v1/broadcaster-authorizations` before creating chat subscriptions or sending bot-badge-eligible messages.
+   - Optional: choose `scope_mode`:
+     - `recommended` (default): baseline `channel:bot` + event-derived recommended scopes.
+     - `minimal`: baseline `channel:bot` only.
+     - `custom`: caller-provided `custom_scopes` (plus `channel:bot` when `include_base_scope=true`).
+   - Optional: include `custom_scopes` when `scope_mode=custom`.
+3. Optional preflight: call `POST /v1/eventsub/scopes/resolve` to preview computed scopes before OAuth.
+4. Redirect streamer in browser to returned `authorize_url`.
+5. Streamer approves Twitch consent for requested scopes.
+6. Twitch redirects to this service at `TWITCH_REDIRECT_URI` (this app handles `/oauth/callback`).
+7. Service verifies with `GET /v1/broadcaster-authorizations` before creating chat subscriptions or sending bot-badge-eligible messages.
 
 If `redirect_url` is provided, `/oauth/callback` responds with HTTP `302` to that URL and appends query fields:
 - success: `ok=true`, `message`, `service_connected=true`, `broadcaster_user_id`, `broadcaster_login`, `scopes` (comma-separated),

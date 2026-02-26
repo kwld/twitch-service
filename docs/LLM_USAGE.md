@@ -74,6 +74,8 @@ LLM rule:
 
 ### Broadcaster authorization
 - `POST /v1/broadcaster-authorizations/start`
+- `POST /v1/broadcaster-authorizations/start-minimal`
+- `POST /v1/eventsub/scopes/resolve`
 - `GET /v1/broadcaster-authorizations`
 
 ### Service user authentication (Twitch user login)
@@ -105,22 +107,24 @@ Use this order for a reliable integration:
 1. Authenticate service calls with `X-Client-Id` + `X-Client-Secret`.
 2. Discover available bots via `GET /v1/bots/accessible` and pick one allowed bot.
 3. Fetch supported event types via `GET /v1/eventsub/subscription-types`.
-4. If your event type needs broadcaster consent for the selected bot, run:
+4. Optional preflight for OAuth scope planning:
+   - `POST /v1/eventsub/scopes/resolve`
+5. If your event type needs broadcaster consent for the selected bot, run:
    - `POST /v1/broadcaster-authorizations/start`
    - complete Twitch OAuth redirect
    - confirm with `GET /v1/broadcaster-authorizations`.
-5. Read current interests with `GET /v1/interests` and compare against your desired set.
-6. Create missing subscription intent(s) with `POST /v1/interests`:
+6. Read current interests with `GET /v1/interests` and compare against your desired set.
+7. Create missing subscription intent(s) with `POST /v1/interests`:
    - choose downstream `transport`:
      - `websocket`: receive events over `WS /ws/events`
      - `webhook`: receive events via `webhook_url`
-7. Keep interests alive with heartbeat:
+8. Keep interests alive with heartbeat:
    - preferred: `POST /v1/interests/heartbeat` (single call refreshes all service interests),
    - fallback: `POST /v1/interests/{interest_id}/heartbeat`.
-8. Heartbeat cadence:
+9. Heartbeat cadence:
    - send every 30 minutes or sooner,
    - recommended: every 10 to 20 minutes for jitter tolerance.
-9. Remove unused subscriptions with `DELETE /v1/interests/{interest_id}`.
+10. Remove unused subscriptions with `DELETE /v1/interests/{interest_id}`.
 
 Notes:
 - `POST /v1/interests` deduplicates by service/bot/event/broadcaster/transport/webhook URL.
@@ -312,7 +316,10 @@ Request:
 {
   "bot_account_id": "uuid",
   "redirect_url": "https://your-service.example.com/oauth/done",
-  "event_types": ["channel.poll.begin", "channel.prediction.begin"]
+  "event_types": ["channel.poll.begin", "channel.prediction.begin"],
+  "scope_mode": "recommended",
+  "custom_scopes": null,
+  "include_base_scope": true
 }
 ```
 Returns:
@@ -321,6 +328,7 @@ Returns:
   "state": "string",
   "authorize_url": "https://id.twitch.tv/oauth2/authorize?...",
   "requested_scopes": ["channel:bot", "channel:read:polls", "channel:read:predictions"],
+  "scope_mode": "recommended",
   "expires_in_seconds": 600
 }
 ```
@@ -343,6 +351,58 @@ Returns:
 - Optional list of target EventSub types for this broadcaster grant flow.
 - Service automatically includes required broadcaster scopes for those event types in `requested_scopes`.
 - If omitted, request falls back to baseline `channel:bot`.
+- Important: `requested_scopes` here are broadcaster-grant scopes. Bot token scopes are separate and must be handled via bot OAuth setup.
+
+`scope_mode` behavior:
+- `recommended` (default):
+  - includes baseline `channel:bot` when `include_base_scope=true`,
+  - derives additional recommended scopes from `event_types`.
+- `minimal`:
+  - baseline-only (`channel:bot`) when `include_base_scope=true`.
+- `custom`:
+  - uses caller-provided `custom_scopes`,
+  - includes baseline `channel:bot` only when `include_base_scope=true`.
+
+`custom_scopes` behavior:
+- validated against known Twitch scope names.
+- invalid/unknown scope values return `422`.
+
+### `POST /v1/eventsub/scopes/resolve`
+Purpose:
+- preflight/preview effective OAuth scopes before starting broadcaster authorization.
+
+Request:
+```json
+{
+  "event_types": ["channel.poll.begin", "channel.unban_request.create"],
+  "scope_mode": "recommended",
+  "custom_scopes": null,
+  "include_base_scope": true
+}
+```
+
+Response:
+```json
+{
+  "scope_mode": "recommended",
+  "include_base_scope": true,
+  "requested_event_types": ["channel.poll.begin", "channel.unban_request.create"],
+  "resolved_scopes": ["channel:bot", "channel:read:polls", "moderator:read:unban_requests"],
+  "requirements": [
+    {
+      "event_type": "channel.poll.begin",
+      "required_scope_any_of_groups": [["channel:manage:polls", "channel:read:polls"]],
+      "recommended_scopes": ["channel:read:polls"],
+      "recommended_bot_scopes": []
+    }
+  ]
+}
+```
+
+Scope ownership notes:
+- `resolved_scopes` and `requirements[].recommended_scopes` are intended for broadcaster authorization (`/v1/broadcaster-authorizations/start`).
+- `requirements[].recommended_bot_scopes` are bot-token scope hints and are not automatically requested in broadcaster grant flow.
+- For many channel events, successful subscription may require a combination of broadcaster grant scopes and bot token scopes.
 
 ### `POST /v1/broadcaster-authorizations/start-minimal`
 Request:
@@ -564,7 +624,7 @@ Two behaviors share this endpoint:
 
 For broadcaster auth requests:
 - exchanges code,
-- validates granted scopes include `channel:bot`,
+- validates granted scopes include all scopes originally requested for that authorization request,
 - resolves broadcaster identity from token validation,
 - upserts `broadcaster_authorizations`,
 - marks request completed/failed,

@@ -18,6 +18,13 @@ dependencies = [
   "prompt-toolkit>=3.0.51",
 ]
 
+[project.optional-dependencies]
+test = [
+  "pytest>=8.3.0",
+  "pytest-asyncio>=0.24.0",
+  "pytest-cov>=5.0.0",
+]
+
 [project.scripts]
 twitch-eventsub-api = "app.main:run"
 twitch-eventsub-cli = "app.cli:main"
@@ -28,3 +35,21 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+  "unit: fast deterministic unit tests",
+  "integration: integration tests that use DB/app wiring",
+]
+addopts = "--cov=app --cov-report=term-missing --cov-fail-under=70"
+
+[tool.coverage.run]
+source = ["app"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+fail_under = 70

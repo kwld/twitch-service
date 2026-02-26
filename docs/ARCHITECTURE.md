@@ -130,10 +130,15 @@ Envelope format (current implementation):
 
 ## 9) Broadcaster Authorization Flow
 1. Service calls `POST /v1/broadcaster-authorizations/start`.
-2. API creates `broadcaster_authorization_requests` row and returns Twitch authorize URL.
-3. Broadcaster consents on Twitch.
-4. Twitch redirects to `GET /oauth/callback`.
-5. Callback exchanges code, validates scope `channel:bot`, upserts `broadcaster_authorizations`.
+   - optional `scope_mode`: `recommended` (default), `minimal`, `custom`
+   - optional `event_types` (for recommended scope derivation)
+   - optional `custom_scopes` (for custom mode)
+   - optional `include_base_scope` (`channel:bot`, default `true`)
+2. Optional preflight: service calls `POST /v1/eventsub/scopes/resolve` to inspect computed scopes.
+3. API creates `broadcaster_authorization_requests` row and returns Twitch authorize URL.
+4. Broadcaster consents on Twitch.
+5. Twitch redirects to `GET /oauth/callback`.
+6. Callback exchanges code, validates all requested scopes from the authorization request, upserts `broadcaster_authorizations`.
 
 ## 10) Service User Authentication Flow
 1. Service calls `POST /v1/user-auth/start`.
