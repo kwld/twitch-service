@@ -737,10 +737,8 @@ def recommended_broadcaster_scopes(event_type: str) -> set[str]:
                     chosen = candidate
                     break
             selected.add(chosen or channel_candidates[0])
-            continue
-        # No channel:* option in this group - this is usually bot/mod scope territory.
-        # Keep one deterministic fallback so callers can still inspect requirements.
-        selected.add(sorted(group)[0])
+        # No channel:* option in this group - this belongs to bot-token side.
+        # Do not include it in broadcaster authorization request.
     return selected
 
 
