@@ -394,44 +394,347 @@ def requires_condition_user_id(event_type: str) -> bool:
     return normalized.startswith("channel.chat.") or normalized == "channel.chat_settings.update"
 
 
+KNOWN_TWITCH_SCOPES: frozenset[str] = frozenset(
+    {
+        "analytics:read:extensions",
+        "analytics:read:games",
+        "bits:read",
+        "channel:bot",
+        "channel:edit:commercial",
+        "channel:manage:ads",
+        "channel:manage:broadcast",
+        "channel:manage:extensions",
+        "channel:manage:moderators",
+        "channel:manage:polls",
+        "channel:manage:predictions",
+        "channel:manage:raids",
+        "channel:manage:redemptions",
+        "channel:manage:schedule",
+        "channel:manage:videos",
+        "channel:manage:vips",
+        "channel:moderate",
+        "channel:read:ads",
+        "channel:read:charity",
+        "channel:read:editors",
+        "channel:read:goals",
+        "channel:read:guest_star",
+        "channel:read:hype_train",
+        "channel:read:polls",
+        "channel:read:predictions",
+        "channel:read:redemptions",
+        "channel:read:stream_key",
+        "channel:read:subscriptions",
+        "channel:read:vips",
+        "chat:edit",
+        "chat:read",
+        "clips:edit",
+        "moderation:read",
+        "moderator:manage:announcements",
+        "moderator:manage:automod",
+        "moderator:manage:banned_users",
+        "moderator:manage:blocked_terms",
+        "moderator:manage:chat_messages",
+        "moderator:manage:chat_settings",
+        "moderator:manage:guest_star",
+        "moderator:manage:shield_mode",
+        "moderator:manage:shoutouts",
+        "moderator:manage:unban_requests",
+        "moderator:manage:warnings",
+        "moderator:read:announcements",
+        "moderator:read:automod_settings",
+        "moderator:read:banned_users",
+        "moderator:read:blocked_terms",
+        "moderator:read:chat_settings",
+        "moderator:read:chatters",
+        "moderator:read:followers",
+        "moderator:read:guest_star",
+        "moderator:read:moderators",
+        "moderator:read:shield_mode",
+        "moderator:read:shoutouts",
+        "moderator:read:suspicious_users",
+        "moderator:read:unban_requests",
+        "moderator:read:vips",
+        "moderator:read:warnings",
+        "user:bot",
+        "user:edit",
+        "user:edit:broadcast",
+        "user:manage:blocked_users",
+        "user:manage:chat_color",
+        "user:manage:whispers",
+        "user:read:blocked_users",
+        "user:read:broadcast",
+        "user:read:chat",
+        "user:read:email",
+        "user:read:emotes",
+        "user:read:follows",
+        "user:read:moderated_channels",
+        "user:read:subscriptions",
+        "user:read:whispers",
+        "whispers:edit",
+        "whispers:read",
+    }
+)
+
+_MODERATION_EVENT_SCOPE_ANY_OF: frozenset[str] = frozenset(
+    {
+        "moderator:manage:announcements",
+        "moderator:manage:automod",
+        "moderator:manage:banned_users",
+        "moderator:manage:blocked_terms",
+        "moderator:manage:chat_messages",
+        "moderator:manage:chat_settings",
+        "moderator:manage:shoutouts",
+        "moderator:manage:unban_requests",
+        "moderator:manage:warnings",
+        "moderator:read:automod_settings",
+        "moderator:read:banned_users",
+        "moderator:read:blocked_terms",
+        "moderator:read:chat_settings",
+        "moderator:read:chatters",
+        "moderator:read:followers",
+        "moderator:read:moderators",
+        "moderator:read:shoutouts",
+        "moderator:read:suspicious_users",
+        "moderator:read:unban_requests",
+        "moderator:read:vips",
+        "moderator:read:warnings",
+    }
+)
+
+# Scope matrix derived from Twitch OAuth scopes docs and EventSub subscription types docs.
+# Most entries are "any one of these scopes is accepted by Twitch for this event type".
+_EVENTSUB_SCOPE_ANY_OF: dict[str, tuple[frozenset[str], ...]] = {
+    "automod.message.hold": (frozenset({"moderator:manage:automod"}),),
+    "automod.message.update": (frozenset({"moderator:manage:automod"}),),
+    "automod.settings.update": (frozenset({"moderator:read:automod_settings"}),),
+    "automod.terms.update": (frozenset({"moderator:manage:automod"}),),
+    "channel.ad_break.begin": (frozenset({"channel:read:ads"}),),
+    "channel.ban": (frozenset({"channel:moderate"}),),
+    "channel.bits.use": (frozenset({"bits:read"}),),
+    "channel.channel_points_automatic_reward_redemption.add": (
+        frozenset({"channel:read:redemptions", "channel:manage:redemptions"}),
+    ),
+    "channel.channel_points_custom_reward.add": (
+        frozenset({"channel:read:redemptions", "channel:manage:redemptions"}),
+    ),
+    "channel.channel_points_custom_reward.remove": (
+        frozenset({"channel:read:redemptions", "channel:manage:redemptions"}),
+    ),
+    "channel.channel_points_custom_reward.update": (
+        frozenset({"channel:read:redemptions", "channel:manage:redemptions"}),
+    ),
+    "channel.channel_points_custom_reward_redemption.add": (
+        frozenset({"channel:read:redemptions", "channel:manage:redemptions"}),
+    ),
+    "channel.channel_points_custom_reward_redemption.update": (
+        frozenset({"channel:read:redemptions", "channel:manage:redemptions"}),
+    ),
+    "channel.charity_campaign.donate": (frozenset({"channel:read:charity"}),),
+    "channel.charity_campaign.progress": (frozenset({"channel:read:charity"}),),
+    "channel.charity_campaign.start": (frozenset({"channel:read:charity"}),),
+    "channel.charity_campaign.stop": (frozenset({"channel:read:charity"}),),
+    # Chat-style EventSub: Twitch requires bot/user chat scopes.
+    "channel.chat.clear": (
+        frozenset({"user:read:chat"}),
+        frozenset({"user:bot"}),
+        frozenset({"channel:bot"}),
+    ),
+    "channel.chat.clear_user_messages": (
+        frozenset({"user:read:chat"}),
+        frozenset({"user:bot"}),
+        frozenset({"channel:bot"}),
+    ),
+    "channel.chat.message": (
+        frozenset({"user:read:chat"}),
+        frozenset({"user:bot"}),
+        frozenset({"channel:bot"}),
+    ),
+    "channel.chat.message_delete": (
+        frozenset({"user:read:chat"}),
+        frozenset({"user:bot"}),
+        frozenset({"channel:bot"}),
+    ),
+    "channel.chat.notification": (
+        frozenset({"user:read:chat"}),
+        frozenset({"user:bot"}),
+        frozenset({"channel:bot"}),
+    ),
+    "channel.chat.user_message_hold": (
+        frozenset({"user:read:chat"}),
+        frozenset({"user:bot"}),
+    ),
+    "channel.chat.user_message_update": (
+        frozenset({"user:read:chat"}),
+        frozenset({"user:bot"}),
+    ),
+    "channel.chat_settings.update": (
+        frozenset({"user:read:chat"}),
+        frozenset({"user:bot"}),
+        frozenset({"channel:bot"}),
+    ),
+    "channel.cheer": (frozenset({"bits:read"}),),
+    "channel.follow": (frozenset({"moderator:read:followers"}),),
+    "channel.goal.begin": (frozenset({"channel:read:goals"}),),
+    "channel.goal.end": (frozenset({"channel:read:goals"}),),
+    "channel.goal.progress": (frozenset({"channel:read:goals"}),),
+    "channel.guest_star_guest.update": (
+        frozenset(
+            {
+                "channel:read:guest_star",
+                "channel:manage:guest_star",
+                "moderator:read:guest_star",
+                "moderator:manage:guest_star",
+            }
+        ),
+    ),
+    "channel.guest_star_session.begin": (
+        frozenset(
+            {
+                "channel:read:guest_star",
+                "channel:manage:guest_star",
+                "moderator:read:guest_star",
+                "moderator:manage:guest_star",
+            }
+        ),
+    ),
+    "channel.guest_star_session.end": (
+        frozenset(
+            {
+                "channel:read:guest_star",
+                "channel:manage:guest_star",
+                "moderator:read:guest_star",
+                "moderator:manage:guest_star",
+            }
+        ),
+    ),
+    "channel.guest_star_settings.update": (
+        frozenset(
+            {
+                "channel:read:guest_star",
+                "channel:manage:guest_star",
+                "moderator:read:guest_star",
+                "moderator:manage:guest_star",
+            }
+        ),
+    ),
+    "channel.hype_train.begin": (frozenset({"channel:read:hype_train"}),),
+    "channel.hype_train.end": (frozenset({"channel:read:hype_train"}),),
+    "channel.hype_train.progress": (frozenset({"channel:read:hype_train"}),),
+    "channel.moderate": (_MODERATION_EVENT_SCOPE_ANY_OF,),
+    "channel.moderator.add": (frozenset({"moderation:read"}),),
+    "channel.moderator.remove": (frozenset({"moderation:read"}),),
+    "channel.poll.begin": (frozenset({"channel:read:polls", "channel:manage:polls"}),),
+    "channel.poll.end": (frozenset({"channel:read:polls", "channel:manage:polls"}),),
+    "channel.poll.progress": (frozenset({"channel:read:polls", "channel:manage:polls"}),),
+    "channel.prediction.begin": (
+        frozenset({"channel:read:predictions", "channel:manage:predictions"}),
+    ),
+    "channel.prediction.end": (
+        frozenset({"channel:read:predictions", "channel:manage:predictions"}),
+    ),
+    "channel.prediction.lock": (
+        frozenset({"channel:read:predictions", "channel:manage:predictions"}),
+    ),
+    "channel.prediction.progress": (
+        frozenset({"channel:read:predictions", "channel:manage:predictions"}),
+    ),
+    "channel.shared_chat.begin": (
+        frozenset({"user:read:chat"}),
+        frozenset({"user:bot"}),
+        frozenset({"channel:bot"}),
+    ),
+    "channel.shared_chat.end": (
+        frozenset({"user:read:chat"}),
+        frozenset({"user:bot"}),
+        frozenset({"channel:bot"}),
+    ),
+    "channel.shared_chat.update": (
+        frozenset({"user:read:chat"}),
+        frozenset({"user:bot"}),
+        frozenset({"channel:bot"}),
+    ),
+    "channel.shield_mode.begin": (
+        frozenset({"moderator:read:shield_mode", "moderator:manage:shield_mode"}),
+    ),
+    "channel.shield_mode.end": (
+        frozenset({"moderator:read:shield_mode", "moderator:manage:shield_mode"}),
+    ),
+    "channel.shoutout.create": (
+        frozenset({"moderator:read:shoutouts", "moderator:manage:shoutouts"}),
+    ),
+    "channel.shoutout.receive": (
+        frozenset({"moderator:read:shoutouts", "moderator:manage:shoutouts"}),
+    ),
+    "channel.subscribe": (frozenset({"channel:read:subscriptions"}),),
+    "channel.subscription.end": (frozenset({"channel:read:subscriptions"}),),
+    "channel.subscription.gift": (frozenset({"channel:read:subscriptions"}),),
+    "channel.subscription.message": (frozenset({"channel:read:subscriptions"}),),
+    "channel.suspicious_user.message": (
+        frozenset({"moderator:read:suspicious_users", "moderator:manage:suspicious_users"}),
+    ),
+    "channel.suspicious_user.update": (
+        frozenset({"moderator:read:suspicious_users", "moderator:manage:suspicious_users"}),
+    ),
+    "channel.unban": (frozenset({"channel:moderate"}),),
+    "channel.unban_request.create": (
+        frozenset({"moderator:read:unban_requests", "moderator:manage:unban_requests"}),
+    ),
+    "channel.unban_request.resolve": (
+        frozenset({"moderator:read:unban_requests", "moderator:manage:unban_requests"}),
+    ),
+    "channel.vip.add": (frozenset({"channel:read:vips", "channel:manage:vips"}),),
+    "channel.vip.remove": (frozenset({"channel:read:vips", "channel:manage:vips"}),),
+    "channel.warning.acknowledge": (
+        frozenset({"moderator:read:warnings", "moderator:manage:warnings"}),
+    ),
+    "channel.warning.send": (
+        frozenset({"moderator:read:warnings", "moderator:manage:warnings"}),
+    ),
+    "user.whisper.message": (frozenset({"user:read:whispers", "user:manage:whispers"}),),
+}
+
+_READ_SCOPE_PRIORITY: tuple[str, ...] = (
+    "channel:read:ads",
+    "channel:read:charity",
+    "channel:read:goals",
+    "channel:read:hype_train",
+    "channel:read:polls",
+    "channel:read:predictions",
+    "channel:read:redemptions",
+    "channel:read:subscriptions",
+    "channel:read:vips",
+    "moderator:read:followers",
+    "moderator:read:shield_mode",
+    "moderator:read:shoutouts",
+    "moderator:read:suspicious_users",
+    "moderator:read:unban_requests",
+    "moderator:read:warnings",
+    "moderator:read:automod_settings",
+    "user:read:chat",
+    "user:read:whispers",
+)
+
+
 def required_scope_any_of_groups(event_type: str) -> list[set[str]]:
     normalized = event_type.strip().lower()
-    if normalized.startswith("channel.channel_points_custom_reward"):
-        return [{"channel:read:redemptions", "channel:manage:redemptions"}]
-    if normalized.startswith("channel.channel_points_custom_reward_redemption"):
-        return [{"channel:read:redemptions", "channel:manage:redemptions"}]
-    if normalized.startswith("channel.poll."):
-        return [{"channel:read:polls", "channel:manage:polls"}]
-    if normalized.startswith("channel.prediction."):
-        return [{"channel:read:predictions", "channel:manage:predictions"}]
-    if normalized.startswith("channel.goal."):
-        return [{"channel:read:goals"}]
-    if normalized.startswith("channel.charity_campaign."):
-        return [{"channel:read:charity"}]
-    if normalized == "channel.ad_break.begin":
-        return [{"channel:read:ads"}]
-    if normalized.startswith("channel.hype_train."):
-        return [{"channel:read:hype_train"}]
-    return []
+    groups = _EVENTSUB_SCOPE_ANY_OF.get(normalized, ())
+    return [set(group) for group in groups]
 
 
 def recommended_broadcaster_scopes(event_type: str) -> set[str]:
-    normalized = event_type.strip().lower()
-    if normalized.startswith("channel.channel_points_custom_reward"):
-        return {"channel:read:redemptions"}
-    if normalized.startswith("channel.channel_points_custom_reward_redemption"):
-        return {"channel:read:redemptions"}
-    if normalized.startswith("channel.poll."):
-        return {"channel:read:polls"}
-    if normalized.startswith("channel.prediction."):
-        return {"channel:read:predictions"}
-    if normalized.startswith("channel.goal."):
-        return {"channel:read:goals"}
-    if normalized.startswith("channel.charity_campaign."):
-        return {"channel:read:charity"}
-    if normalized == "channel.ad_break.begin":
-        return {"channel:read:ads"}
-    if normalized.startswith("channel.hype_train."):
-        return {"channel:read:hype_train"}
-    return set()
+    groups = required_scope_any_of_groups(event_type)
+    if not groups:
+        return set()
+
+    selected: set[str] = set()
+    for group in groups:
+        chosen = None
+        for candidate in _READ_SCOPE_PRIORITY:
+            if candidate in group:
+                chosen = candidate
+                break
+        if not chosen:
+            chosen = sorted(group)[0]
+        selected.add(chosen)
+    return selected
 

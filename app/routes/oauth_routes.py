@@ -96,7 +96,12 @@ def register_oauth_routes(
                         raise HTTPException(status_code=502, detail=f"OAuth exchange failed: {exc}") from exc
 
                     granted_scopes = sorted(set(token_info.get("scopes", [])))
-                    required = set(broadcaster_auth_scopes)
+                    requested = {
+                        x.strip()
+                        for x in str(auth_request.requested_scopes_csv or "").split(",")
+                        if x.strip()
+                    }
+                    required = requested or set(broadcaster_auth_scopes)
                     if not required.issubset(set(granted_scopes)):
                         missing_required = ",".join(sorted(required - set(granted_scopes)))
                         auth_request.status = "failed"
@@ -394,4 +399,3 @@ def register_oauth_routes(
             "code_received": True,
             "state_received": bool(state),
         }
-

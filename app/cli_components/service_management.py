@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 import secrets
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.shortcuts import checkboxlist_dialog
 from sqlalchemy import delete, select
 
 from app.auth import generate_client_id, generate_client_secret, hash_secret
-from app.eventsub_catalog import KNOWN_EVENT_TYPES, recommended_broadcaster_scopes
+from app.eventsub_catalog import (
+    EVENTSUB_CATALOG,
+    KNOWN_EVENT_TYPES,
+    recommended_broadcaster_scopes,
+    required_scope_any_of_groups,
+)
 from app.models import (
     BotAccount,
     BroadcasterAuthorization,
@@ -48,6 +55,62 @@ async def select_service_account(session: PromptSession, session_factory):
 
     print("Invalid selection.")
     return None
+
+
+def _eventsub_selector_values() -> list[tuple[str, str]]:
+    by_type: dict[str, str] = {}
+    for entry in EVENTSUB_CATALOG:
+        by_type.setdefault(entry.event_type, entry.title)
+    return [
+        (event_type, f"{event_type} - {title}")
+        for event_type, title in sorted(by_type.items())
+    ]
+
+
+async def select_eventsub_types_checkbox() -> list[str]:
+    values = _eventsub_selector_values()
+    if not values:
+        return []
+
+    def _run_dialog():
+        return checkboxlist_dialog(
+            title="EventSub Scope Generator",
+            text="Select EventSub types with [space], confirm with Enter:",
+            values=values,
+            ok_text="Generate",
+            cancel_text="Cancel",
+        ).run()
+
+    selected = await asyncio.to_thread(_run_dialog)
+    return sorted(selected or [])
+
+
+async def eventsub_scope_generator_menu() -> None:
+    selected_event_types = await select_eventsub_types_checkbox()
+    if not selected_event_types:
+        print("No event types selected.")
+        return
+
+    scope_set = {"channel:bot"}
+    for event_type in selected_event_types:
+        scope_set.update(recommended_broadcaster_scopes(event_type))
+    requested_scope_list = sorted(scope_set)
+
+    print("\nSelected EventSub types:")
+    for event_type in selected_event_types:
+        print(f"- {event_type}")
+
+    print("\nGenerated recommended scope set:")
+    print(", ".join(requested_scope_list))
+
+    print("\nPer-event required scope ANY-OF groups:")
+    for event_type in selected_event_types:
+        groups = required_scope_any_of_groups(event_type)
+        if not groups:
+            print(f"- {event_type}: no explicit OAuth scope requirement")
+            continue
+        formatted_groups = ["|".join(sorted(group)) for group in groups]
+        print(f"- {event_type}: " + " AND ".join(formatted_groups))
 
 
 async def print_service_bot_access(session_factory, service_id) -> None:
@@ -313,8 +376,12 @@ async def authorize_bot_self_channel_menu(
     if not bot:
         return
 
-    raw_event_types = (await session.prompt_async("Event types CSV (optional): ")).strip()
-    requested_event_types = [x.strip().lower() for x in raw_event_types.split(",") if x.strip()]
+    use_selector = (await session.prompt_async("Select EventSub types via [x]/[ ] picker? [Y/n]: ")).strip().lower()
+    if use_selector in {"", "y", "yes"}:
+        requested_event_types = await select_eventsub_types_checkbox()
+    else:
+        raw_event_types = (await session.prompt_async("Event types CSV (optional): ")).strip()
+        requested_event_types = [x.strip().lower() for x in raw_event_types.split(",") if x.strip()]
     invalid = [x for x in requested_event_types if x not in KNOWN_EVENT_TYPES]
     if invalid:
         print("Unsupported event types: " + ", ".join(sorted(set(invalid))))
@@ -389,4 +456,3 @@ async def authorize_bot_self_channel_menu(
             )
         await db.commit()
     print("Broadcaster authorization saved for bot own channel.")
-

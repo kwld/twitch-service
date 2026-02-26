@@ -34,6 +34,7 @@ from app.cli_components.monitoring import (
 from app.cli_components.remote_console import env_bool, normalize_base_url, remote_menu_loop
 from app.cli_components.service_management import (
     authorize_bot_self_channel_menu,
+    eventsub_scope_generator_menu,
     manage_service_accounts_menu,
     select_service_account as _select_service_account,
 )
@@ -145,7 +146,8 @@ async def menu_loop() -> None:
             "13) View tracked channels (online/offline)\n"
             "14) Live service communication tracking\n"
             "15) Authorize bot in own channel (service)\n"
-            "16) Exit\n"
+            "16) EventSub scope generator\n"
+            "17) Exit\n"
         )
         choice = (await session.prompt_async("Select option: ")).strip()
 
@@ -262,6 +264,9 @@ async def menu_loop() -> None:
             )
 
         elif choice == "16":
+            await eventsub_scope_generator_menu()
+
+        elif choice == "17":
             break
 
         else:

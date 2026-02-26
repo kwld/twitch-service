@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import secrets
 import uuid
 from collections.abc import Awaitable, Callable
@@ -12,10 +13,12 @@ from sqlalchemy.exc import IntegrityError
 from app.eventsub_catalog import (
     EVENTSUB_CATALOG,
     KNOWN_EVENT_TYPES,
+    KNOWN_TWITCH_SCOPES,
     SOURCE_SNAPSHOT_DATE,
     SOURCE_URL,
     best_transport_for_service,
     recommended_broadcaster_scopes,
+    required_scope_any_of_groups,
     supported_twitch_transports,
 )
 from app.models import (
@@ -34,7 +37,10 @@ from app.schemas import (
     CreateInterestRequest,
     EventSubCatalogItem,
     EventSubCatalogResponse,
+    EventSubScopeRequirement,
     InterestResponse,
+    ResolveEventSubScopesRequest,
+    ResolveEventSubScopesResponse,
     ServiceSubscriptionItem,
     ServiceSubscriptionsResponse,
     ServiceSubscriptionTransportRow,
@@ -69,6 +75,74 @@ def register_service_routes(
     broadcaster_auth_scopes: tuple[str, ...],
     service_user_auth_scopes: tuple[str, ...],
 ) -> None:
+    scope_value_pattern = re.compile(r"^[a-z][a-z0-9:_-]*$")
+    max_custom_scopes = 64
+    max_scope_value_len = 80
+
+    def _normalize_scopes(raw_scopes: list[str] | None) -> list[str]:
+        if not raw_scopes:
+            return []
+        values = sorted({str(scope).strip() for scope in raw_scopes if str(scope).strip()})
+        if len(values) > max_custom_scopes:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Too many scopes provided (max {max_custom_scopes})",
+            )
+        for scope_value in values:
+            if len(scope_value) > max_scope_value_len:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Scope '{scope_value}' exceeds max length {max_scope_value_len}",
+                )
+            if not scope_value_pattern.match(scope_value):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Scope '{scope_value}' has invalid format",
+                )
+            if scope_value not in KNOWN_TWITCH_SCOPES:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Unsupported Twitch scope '{scope_value}'",
+                )
+        return values
+
+    def _validate_event_types(raw_event_types: list[str] | None) -> list[str]:
+        requested = [str(x).strip().lower() for x in (raw_event_types or []) if str(x).strip()]
+        invalid_types = [x for x in requested if x not in KNOWN_EVENT_TYPES]
+        if invalid_types:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "Unsupported event_types for broadcaster authorization: "
+                    + ", ".join(sorted(set(invalid_types)))
+                ),
+            )
+        return requested
+
+    def _resolve_scope_set(
+        *,
+        scope_mode: str,
+        requested_event_types: list[str],
+        custom_scopes: list[str],
+        include_base_scope: bool,
+    ) -> list[str]:
+        scope_set: set[str] = set()
+        if include_base_scope:
+            scope_set.update(broadcaster_auth_scopes)
+        if scope_mode == "minimal":
+            return sorted(scope_set)
+        if scope_mode == "recommended":
+            for event_type in requested_event_types:
+                scope_set.update(recommended_broadcaster_scopes(event_type))
+            return sorted(scope_set)
+        if scope_mode == "custom":
+            scope_set.update(custom_scopes)
+            return sorted(scope_set)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unsupported scope_mode '{scope_mode}'",
+        )
+
     @app.post("/v1/ws-token")
     async def create_service_ws_token(service: ServiceAccount = Depends(service_auth)):
         ws_token, expires_in_seconds = await issue_ws_token(service.id)
@@ -300,6 +374,7 @@ def register_service_routes(
         bot_account_id: uuid.UUID,
         redirect_url: str | None,
         requested_scopes: list[str],
+        scope_mode: str = "recommended",
     ) -> StartBroadcasterAuthorizationResponse:
         async with session_factory() as session:
             from app.models import BotAccount
@@ -335,6 +410,7 @@ def register_service_routes(
             state=state,
             authorize_url=authorize_url,
             requested_scopes=requested_scopes,
+            scope_mode=scope_mode,
             expires_in_seconds=600,
         )
 
@@ -346,26 +422,26 @@ def register_service_routes(
         req: StartBroadcasterAuthorizationRequest,
         service: ServiceAccount = Depends(service_auth),
     ):
-        requested_event_types = [str(x).strip().lower() for x in (req.event_types or []) if str(x).strip()]
-        invalid_types = [x for x in requested_event_types if x not in KNOWN_EVENT_TYPES]
-        if invalid_types:
+        requested_event_types = _validate_event_types(req.event_types)
+        normalized_custom_scopes = _normalize_scopes(req.custom_scopes)
+        if req.scope_mode == "custom" and not normalized_custom_scopes and not req.include_base_scope:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=(
-                    "Unsupported event_types for broadcaster authorization: "
-                    + ", ".join(sorted(set(invalid_types)))
-                ),
+                detail="custom scope_mode requires custom_scopes or include_base_scope=true",
             )
-        requested_scope_set = set(broadcaster_auth_scopes)
-        for event_type in requested_event_types:
-            requested_scope_set.update(recommended_broadcaster_scopes(event_type))
-        requested_scopes = sorted(requested_scope_set)
+        requested_scopes = _resolve_scope_set(
+            scope_mode=req.scope_mode,
+            requested_event_types=requested_event_types,
+            custom_scopes=normalized_custom_scopes,
+            include_base_scope=req.include_base_scope,
+        )
 
         return await _start_broadcaster_authorization_for_scopes(
             service=service,
             bot_account_id=req.bot_account_id,
             redirect_url=str(req.redirect_url) if req.redirect_url else None,
             requested_scopes=requested_scopes,
+            scope_mode=req.scope_mode,
         )
 
     @app.post(
@@ -382,6 +458,44 @@ def register_service_routes(
             bot_account_id=req.bot_account_id,
             redirect_url=str(req.redirect_url) if req.redirect_url else None,
             requested_scopes=requested_scopes,
+            scope_mode="minimal",
+        )
+
+    @app.post(
+        "/v1/eventsub/scopes/resolve",
+        response_model=ResolveEventSubScopesResponse,
+    )
+    async def resolve_eventsub_scopes(
+        req: ResolveEventSubScopesRequest,
+        _: ServiceAccount = Depends(service_auth),
+    ):
+        requested_event_types = _validate_event_types(req.event_types)
+        normalized_custom_scopes = _normalize_scopes(req.custom_scopes)
+        if req.scope_mode == "custom" and not normalized_custom_scopes and not req.include_base_scope:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="custom scope_mode requires custom_scopes or include_base_scope=true",
+            )
+        resolved_scopes = _resolve_scope_set(
+            scope_mode=req.scope_mode,
+            requested_event_types=requested_event_types,
+            custom_scopes=normalized_custom_scopes,
+            include_base_scope=req.include_base_scope,
+        )
+        requirements = [
+            EventSubScopeRequirement(
+                event_type=event_type,
+                required_scope_any_of_groups=[sorted(group) for group in required_scope_any_of_groups(event_type)],
+                recommended_scopes=sorted(recommended_broadcaster_scopes(event_type)),
+            )
+            for event_type in requested_event_types
+        ]
+        return ResolveEventSubScopesResponse(
+            scope_mode=req.scope_mode,
+            include_base_scope=req.include_base_scope,
+            requested_event_types=requested_event_types,
+            resolved_scopes=resolved_scopes,
+            requirements=requirements,
         )
 
     @app.get(

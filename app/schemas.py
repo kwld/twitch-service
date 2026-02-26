@@ -149,6 +149,9 @@ class StartBroadcasterAuthorizationRequest(BaseModel):
     bot_account_id: uuid.UUID
     redirect_url: HttpUrl | None = None
     event_types: list[str] | None = None
+    scope_mode: Literal["recommended", "minimal", "custom"] = "recommended"
+    custom_scopes: list[str] | None = None
+    include_base_scope: bool = True
 
 
 class StartMinimalBroadcasterAuthorizationRequest(BaseModel):
@@ -160,7 +163,29 @@ class StartBroadcasterAuthorizationResponse(BaseModel):
     state: str
     authorize_url: str
     requested_scopes: list[str]
+    scope_mode: Literal["recommended", "minimal", "custom"] = "recommended"
     expires_in_seconds: int
+
+
+class ResolveEventSubScopesRequest(BaseModel):
+    event_types: list[str] = Field(default_factory=list)
+    scope_mode: Literal["recommended", "minimal", "custom"] = "recommended"
+    custom_scopes: list[str] | None = None
+    include_base_scope: bool = True
+
+
+class EventSubScopeRequirement(BaseModel):
+    event_type: str
+    required_scope_any_of_groups: list[list[str]]
+    recommended_scopes: list[str]
+
+
+class ResolveEventSubScopesResponse(BaseModel):
+    scope_mode: Literal["recommended", "minimal", "custom"]
+    include_base_scope: bool
+    requested_event_types: list[str]
+    resolved_scopes: list[str]
+    requirements: list[EventSubScopeRequirement]
 
 
 class BroadcasterAuthorizationResponse(BaseModel):
