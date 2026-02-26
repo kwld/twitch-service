@@ -13,6 +13,7 @@ from app.auth import generate_client_id, generate_client_secret, hash_secret
 from app.eventsub_catalog import (
     EVENTSUB_CATALOG,
     KNOWN_EVENT_TYPES,
+    recommended_bot_scopes,
     recommended_broadcaster_scopes,
     required_scope_any_of_groups,
 )
@@ -91,10 +92,12 @@ async def eventsub_scope_generator_menu() -> None:
         print("No event types selected.")
         return
 
-    scope_set = {"channel:bot"}
+    broadcaster_scope_set = {"channel:bot"}
+    bot_scope_set: set[str] = set()
     for event_type in selected_event_types:
-        scope_set.update(recommended_broadcaster_scopes(event_type))
-    requested_scope_list = sorted(scope_set)
+        broadcaster_scope_set.update(recommended_broadcaster_scopes(event_type))
+        bot_scope_set.update(recommended_bot_scopes(event_type))
+    requested_scope_list = sorted(broadcaster_scope_set)
 
     print("\nSelected EventSub types:")
     for event_type in selected_event_types:
@@ -102,6 +105,9 @@ async def eventsub_scope_generator_menu() -> None:
 
     print("\nGenerated recommended scope set:")
     print(", ".join(requested_scope_list))
+    if bot_scope_set:
+        print("\nSuggested bot token scope set (separate from broadcaster grant):")
+        print(", ".join(sorted(bot_scope_set)))
 
     print("\nPer-event required scope ANY-OF groups:")
     for event_type in selected_event_types:
@@ -135,6 +141,12 @@ async def _build_authorization_scope_menu(
             scope_set = {"channel:bot"}
             for event_type in selected_event_types:
                 scope_set.update(recommended_broadcaster_scopes(event_type))
+            bot_scope_set: set[str] = set()
+            for event_type in selected_event_types:
+                bot_scope_set.update(recommended_bot_scopes(event_type))
+            if bot_scope_set:
+                print("\nNote: selected events also need bot token scopes:")
+                print(", ".join(sorted(bot_scope_set)))
             return sorted(scope_set), selected_event_types, "recommended"
         if choice == "3":
             raw_custom = (await session.prompt_async("Custom scopes CSV: ")).strip()

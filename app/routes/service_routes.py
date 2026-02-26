@@ -17,6 +17,7 @@ from app.eventsub_catalog import (
     SOURCE_SNAPSHOT_DATE,
     SOURCE_URL,
     best_transport_for_service,
+    recommended_bot_scopes,
     recommended_broadcaster_scopes,
     required_scope_any_of_groups,
     supported_twitch_transports,
@@ -487,6 +488,7 @@ def register_service_routes(
                 event_type=event_type,
                 required_scope_any_of_groups=[sorted(group) for group in required_scope_any_of_groups(event_type)],
                 recommended_scopes=sorted(recommended_broadcaster_scopes(event_type)),
+                recommended_bot_scopes=sorted(recommended_bot_scopes(event_type)),
             )
             for event_type in requested_event_types
         ]

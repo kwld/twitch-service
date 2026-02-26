@@ -178,6 +178,7 @@ class EventSubScopeRequirement(BaseModel):
     event_type: str
     required_scope_any_of_groups: list[list[str]]
     recommended_scopes: list[str]
+    recommended_bot_scopes: list[str] = Field(default_factory=list)
 
 
 class ResolveEventSubScopesResponse(BaseModel):

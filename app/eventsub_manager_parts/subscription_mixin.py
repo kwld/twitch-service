@@ -331,53 +331,74 @@ class EventSubSubscriptionMixin:
                     def _has_required_scopes(scopes: set[str]) -> bool:
                         return all(any(item in scopes for item in group) for group in required_scope_groups)
 
-                    if key.broadcaster_user_id == bot.twitch_user_id:
-                        token_for_check = create_access_token or await ensure_bot_access_token(
-                            session, self.twitch, bot
-                        )
-                        token_info = await self.twitch.validate_user_token(token_for_check)
-                        scopes = set(token_info.get("scopes", []))
-                        if not _has_required_scopes(scopes):
-                            missing = " and ".join(["|".join(sorted(group)) for group in required_scope_groups])
-                            reason = (
-                                "subscription missing proper authorization: "
-                                f"bot token is missing required scope(s) ({missing})"
-                            )
-                            await self._notify_subscription_failure(
-                                key=key,
-                                upstream_transport=upstream_transport,
-                                reason=reason,
-                            )
-                            raise RuntimeError(reason)
-                    else:
+                    missing = " and ".join(["|".join(sorted(group)) for group in required_scope_groups])
+                    combined_scopes: set[str] = set()
+                    broadcaster_scopes: set[str] = set()
+                    bot_scopes: set[str] = set()
+
+                    service_ids = {interest.service_account_id for interest in await self.registry.interested(key)}
+                    if service_ids:
                         auth_rows = list(
                             (
                                 await session.scalars(
                                     select(BroadcasterAuthorization).where(
-                                        BroadcasterAuthorization.bot_account_id == key.bot_account_id,
+                                        BroadcasterAuthorization.service_account_id.in_(service_ids),
                                         BroadcasterAuthorization.broadcaster_user_id == key.broadcaster_user_id,
                                     )
                                 )
                             ).all()
                         )
-                        any_authorized = False
-                        for row in auth_rows:
-                            scopes = {x.strip() for x in row.scopes_csv.split(",") if x.strip()}
-                            if _has_required_scopes(scopes):
-                                any_authorized = True
-                                break
-                        if not any_authorized:
-                            missing = " and ".join(["|".join(sorted(group)) for group in required_scope_groups])
+                    else:
+                        auth_rows = list(
+                            (
+                                await session.scalars(
+                                    select(BroadcasterAuthorization).where(
+                                        BroadcasterAuthorization.broadcaster_user_id == key.broadcaster_user_id,
+                                    )
+                                )
+                            ).all()
+                        )
+                    for row in auth_rows:
+                        broadcaster_scopes.update(
+                            {x.strip() for x in row.scopes_csv.split(",") if x.strip()}
+                        )
+                    combined_scopes.update(broadcaster_scopes)
+
+                    needs_bot_scope_check = (
+                        upstream_transport == "websocket"
+                        or key.broadcaster_user_id == bot.twitch_user_id
+                        or any(any(not scope.startswith("channel:") for scope in group) for group in required_scope_groups)
+                    )
+                    if needs_bot_scope_check:
+                        token_for_check = create_access_token or await ensure_bot_access_token(
+                            session, self.twitch, bot
+                        )
+                        token_info = await self.twitch.validate_user_token(token_for_check)
+                        bot_scopes = {x.strip() for x in token_info.get("scopes", []) if str(x).strip()}
+                        combined_scopes.update(bot_scopes)
+
+                    if not _has_required_scopes(combined_scopes):
+                        if key.broadcaster_user_id == bot.twitch_user_id:
+                            reason = (
+                                "subscription missing proper authorization: "
+                                f"bot token is missing required scope(s) ({missing})"
+                            )
+                        elif not broadcaster_scopes:
                             reason = (
                                 "subscription missing proper authorization: "
                                 f"broadcaster grant is missing required scope(s) ({missing})"
                             )
-                            await self._notify_subscription_failure(
-                                key=key,
-                                upstream_transport=upstream_transport,
-                                reason=reason,
+                        else:
+                            reason = (
+                                "subscription missing proper authorization: "
+                                f"bot token and broadcaster grant scopes do not satisfy required scope(s) ({missing})"
                             )
-                            raise RuntimeError(reason)
+                        await self._notify_subscription_failure(
+                            key=key,
+                            upstream_transport=upstream_transport,
+                            reason=reason,
+                        )
+                        raise RuntimeError(reason)
                 try:
                     created = await self.twitch.create_eventsub_subscription(
                         event_type=key.event_type,

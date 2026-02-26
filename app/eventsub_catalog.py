@@ -728,13 +728,37 @@ def recommended_broadcaster_scopes(event_type: str) -> set[str]:
 
     selected: set[str] = set()
     for group in groups:
+        # Broadcaster grant should prefer channel:* scopes.
+        channel_candidates = sorted([scope for scope in group if scope.startswith("channel:")])
+        if channel_candidates:
+            chosen = None
+            for candidate in _READ_SCOPE_PRIORITY:
+                if candidate in channel_candidates:
+                    chosen = candidate
+                    break
+            selected.add(chosen or channel_candidates[0])
+            continue
+        # No channel:* option in this group - this is usually bot/mod scope territory.
+        # Keep one deterministic fallback so callers can still inspect requirements.
+        selected.add(sorted(group)[0])
+    return selected
+
+
+def recommended_bot_scopes(event_type: str) -> set[str]:
+    groups = required_scope_any_of_groups(event_type)
+    if not groups:
+        return set()
+
+    selected: set[str] = set()
+    for group in groups:
+        non_channel = sorted([scope for scope in group if not scope.startswith("channel:")])
+        if not non_channel:
+            continue
         chosen = None
         for candidate in _READ_SCOPE_PRIORITY:
-            if candidate in group:
+            if candidate in non_channel:
                 chosen = candidate
                 break
-        if not chosen:
-            chosen = sorted(group)[0]
-        selected.add(chosen)
+        selected.add(chosen or non_channel[0])
     return selected
 
