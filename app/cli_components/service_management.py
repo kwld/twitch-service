@@ -113,6 +113,44 @@ async def eventsub_scope_generator_menu() -> None:
         print(f"- {event_type}: " + " AND ".join(formatted_groups))
 
 
+async def _build_authorization_scope_menu(
+    session: PromptSession,
+) -> tuple[list[str], list[str], str]:
+    while True:
+        print(
+            "\nScope Mode\n"
+            "1) Minimal (channel:bot)\n"
+            "2) Recommended from selected EventSub types\n"
+            "3) Custom scopes (CSV)\n"
+            "4) Cancel\n"
+        )
+        choice = (await session.prompt_async("Select option: ")).strip()
+        if choice == "1":
+            return ["channel:bot"], [], "minimal"
+        if choice == "2":
+            selected_event_types = await select_eventsub_types_checkbox()
+            if not selected_event_types:
+                print("No EventSub types selected.")
+                continue
+            scope_set = {"channel:bot"}
+            for event_type in selected_event_types:
+                scope_set.update(recommended_broadcaster_scopes(event_type))
+            return sorted(scope_set), selected_event_types, "recommended"
+        if choice == "3":
+            raw_custom = (await session.prompt_async("Custom scopes CSV: ")).strip()
+            custom_scopes = sorted({x.strip() for x in raw_custom.split(",") if x.strip()})
+            if not custom_scopes:
+                print("No scopes provided.")
+                continue
+            include_base = (await session.prompt_async("Include channel:bot? [Y/n]: ")).strip().lower()
+            if include_base in {"", "y", "yes"}:
+                custom_scopes = sorted(set(custom_scopes) | {"channel:bot"})
+            return custom_scopes, [], "custom"
+        if choice == "4":
+            return [], [], "canceled"
+        print("Invalid option.")
+
+
 async def print_service_bot_access(session_factory, service_id) -> None:
     async with session_factory() as db:
         mappings = list(
@@ -376,23 +414,19 @@ async def authorize_bot_self_channel_menu(
     if not bot:
         return
 
-    use_selector = (await session.prompt_async("Select EventSub types via [x]/[ ] picker? [Y/n]: ")).strip().lower()
-    if use_selector in {"", "y", "yes"}:
-        requested_event_types = await select_eventsub_types_checkbox()
-    else:
-        raw_event_types = (await session.prompt_async("Event types CSV (optional): ")).strip()
-        requested_event_types = [x.strip().lower() for x in raw_event_types.split(",") if x.strip()]
+    requested_scope_list, requested_event_types, scope_mode = await _build_authorization_scope_menu(session)
+    if scope_mode == "canceled" or not requested_scope_list:
+        print("Canceled.")
+        return
     invalid = [x for x in requested_event_types if x not in KNOWN_EVENT_TYPES]
     if invalid:
         print("Unsupported event types: " + ", ".join(sorted(set(invalid))))
         return
 
-    requested_scopes = {"channel:bot"}
-    for event_type in requested_event_types:
-        requested_scopes.update(recommended_broadcaster_scopes(event_type))
-    requested_scope_list = sorted(requested_scopes)
-
     print(f"\nAuthorizing service '{service.name}' for bot '{bot.name}' in bot's own channel.")
+    print(f"Scope mode: {scope_mode}")
+    if requested_event_types:
+        print("Selected EventSub types: " + ", ".join(requested_event_types))
     print("Requested scopes: " + ", ".join(requested_scope_list))
     if not await ask_yes_no_fn(session, "Continue?", default_yes=True):
         return
