@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     loki_port: Optional[int] = Field(default=None, alias="LOKI_PORT")
 
     database_url: str = Field(alias="DATABASE_URL")
+    db_pool_size: int = Field(default=20, alias="DB_POOL_SIZE")
+    db_max_overflow: int = Field(default=20, alias="DB_MAX_OVERFLOW")
+    db_pool_timeout_seconds: int = Field(default=30, alias="DB_POOL_TIMEOUT_SECONDS")
+    db_pool_recycle_seconds: int = Field(default=1800, alias="DB_POOL_RECYCLE_SECONDS")
 
     twitch_client_id: str = Field(alias="TWITCH_CLIENT_ID")
     twitch_client_secret: str = Field(alias="TWITCH_CLIENT_SECRET")
