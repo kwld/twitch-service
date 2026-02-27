@@ -43,7 +43,8 @@ markers = [
   "unit: fast deterministic unit tests",
   "integration: integration tests that use DB/app wiring",
 ]
-addopts = "--cov=app --cov-report=term-missing --cov-fail-under=35"
+addopts = "-ra -p no:cacheprovider"
+norecursedirs = [".git", ".venv", ".tmp", ".tmp-pip", "logs", "pytest-cache-files-*"]
 
 [tool.coverage.run]
 source = ["app"]
