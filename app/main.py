@@ -123,8 +123,15 @@ BROADCASTER_AUTH_SCOPES = ("channel:bot",)
 SERVICE_USER_AUTH_SCOPES = ("user:read:email",)
 WS_TOKEN_TTL = timedelta(minutes=2)
 EVENTSUB_MESSAGE_DEDUP_TTL = timedelta(minutes=10)
+SERVICE_AUTH_CACHE_TTL = timedelta(seconds=60)
+SERVICE_API_STATS_FLUSH_DELAY = 1.0
 ws_token_store = WsTokenStore(ttl=WS_TOKEN_TTL)
 eventsub_message_deduper = EventSubMessageDeduper(ttl=EVENTSUB_MESSAGE_DEDUP_TTL)
+_service_auth_cache_lock = asyncio.Lock()
+_service_auth_cache: dict[str, tuple[datetime, ServiceAccount]] = {}
+_service_api_stats_lock = asyncio.Lock()
+_service_api_pending: dict[uuid.UUID, dict[str, object]] = {}
+_service_api_flush_task: asyncio.Task | None = None
 
 
 def _counter(value: int | None) -> int:
@@ -138,6 +145,96 @@ def _request_client_ip(request: Request) -> str | None:
         request.headers.get("x-forwarded-for"),
         trust_x_forwarded_for=settings.app_trust_x_forwarded_for,
     )
+
+
+def _service_auth_cache_key(client_id: str, client_secret: str) -> str:
+    digest = hashlib.sha256(client_secret.encode("utf-8")).hexdigest()
+    return f"{client_id}:{digest}"
+
+
+async def _get_cached_service_account(
+    client_id: str,
+    client_secret: str,
+) -> ServiceAccount | None:
+    cache_key = _service_auth_cache_key(client_id, client_secret)
+    now = datetime.now(UTC)
+    async with _service_auth_cache_lock:
+        cached = _service_auth_cache.get(cache_key)
+        if not cached:
+            return None
+        expires_at, service = cached
+        if expires_at <= now:
+            _service_auth_cache.pop(cache_key, None)
+            return None
+        return service
+
+
+async def _store_cached_service_account(
+    client_id: str,
+    client_secret: str,
+    service: ServiceAccount,
+) -> ServiceAccount:
+    cache_key = _service_auth_cache_key(client_id, client_secret)
+    awaitable_service = service
+    async with _service_auth_cache_lock:
+        _service_auth_cache[cache_key] = (
+            datetime.now(UTC) + SERVICE_AUTH_CACHE_TTL,
+            awaitable_service,
+        )
+    return awaitable_service
+
+
+async def _flush_service_api_stats_once() -> None:
+    global _service_api_flush_task
+    await asyncio.sleep(SERVICE_API_STATS_FLUSH_DELAY)
+    while True:
+        async with _service_api_stats_lock:
+            pending = _service_api_pending.copy()
+            _service_api_pending.clear()
+        if not pending:
+            _service_api_flush_task = None
+            return
+
+        async with session_factory() as session:
+            for service_account_id, payload in pending.items():
+                service_exists = await session.scalar(
+                    select(ServiceAccount.id).where(ServiceAccount.id == service_account_id)
+                )
+                if not service_exists:
+                    logger.info(
+                        "Skipping API runtime stats update for missing service account %s",
+                        service_account_id,
+                    )
+                    continue
+                stats = await session.get(ServiceRuntimeStats, service_account_id)
+                if not stats:
+                    stats = ServiceRuntimeStats(service_account_id=service_account_id)
+                    session.add(stats)
+                stats.total_api_requests = _counter(stats.total_api_requests) + int(payload.get("count", 0) or 0)
+                stats.last_api_request_at = payload.get("last_seen_at") or datetime.now(UTC)
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                logger.warning("Batched API runtime stats flush failed due to FK race")
+
+
+async def _note_service_api_request(service_account_id: uuid.UUID) -> None:
+    global _service_api_flush_task
+    now = datetime.now(UTC)
+    async with _service_api_stats_lock:
+        payload = _service_api_pending.setdefault(
+            service_account_id,
+            {"count": 0, "last_seen_at": now},
+        )
+        payload["count"] = int(payload.get("count", 0) or 0) + 1
+        payload["last_seen_at"] = now
+        should_schedule = _service_api_flush_task is None or _service_api_flush_task.done()
+        if should_schedule:
+            _service_api_flush_task = asyncio.create_task(
+                _flush_service_api_stats_once(),
+                name="service-api-stats-flush",
+            )
 
 
 async def _issue_ws_token(service_account_id: uuid.UUID) -> tuple[str, int]:
@@ -161,17 +258,14 @@ async def _service_auth(
     x_client_id: str = Header(default=""),
     x_client_secret: str = Header(default=""),
 ) -> ServiceAccount:
-    async with session_factory() as session:
-        service = await authenticate_service(session, x_client_id, x_client_secret)
-        stats = await session.get(ServiceRuntimeStats, service.id)
-        now = datetime.now(UTC)
-        if not stats:
-            stats = ServiceRuntimeStats(service_account_id=service.id)
-            session.add(stats)
-        stats.total_api_requests = _counter(stats.total_api_requests) + 1
-        stats.last_api_request_at = now
-        await session.commit()
-        return service
+    service = await _get_cached_service_account(x_client_id, x_client_secret)
+    if not service:
+        async with session_factory() as session:
+            service = await authenticate_service(session, x_client_id, x_client_secret)
+            session.expunge(service)
+        service = await _store_cached_service_account(x_client_id, x_client_secret, service)
+    await _note_service_api_request(service.id)
+    return service
 
 
 async def _update_runtime_stats(service_account_id: uuid.UUID, mutator) -> None:
