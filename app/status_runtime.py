@@ -22,7 +22,7 @@ class StatusLogHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            if record.name.startswith("eventsub.audit") or record.name.startswith("httpx"):
+            if self._should_skip(record):
                 return
             if record.levelno < logging.INFO:
                 return
@@ -36,6 +36,17 @@ class StatusLogHandler(logging.Handler):
             )
         except Exception:
             return
+
+    @staticmethod
+    def _should_skip(record: logging.LogRecord) -> bool:
+        name = str(record.name or "")
+        message = str(record.getMessage() or "")
+        lower = message.lower()
+        if name.startswith("eventsub.audit") or name.startswith("httpx") or name.startswith("uvicorn.access"):
+            return True
+        if any(token in lower for token in ("get /status", "post /status", "/ws/status", "status_snapshot")):
+            return True
+        return False
 
 
 class StatusRuntime:

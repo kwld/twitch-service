@@ -461,6 +461,19 @@ class EventSubSubscriptionMixin:
                     )
                     session.add(new_sub)
                     await session.commit()
+                    interested = await self.registry.interested(key)
+                    service_ids = sorted({str(interest.service_account_id) for interest in interested})
+                    downstream_transports = sorted({str(interest.transport) for interest in interested})
+                    logger.info(
+                        "EventSub subscription ensured: event=%s broadcaster=%s upstream=%s downstream=%s services=%d service_ids=%s subscription=%s",
+                        key.event_type,
+                        key.broadcaster_user_id,
+                        upstream_transport,
+                        ",".join(downstream_transports) or "-",
+                        len(service_ids),
+                        ",".join(service_ids) or "-",
+                        created["id"],
+                    )
         finally:
             await self._release_subscription_key_lock(key, lock)
 

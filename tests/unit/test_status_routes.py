@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -170,11 +171,59 @@ def build_app():
             ServiceEventTrace(
                 id=uuid.uuid4(),
                 service_account_id=service_id,
+                direction="incoming",
+                local_transport="twitch_eventsub",
+                event_type="channel.chat.message",
+                target="/eventsub/ws",
+                payload_json=json.dumps(
+                    {
+                        "subscription": {
+                            "condition": {
+                                "broadcaster_user_id": "1316870220",
+                            }
+                        },
+                        "event": {
+                            "broadcaster_user_id": "1316870220",
+                            "broadcaster_user_login": "bakusiowa_vibe",
+                            "message": {"text": "!ax"},
+                        },
+                    }
+                ),
+                created_at=now,
+            ),
+            ServiceEventTrace(
+                id=uuid.uuid4(),
+                service_account_id=service_id,
                 direction="outgoing",
                 local_transport="websocket",
                 event_type="channel.chat.message",
                 target="/ws/events",
-                payload_json="{}",
+                payload_json=json.dumps(
+                    {
+                        "event": {
+                            "broadcaster_user_id": "1316870220",
+                            "broadcaster_user_login": "bakusiowa_vibe",
+                            "message": {"text": "Hello World"},
+                        }
+                    }
+                ),
+                created_at=now,
+            ),
+            ServiceEventTrace(
+                id=uuid.uuid4(),
+                service_account_id=service_id,
+                direction="incoming",
+                local_transport="twitch_eventsub",
+                event_type="stream.online",
+                target="/eventsub/ws",
+                payload_json=json.dumps(
+                    {
+                        "event": {
+                            "broadcaster_user_id": "1316870220",
+                            "broadcaster_user_login": "bakusiowa_vibe",
+                        }
+                    }
+                ),
                 created_at=now,
             )
         ],
@@ -216,6 +265,8 @@ def test_status_get_returns_html_dashboard():
     assert resp.status_code == 200
     assert "Runtime Status" in resp.text
     assert "/ws/status" in resp.text
+    assert "Live Event Feed" in resp.text
+    assert "Pause" in resp.text
 
 
 def test_status_post_returns_json_snapshot_with_masking():
@@ -229,6 +280,17 @@ def test_status_post_returns_json_snapshot_with_masking():
     assert payload["services"]["rows"][0]["name"] == "main-app"
     assert payload["broadcasters"][0]["title_masked"] != "Very Secret Stream Title"
     assert payload["broadcasters"][0]["broadcaster_user_id_masked"] != "1316870220"
+    assert payload["broadcasters"][0]["broadcaster_label"].startswith("chan:")
+    assert payload["broadcasters"][0]["broadcaster_label"] != "chan:bakusiowa_vibe"
+    assert payload["broadcasters"][0]["messages_received"] == 1
+    assert payload["broadcasters"][0]["messages_sent"] == 1
+    assert payload["broadcasters"][0]["eventsub_count"] >= 1
+    assert "channel.chat.message" in payload["broadcasters"][0]["eventsub_names"]
+    assert payload["recent_events"][0]["service_name"] == "main-app"
+    assert payload["recent_events"][0]["broadcaster_label"].startswith("chan:")
+    assert payload["recent_events"][0]["broadcaster_label"] != "chan:bakusiowa_vibe"
+    assert payload["recent_events"][0]["broadcaster_user_id_masked"] != "1316870220"
+    assert "broadcaster_user_login" in payload["recent_events"][0]["body_pretty"]
 
 
 def test_status_websocket_emits_snapshot():

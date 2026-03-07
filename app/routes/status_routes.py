@@ -99,6 +99,9 @@ STATUS_HTML = """<!doctype html>
                 <tr>
                   <th>Broadcaster</th>
                   <th>Live</th>
+                  <th>In</th>
+                  <th>Out</th>
+                  <th>EventSub</th>
                   <th>Title</th>
                   <th>Game</th>
                   <th>Updated</th>
@@ -117,7 +120,35 @@ STATUS_HTML = """<!doctype html>
           <div id="logs-list" class="log-list"></div>
         </section>
       </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Live Event Feed</h2>
+          <div class="panel-actions">
+            <div id="events-meta" class="panel-meta"></div>
+            <button id="events-pause-toggle" class="ghost-button" type="button">Pause</button>
+          </div>
+        </div>
+        <div id="events-list" class="event-list"></div>
+      </section>
     </div>
+  </div>
+  <div id="events-modal" class="modal-shell hidden" aria-hidden="true">
+    <div id="events-modal-backdrop" class="modal-backdrop"></div>
+    <section class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="events-modal-title">
+      <div class="modal-head">
+        <div>
+          <p class="eyebrow">Broadcaster EventSub</p>
+          <h2 id="events-modal-title">Attached Event Types</h2>
+        </div>
+        <button id="events-modal-close" class="ghost-button" type="button">Close</button>
+      </div>
+      <div class="modal-meta">
+        <strong id="events-modal-label">chan:unknown</strong>
+        <span id="events-modal-id" class="muted mono">n/a</span>
+      </div>
+      <div id="events-modal-list" class="compact-list"></div>
+    </section>
   </div>
   <script src="/static/status.js?v=1" defer></script>
 </body>
@@ -140,6 +171,17 @@ def _short_id(value: str | None, *, left: int = 4, right: int = 4) -> str:
     return f"{raw[:left]}...{raw[-right:]}"
 
 
+def _mask_id(value: str | None, *, left: int = 2, right: int = 2) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "n/a"
+    if len(raw) <= left + right:
+        if len(raw) <= 2:
+            return "*" * len(raw)
+        return f"{raw[:1]}***{raw[-1:]}"
+    return f"{raw[:left]}***{raw[-right:]}"
+
+
 def _mask_name(value: str | None) -> str:
     raw = str(value or "").strip()
     if not raw:
@@ -156,6 +198,56 @@ def _mask_title(value: str | None) -> str:
     if len(raw) <= 18:
         return f"{raw[:8]}…"
     return f"{raw[:12]}…{raw[-4:]}"
+
+
+def _safe_json_loads(value: str | None) -> dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _trace_event_payload(trace: ServiceEventTrace) -> dict[str, Any]:
+    payload = _safe_json_loads(trace.payload_json)
+    event = payload.get("event")
+    if isinstance(event, dict):
+        return event
+    return payload
+
+
+def _trace_broadcaster_user_id(trace: ServiceEventTrace) -> str | None:
+    event = _trace_event_payload(trace)
+    raw = event.get("broadcaster_user_id")
+    if raw is None:
+        subscription = _safe_json_loads(trace.payload_json).get("subscription")
+        if isinstance(subscription, dict):
+            condition = subscription.get("condition")
+            if isinstance(condition, dict):
+                raw = condition.get("broadcaster_user_id")
+    value = str(raw or "").strip()
+    return value or None
+
+
+def _trace_broadcaster_login(trace: ServiceEventTrace) -> str | None:
+    event = _trace_event_payload(trace)
+    for key in ("broadcaster_user_login", "broadcaster_login", "broadcaster"):
+        value = str(event.get(key, "")).strip()
+        if value:
+            return value
+    return None
+
+
+def _format_trace_body(payload_json: str | None) -> str:
+    payload = _safe_json_loads(payload_json)
+    if not payload:
+        return "{}"
+    try:
+        return json.dumps(payload, indent=2, ensure_ascii=True, sort_keys=True)
+    except Exception:
+        return str(payload_json or "{}")
 
 
 def _relative_age(value: datetime | None) -> str:
@@ -210,13 +302,14 @@ def register_status_routes(
             traces = list(
                 (
                     await session.scalars(
-                        select(ServiceEventTrace).order_by(ServiceEventTrace.created_at.desc()).limit(40)
+                        select(ServiceEventTrace).order_by(ServiceEventTrace.created_at.desc()).limit(400)
                     )
                 ).all()
             )
             sub_rows = list((await session.scalars(select(TwitchSubscription))).all())
 
         stats_by_service = {row.service_account_id: row for row in stats_rows}
+        service_name_by_id = {str(service.id): service.name for service in services}
         working_by_service: dict[str, int] = {}
         interests_by_service: dict[str, int] = {}
         access_by_service: dict[str, int] = {}
@@ -237,6 +330,38 @@ def register_status_routes(
 
         active_snapshot, active_cached_at = await eventsub_manager.get_db_active_subscriptions_snapshot()
         eventsub_summary = await eventsub_manager.get_status_summary()
+
+        broadcaster_names: dict[str, str] = {}
+        message_counts_by_broadcaster: dict[str, dict[str, int]] = {}
+        for trace in traces:
+            broadcaster_user_id = _trace_broadcaster_user_id(trace)
+            if not broadcaster_user_id:
+                continue
+            broadcaster_login = _trace_broadcaster_login(trace)
+            if broadcaster_login and broadcaster_user_id not in broadcaster_names:
+                broadcaster_names[broadcaster_user_id] = broadcaster_login
+            if trace.event_type != "channel.chat.message":
+                continue
+            counters = message_counts_by_broadcaster.setdefault(
+                broadcaster_user_id,
+                {"messages_received": 0, "messages_sent": 0},
+            )
+            if trace.direction == "incoming":
+                counters["messages_received"] += 1
+            elif trace.direction == "outgoing":
+                counters["messages_sent"] += 1
+
+        eventsub_names_by_broadcaster: dict[str, set[str]] = {}
+        for row in active_snapshot:
+            broadcaster_user_id = str(row.get("broadcaster_user_id", "")).strip()
+            event_type = str(row.get("event_type", "")).strip()
+            if broadcaster_user_id and event_type:
+                eventsub_names_by_broadcaster.setdefault(broadcaster_user_id, set()).add(event_type)
+        for row in working_interests:
+            broadcaster_user_id = str(row.broadcaster_user_id).strip()
+            event_type = str(row.event_type).strip()
+            if broadcaster_user_id and event_type:
+                eventsub_names_by_broadcaster.setdefault(broadcaster_user_id, set()).add(event_type)
 
         service_rows = []
         for service in services:
@@ -273,15 +398,26 @@ def register_status_routes(
 
         broadcaster_rows = []
         for state in sorted(channel_states, key=lambda item: (not item.is_live, item.broadcaster_user_id))[:30]:
+            broadcaster_user_id = str(state.broadcaster_user_id).strip()
+            broadcaster_login = broadcaster_names.get(broadcaster_user_id)
+            eventsub_names = sorted(eventsub_names_by_broadcaster.get(broadcaster_user_id, set()))
+            message_counts = message_counts_by_broadcaster.get(
+                broadcaster_user_id,
+                {"messages_received": 0, "messages_sent": 0},
+            )
             broadcaster_rows.append(
                 {
-                    "broadcaster_user_id_masked": _short_id(state.broadcaster_user_id),
-                    "broadcaster_label": f"chan:{_mask_name(state.broadcaster_user_id)}",
+                    "broadcaster_user_id_masked": _mask_id(broadcaster_user_id),
+                    "broadcaster_label": f"chan:{_mask_name(broadcaster_login or broadcaster_user_id)}",
                     "is_live": bool(state.is_live),
                     "title_masked": _mask_title(state.title),
                     "game_name": state.game_name or "-",
                     "last_checked_at": _fmt_dt(state.last_checked_at),
                     "last_checked_human": _relative_age(state.last_checked_at),
+                    "messages_received": int(message_counts["messages_received"]),
+                    "messages_sent": int(message_counts["messages_sent"]),
+                    "eventsub_count": len(eventsub_names),
+                    "eventsub_names": eventsub_names,
                 }
             )
 
@@ -295,6 +431,27 @@ def register_status_routes(
                     "transport": trace.local_transport,
                     "event_type": trace.event_type,
                     "target": trace.target,
+                }
+            )
+
+        recent_event_rows = []
+        for trace in traces[:80]:
+            broadcaster_user_id = _trace_broadcaster_user_id(trace)
+            broadcaster_login = _trace_broadcaster_login(trace)
+            recent_event_rows.append(
+                {
+                    "timestamp": _fmt_dt(trace.created_at),
+                    "service_name": service_name_by_id.get(str(trace.service_account_id), "unknown"),
+                    "service_account_id_masked": _short_id(str(trace.service_account_id)),
+                    "direction": trace.direction,
+                    "transport": trace.local_transport,
+                    "event_type": trace.event_type,
+                    "target": trace.target or "-",
+                    "broadcaster_label": f"chan:{_mask_name(broadcaster_login or broadcaster_user_id)}"
+                    if (broadcaster_login or broadcaster_user_id)
+                    else "chan:unknown",
+                    "broadcaster_user_id_masked": _mask_id(broadcaster_user_id),
+                    "body_pretty": _format_trace_body(trace.payload_json),
                 }
             )
 
@@ -375,6 +532,7 @@ def register_status_routes(
             },
             "bots": bot_summary,
             "broadcasters": broadcaster_rows,
+            "recent_events": recent_event_rows,
             "logs": status_runtime.get_recent_logs(80),
         }
 

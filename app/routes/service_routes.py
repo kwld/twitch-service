@@ -819,7 +819,29 @@ def register_service_routes(
 
         key = await interest_registry.add(interest)
         if not created_interest:
+            logger.info(
+                "Service interest refreshed: service=%s name=%s bot=%s broadcaster=%s event=%s downstream=%s upstream=%s target=%s",
+                service.id,
+                service.name,
+                req.bot_account_id,
+                broadcaster_user_id,
+                event_type,
+                req.transport,
+                eventsub_manager._transport_for_event(event_type),
+                webhook_url or "/ws/events",
+            )
             return interest
+        logger.info(
+            "Service interest created: service=%s name=%s bot=%s broadcaster=%s event=%s downstream=%s upstream=%s target=%s",
+            service.id,
+            service.name,
+            req.bot_account_id,
+            broadcaster_user_id,
+            event_type,
+            req.transport,
+            eventsub_manager._transport_for_event(event_type),
+            webhook_url or "/ws/events",
+        )
         try:
             await eventsub_manager.on_interest_added(key)
         except Exception as exc:
@@ -863,6 +885,16 @@ def register_service_routes(
             interest = await session.get(ServiceInterest, interest_id)
             if not interest or interest.service_account_id != service.id:
                 raise HTTPException(status_code=404, detail="Interest not found")
+            logger.info(
+                "Service interest deleted: service=%s name=%s bot=%s broadcaster=%s event=%s downstream=%s target=%s",
+                service.id,
+                service.name,
+                interest.bot_account_id,
+                interest.broadcaster_user_id,
+                interest.event_type,
+                interest.transport,
+                interest.webhook_url or "/ws/events",
+            )
             await session.delete(interest)
             await session.commit()
         key, still_used = await interest_registry.remove(interest)
@@ -893,6 +925,13 @@ def register_service_routes(
                 target.stale_marked_at = None
                 target.delete_after = None
             await session.commit()
+        logger.info(
+            "Interest heartbeat refreshed: service=%s name=%s touched=%d broadcaster=%s",
+            service.id,
+            service.name,
+            len(touch_targets),
+            interest.broadcaster_user_id,
+        )
         return {"ok": True, "touched": len(touch_targets)}
 
     @app.post("/v1/interests/heartbeat")
@@ -912,4 +951,10 @@ def register_service_routes(
                 target.stale_marked_at = None
                 target.delete_after = None
             await session.commit()
+        logger.info(
+            "Interest heartbeat refreshed for all service interests: service=%s name=%s touched=%d",
+            service.id,
+            service.name,
+            len(touch_targets),
+        )
         return {"ok": True, "touched": len(touch_targets)}

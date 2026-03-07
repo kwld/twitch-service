@@ -316,7 +316,11 @@ async def _on_service_connect(service_account_id: uuid.UUID) -> None:
 
     await _update_runtime_stats(service_account_id, _mutator)
     active = await event_hub.active_connections(service_account_id)
-    logger.info("Service websocket connected: service_id=%s active_connections=%d", service_account_id, active)
+    logger.info(
+        "Service websocket connected: service_id=%s active_connections=%d transport=websocket kind=service_connect",
+        service_account_id,
+        active,
+    )
 
 
 async def _on_service_disconnect(service_account_id: uuid.UUID) -> None:
@@ -329,7 +333,11 @@ async def _on_service_disconnect(service_account_id: uuid.UUID) -> None:
 
     await _update_runtime_stats(service_account_id, _mutator)
     active = await event_hub.active_connections(service_account_id)
-    logger.info("Service websocket disconnected: service_id=%s active_connections=%d", service_account_id, active)
+    logger.warning(
+        "Service websocket disconnected: service_id=%s active_connections=%d kind=service_disconnect",
+        service_account_id,
+        active,
+    )
 
 
 async def _on_service_ws_event(service_account_id: uuid.UUID) -> None:

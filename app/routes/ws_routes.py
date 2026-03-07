@@ -58,7 +58,11 @@ def register_ws_routes(
         if not service or not service.enabled:
             await websocket.close(code=4401)
             return
-        logger.info("Incoming /ws/events connection accepted for service_id=%s", service.id)
+        logger.info(
+            "Incoming /ws/events connection accepted: service_id=%s service_name=%s",
+            service.id,
+            service.name,
+        )
         await record_service_trace(
             service_account_id=service.id,
             direction="incoming",
@@ -80,6 +84,11 @@ def register_ws_routes(
             pass
         finally:
             await event_hub.disconnect(service.id, websocket)
+            logger.warning(
+                "Service /ws/events connection closed: service_id=%s service_name=%s",
+                service.id,
+                service.name,
+            )
             await record_service_trace(
                 service_account_id=service.id,
                 direction="incoming",
@@ -125,4 +134,3 @@ def register_ws_routes(
         await websocket.accept()
         await websocket.send_text(WS_ENDPOINT_MISMATCH_MESSAGE)
         await websocket.close(code=4404)
-

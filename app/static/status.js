@@ -19,11 +19,23 @@
     broadcasterTable: document.getElementById("broadcaster-table"),
     logsMeta: document.getElementById("logs-meta"),
     logsList: document.getElementById("logs-list"),
+    eventsMeta: document.getElementById("events-meta"),
+    eventsList: document.getElementById("events-list"),
+    eventsPauseToggle: document.getElementById("events-pause-toggle"),
+    eventsModal: document.getElementById("events-modal"),
+    eventsModalBackdrop: document.getElementById("events-modal-backdrop"),
+    eventsModalClose: document.getElementById("events-modal-close"),
+    eventsModalLabel: document.getElementById("events-modal-label"),
+    eventsModalId: document.getElementById("events-modal-id"),
+    eventsModalList: document.getElementById("events-modal-list"),
   };
 
   let reconnectDelay = 1000;
   let reconnectTimer = null;
   let socket = null;
+  let currentBroadcasters = [];
+  let eventsPaused = false;
+  let pausedEvents = [];
 
   function fmtDate(value) {
     if (!value) return "-";
@@ -104,16 +116,25 @@
   }
 
   function renderBroadcasters(rows) {
-    el.broadcasterMeta.textContent = `${(rows || []).length} masked channels`;
-    el.broadcasterTable.innerHTML = (rows || []).map((row) => `
+    currentBroadcasters = Array.isArray(rows) ? rows.slice() : [];
+    el.broadcasterMeta.textContent = `${currentBroadcasters.length} masked channels`;
+    el.broadcasterTable.innerHTML = currentBroadcasters.map((row, idx) => `
       <tr>
         <td><strong>${row.broadcaster_label}</strong><div class="muted mono">${row.broadcaster_user_id_masked}</div></td>
         <td>${row.is_live ? '<span class="badge badge-good">live</span>' : '<span class="badge badge-info">idle</span>'}</td>
+        <td><strong>${row.messages_received || 0}</strong></td>
+        <td><strong>${row.messages_sent || 0}</strong></td>
+        <td>
+          <div class="eventsub-cell">
+            <span class="badge badge-info">${row.eventsub_count || 0}</span>
+            <button class="ghost-button" type="button" data-broadcaster-index="${idx}">View</button>
+          </div>
+        </td>
         <td>${row.title_masked}</td>
         <td>${row.game_name}</td>
         <td>${row.last_checked_human}</td>
       </tr>
-    `).join("") || `<tr><td colspan="5" class="muted">No broadcaster state rows.</td></tr>`;
+    `).join("") || `<tr><td colspan="8" class="muted">No broadcaster state rows.</td></tr>`;
   }
 
   function renderLogs(logs) {
@@ -131,6 +152,31 @@
     `).join("") || `<div class="log-row"><div class="muted">No logs buffered yet.</div></div>`;
   }
 
+  function renderEvents(rows) {
+    const items = Array.isArray(rows) ? rows : [];
+    el.eventsMeta.textContent = `${items.length} buffered events${eventsPaused ? " | paused" : ""}`;
+    el.eventsList.innerHTML = items.map((row) => `
+      <details class="event-row">
+        <summary class="event-summary">
+          <div class="event-main">
+            <span class="badge ${row.direction === "incoming" ? "badge-good" : "badge-info"}">${row.direction}</span>
+            <strong>${row.event_type}</strong>
+            <span class="muted">${row.broadcaster_label}</span>
+          </div>
+          <div class="event-side">
+            <span class="muted">${row.service_name}</span>
+            <span class="muted">${fmtDate(row.timestamp)}</span>
+          </div>
+        </summary>
+        <div class="event-meta">
+          <div class="muted mono">${row.broadcaster_user_id_masked} • ${row.transport} • ${row.target}</div>
+          <div class="muted mono">${row.service_account_id_masked}</div>
+        </div>
+        <pre class="event-body">${row.body_pretty}</pre>
+      </details>
+    `).join("") || `<div class="log-row"><div class="muted">No traced events yet.</div></div>`;
+  }
+
   function render(snapshot) {
     el.generatedAt.textContent = `snapshot ${fmtDate(snapshot.generated_at)}`;
     renderSummary(snapshot.summary_cards || []);
@@ -138,7 +184,36 @@
     renderServices(snapshot.services || { rows: [] });
     renderEventSub(snapshot.eventsub || {});
     renderBroadcasters(snapshot.broadcasters || []);
+    if (!eventsPaused) {
+      pausedEvents = Array.isArray(snapshot.recent_events) ? snapshot.recent_events : [];
+      renderEvents(pausedEvents);
+    } else if (!el.eventsList.innerHTML) {
+      renderEvents(pausedEvents);
+    } else {
+      el.eventsMeta.textContent = `${pausedEvents.length} buffered events | paused`;
+    }
     renderLogs(snapshot.logs || []);
+  }
+
+  function closeEventsModal() {
+    el.eventsModal.classList.add("hidden");
+    el.eventsModal.setAttribute("aria-hidden", "true");
+  }
+
+  function openEventsModal(row) {
+    const names = Array.isArray(row && row.eventsub_names) ? row.eventsub_names : [];
+    el.eventsModalLabel.textContent = row && row.broadcaster_label ? row.broadcaster_label : "chan:unknown";
+    el.eventsModalId.textContent = row && row.broadcaster_user_id_masked ? row.broadcaster_user_id_masked : "n/a";
+    el.eventsModalList.innerHTML = names.map((name) => `
+      <div class="compact-item">
+        <div class="compact-top">
+          <strong>${name}</strong>
+          <span class="badge badge-info">attached</span>
+        </div>
+      </div>
+    `).join("") || `<div class="compact-item"><div class="muted">No attached EventSub names.</div></div>`;
+    el.eventsModal.classList.remove("hidden");
+    el.eventsModal.setAttribute("aria-hidden", "false");
   }
 
   async function loadInitial() {
@@ -190,6 +265,32 @@
       try { socket.close(); } catch (_err) {}
     });
   }
+
+  el.broadcasterTable.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-broadcaster-index]");
+    if (!button) return;
+    const idx = Number(button.dataset.broadcasterIndex);
+    if (!Number.isInteger(idx) || idx < 0 || idx >= currentBroadcasters.length) return;
+    openEventsModal(currentBroadcasters[idx]);
+  });
+
+  el.eventsModalClose.addEventListener("click", closeEventsModal);
+  el.eventsModalBackdrop.addEventListener("click", closeEventsModal);
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !el.eventsModal.classList.contains("hidden")) {
+      closeEventsModal();
+    }
+  });
+
+  el.eventsPauseToggle.addEventListener("click", () => {
+    eventsPaused = !eventsPaused;
+    el.eventsPauseToggle.textContent = eventsPaused ? "Resume" : "Pause";
+    if (!eventsPaused) {
+      renderEvents(pausedEvents);
+    } else {
+      el.eventsMeta.textContent = `${pausedEvents.length} buffered events | paused`;
+    }
+  });
 
   loadInitial().catch((err) => {
     console.error(err);
