@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -11,7 +12,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from sqlalchemy import select
 
 from app.bot_auth import ensure_bot_access_token
-from app.models import BotAccount, ChannelState, ServiceAccount, ServiceInterest
+from app.models import BotAccount, ChannelState, ServiceAccount, ServiceEventTrace, ServiceInterest
 from app.schemas import CreateClipRequest, CreateClipResponse, SendChatMessageRequest, SendChatMessageResponse
 
 logger = logging.getLogger(__name__)
@@ -33,6 +34,35 @@ def register_twitch_routes(
     login_cache: dict[str, tuple[str, str, datetime]] = {}
     login_cache_guard = asyncio.Lock()
     login_lookup_locks: dict[str, asyncio.Lock] = {}
+
+    async def _record_twitch_action(
+        *,
+        service_account_id: uuid.UUID,
+        event_type: str,
+        target: str,
+        payload: object,
+    ) -> None:
+        try:
+            payload_json = json.dumps(payload, default=str)
+            if len(payload_json) > 12000:
+                payload_json = payload_json[:12000] + "... [truncated]"
+            async with session_factory() as session:
+                service_row = await session.get(ServiceAccount, service_account_id)
+                if not service_row:
+                    return
+                session.add(
+                    ServiceEventTrace(
+                        service_account_id=service_account_id,
+                        direction="outgoing",
+                        local_transport="twitch_api",
+                        event_type=event_type,
+                        target=target,
+                        payload_json=payload_json,
+                    )
+                )
+                await session.commit()
+        except Exception:
+            return
 
     async def _resolve_login_with_cache(token: str, login: str) -> tuple[str, str]:
         normalized = login.strip().lower()
@@ -91,6 +121,17 @@ def register_twitch_routes(
                 raise HTTPException(status_code=409, detail="Bot is disabled")
             token = await ensure_bot_access_token(session, twitch_client, bot)
             users = await twitch_client.get_users_by_query(token, user_ids=ids, logins=login_values)
+        await _record_twitch_action(
+            service_account_id=service.id,
+            event_type="twitch.profiles.lookup",
+            target="helix:/users",
+            payload={
+                "bot_account_id": str(bot_account_id),
+                "user_ids": ids,
+                "logins": login_values,
+                "result_count": len(users),
+            },
+        )
         return {"data": users}
 
     @app.get("/v1/twitch/streams/status")
@@ -114,6 +155,18 @@ def register_twitch_routes(
                 raise HTTPException(status_code=409, detail="Bot is disabled")
             token = await ensure_bot_access_token(session, twitch_client, bot)
             streams = await twitch_client.get_streams_by_user_ids(token, ids)
+        await _record_twitch_action(
+            service_account_id=service.id,
+            event_type="twitch.streams.status",
+            target="helix:/streams",
+            payload={
+                "bot_account_id": str(bot_account_id),
+                "broadcaster_user_ids": ids,
+                "result_count": len(streams),
+            },
+        )
+        async with session_factory() as session:
+            bot = await session.get(BotAccount, bot_account_id)
             by_uid = {str(s.get("user_id", "")): s for s in streams}
             now = datetime.now(UTC)
             for uid in ids:
@@ -439,6 +492,16 @@ def register_twitch_routes(
             await chat_assets.refresh(broadcaster_user_id)
         else:
             chat_assets.prefetch(broadcaster_user_id)
+        await _record_twitch_action(
+            service_account_id=service.id,
+            event_type="twitch.chat.assets",
+            target="cache:/chat-assets",
+            payload={
+                "broadcaster_user_id": broadcaster_user_id,
+                "broadcaster_login": broadcaster_login,
+                "refresh": bool(refresh),
+            },
+        )
 
         snapshot = await chat_assets.snapshot(broadcaster_user_id)
         return {
@@ -559,6 +622,20 @@ def register_twitch_routes(
             auth_mode_used,
             int((time.perf_counter() - started) * 1000),
         )
+        await _record_twitch_action(
+            service_account_id=service.id,
+            event_type="twitch.chat.send",
+            target="helix:/chat/messages",
+            payload={
+                "bot_account_id": str(req.bot_account_id),
+                "broadcaster_user_id": broadcaster_user_id,
+                "auth_mode_requested": req.auth_mode,
+                "auth_mode_used": auth_mode_used,
+                "duration_ms": int((time.perf_counter() - started) * 1000),
+                "is_sent": bool(result.get("is_sent", False)),
+                "drop_reason": result.get("drop_reason"),
+            },
+        )
         return response
 
     @app.post("/v1/twitch/clips", response_model=CreateClipResponse)
@@ -630,6 +707,18 @@ def register_twitch_routes(
                 broadcaster_user_id,
                 int((time.perf_counter() - started) * 1000),
             )
+            await _record_twitch_action(
+                service_account_id=service.id,
+                event_type="twitch.clip.create",
+                target="helix:/clips",
+                payload={
+                    "bot_account_id": str(req.bot_account_id),
+                    "broadcaster_user_id": broadcaster_user_id,
+                    "clip_id": clip_id,
+                    "status": "processing",
+                    "duration_ms": int((time.perf_counter() - started) * 1000),
+                },
+            )
             return result
 
         result = CreateClipResponse(
@@ -651,5 +740,18 @@ def register_twitch_routes(
             req.bot_account_id,
             broadcaster_user_id,
             int((time.perf_counter() - started) * 1000),
+        )
+        await _record_twitch_action(
+            service_account_id=service.id,
+            event_type="twitch.clip.create",
+            target="helix:/clips",
+            payload={
+                "bot_account_id": str(req.bot_account_id),
+                "broadcaster_user_id": broadcaster_user_id,
+                "clip_id": clip_id,
+                "status": "ready",
+                "duration_ms": int((time.perf_counter() - started) * 1000),
+                "url": ready_clip.get("url"),
+            },
         )
         return result

@@ -60,6 +60,13 @@
     deliveriesPageSize: document.getElementById("deliveries-page-size"),
     deliveriesPagination: document.getElementById("deliveries-pagination"),
     deliveriesList: document.getElementById("deliveries-list"),
+    actionsMeta: document.getElementById("actions-meta"),
+    actionsFilterText: document.getElementById("actions-filter-text"),
+    actionsFilterService: document.getElementById("actions-filter-service"),
+    actionsFilterEvent: document.getElementById("actions-filter-event"),
+    actionsPageSize: document.getElementById("actions-page-size"),
+    actionsPagination: document.getElementById("actions-pagination"),
+    actionsList: document.getElementById("actions-list"),
   };
 
   let reconnectDelay = 1000;
@@ -73,14 +80,17 @@
   let allBots = [];
   let allEventSubRows = [];
   let allDeliveries = [];
+  let allActions = [];
   let activeTab = "overview";
   let eventsPage = 1;
   let eventsubPage = 1;
   let deliveriesPage = 1;
+  let actionsPage = 1;
   let pendingSnapshot = null;
   let selectionResumeTimer = null;
   let openEventKeys = new Set();
   let openDeliveryKeys = new Set();
+  let openActionKeys = new Set();
 
   function fmtDate(value) {
     if (!value) return "-";
@@ -133,6 +143,16 @@
       row.transport,
       row.target,
       row.outcome,
+      row.broadcaster_user_id_masked,
+    ].join("|");
+  }
+
+  function actionRowKey(row) {
+    return [
+      row.timestamp,
+      row.service_name,
+      row.event_type,
+      row.target,
       row.broadcaster_user_id_masked,
     ].join("|");
   }
@@ -468,6 +488,76 @@
     renderDeliveries(getFilteredDeliveries());
   }
 
+  function renderActionFilters(rows) {
+    const serviceSelected = el.actionsFilterService.value;
+    const eventSelected = el.actionsFilterEvent.value;
+    const serviceNames = Array.from(new Set((rows || []).map((row) => row.service_name).filter(Boolean))).sort();
+    const eventNames = Array.from(new Set((rows || []).map((row) => row.event_type).filter(Boolean))).sort();
+    el.actionsFilterService.innerHTML = ['<option value="">All services</option>', ...serviceNames.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`)].join("");
+    el.actionsFilterEvent.innerHTML = ['<option value="">All action types</option>', ...eventNames.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`)].join("");
+    if (serviceNames.includes(serviceSelected)) el.actionsFilterService.value = serviceSelected;
+    if (eventNames.includes(eventSelected)) el.actionsFilterEvent.value = eventSelected;
+  }
+
+  function getFilteredActions() {
+    const text = (el.actionsFilterText.value || "").trim().toLowerCase();
+    const service = el.actionsFilterService.value || "";
+    const eventType = el.actionsFilterEvent.value || "";
+    return allActions.filter((row) => {
+      if (service && row.service_name !== service) return false;
+      if (eventType && row.event_type !== eventType) return false;
+      if (!text) return true;
+      const haystack = [
+        row.event_type,
+        row.service_name,
+        row.broadcaster_label,
+        row.target,
+      ].join(" ").toLowerCase();
+      return haystack.includes(text);
+    });
+  }
+
+  function renderActions(rows) {
+    const currentOpen = new Set(openActionKeys);
+    Array.from(el.actionsList.querySelectorAll("details[data-action-key][open]")).forEach((node) => {
+      currentOpen.add(node.dataset.actionKey);
+    });
+    openActionKeys = currentOpen;
+    const items = Array.isArray(rows) ? rows : [];
+    const pageSize = Math.max(1, Number(el.actionsPageSize.value || 25));
+    const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+    actionsPage = Math.min(totalPages, Math.max(1, actionsPage));
+    const start = (actionsPage - 1) * pageSize;
+    const pageRows = items.slice(start, start + pageSize);
+    el.actionsMeta.textContent = `${items.length} Twitch API actions`;
+    renderGenericPagination(el.actionsPagination, items.length, totalPages, actionsPage, "actions-page");
+    el.actionsList.innerHTML = pageRows.map((row) => `
+      <details class="event-row" data-action-key="${escapeHtml(actionRowKey(row))}" ${openActionKeys.has(actionRowKey(row)) ? "open" : ""}>
+        <summary class="event-summary">
+          <div class="event-main">
+            <span class="badge badge-info">twitch</span>
+            <strong>${row.event_type}</strong>
+            <span class="muted">${row.broadcaster_label}</span>
+          </div>
+          <div class="event-side">
+            <span class="muted">${row.service_name}</span>
+            <span class="muted">${fmtDate(row.timestamp)}</span>
+          </div>
+        </summary>
+        <div class="event-meta">
+          <div class="muted mono">${row.target}</div>
+          <div class="muted mono">${row.broadcaster_user_id_masked} • ${row.service_account_id_masked}</div>
+        </div>
+        <pre class="event-body">${row.body_pretty}</pre>
+      </details>
+    `).join("") || `<div class="log-row"><div class="muted">No Twitch API actions recorded yet.</div></div>`;
+  }
+
+  function refreshActions() {
+    renderActionFilters(allActions);
+    renderActions(getFilteredActions());
+  }
+
   function getFilteredEvents() {
     const text = (el.eventsFilterText.value || "").trim().toLowerCase();
     const direction = el.eventsFilterDirection.value || "";
@@ -598,6 +688,8 @@
     }
     allDeliveries = Array.isArray(snapshot.recent_deliveries) ? snapshot.recent_deliveries : [];
     refreshDeliveries();
+    allActions = Array.isArray(snapshot.recent_twitch_actions) ? snapshot.recent_twitch_actions : [];
+    refreshActions();
     renderLogs(snapshot.logs || []);
   }
 
@@ -729,6 +821,10 @@
   el.deliveriesFilterOutcome.addEventListener("change", () => { deliveriesPage = 1; refreshDeliveries(); });
   el.deliveriesFilterService.addEventListener("change", () => { deliveriesPage = 1; refreshDeliveries(); });
   el.deliveriesPageSize.addEventListener("change", () => { deliveriesPage = 1; refreshDeliveries(); });
+  el.actionsFilterText.addEventListener("input", () => { actionsPage = 1; refreshActions(); });
+  el.actionsFilterService.addEventListener("change", () => { actionsPage = 1; refreshActions(); });
+  el.actionsFilterEvent.addEventListener("change", () => { actionsPage = 1; refreshActions(); });
+  el.actionsPageSize.addEventListener("change", () => { actionsPage = 1; refreshActions(); });
   el.broadcasterFilterBot.addEventListener("change", () => renderBroadcasters(allBroadcasters));
   el.logsFilterBot.addEventListener("change", () => renderLogs(allLogs));
   el.eventsPagination.addEventListener("click", (event) => {
@@ -752,6 +848,13 @@
     if (button.dataset.deliveriesPageNav === "next") deliveriesPage += 1;
     refreshDeliveries();
   });
+  el.actionsPagination.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-actions-page-nav]");
+    if (!button) return;
+    if (button.dataset.actionsPageNav === "prev") actionsPage -= 1;
+    if (button.dataset.actionsPageNav === "next") actionsPage += 1;
+    refreshActions();
+  });
   el.eventsList.addEventListener("toggle", (event) => {
     const details = event.target.closest("details[data-event-key]");
     if (!details) return;
@@ -767,6 +870,14 @@
     if (!key) return;
     if (details.open) openDeliveryKeys.add(key);
     else openDeliveryKeys.delete(key);
+  }, true);
+  el.actionsList.addEventListener("toggle", (event) => {
+    const details = event.target.closest("details[data-action-key]");
+    if (!details) return;
+    const key = details.dataset.actionKey;
+    if (!key) return;
+    if (details.open) openActionKeys.add(key);
+    else openActionKeys.delete(key);
   }, true);
 
   loadInitial().catch((err) => {

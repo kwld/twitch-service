@@ -50,6 +50,7 @@ STATUS_HTML = """<!doctype html>
         <button class="tab-button" type="button" data-tab-target="broadcasters">Broadcasters</button>
         <button class="tab-button" type="button" data-tab-target="events">Events</button>
         <button class="tab-button" type="button" data-tab-target="deliveries">Deliveries</button>
+        <button class="tab-button" type="button" data-tab-target="actions">Actions</button>
         <button class="tab-button" type="button" data-tab-target="logs">Logs</button>
       </nav>
 
@@ -282,6 +283,31 @@ STATUS_HTML = """<!doctype html>
           </div>
           <div id="deliveries-pagination" class="pagination-bar"></div>
           <div id="deliveries-list" class="event-list"></div>
+        </section>
+      </section>
+
+      <section class="tab-panel" data-tab-panel="actions">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Twitch API Actions</h2>
+            <div id="actions-meta" class="panel-meta"></div>
+          </div>
+          <div class="event-toolbar">
+            <input id="actions-filter-text" class="field-input" type="search" placeholder="Filter by event, service, broadcaster, target">
+            <select id="actions-filter-service" class="field-input">
+              <option value="">All services</option>
+            </select>
+            <select id="actions-filter-event" class="field-input">
+              <option value="">All action types</option>
+            </select>
+            <select id="actions-page-size" class="field-input">
+              <option value="10">10 / page</option>
+              <option value="25" selected>25 / page</option>
+              <option value="50">50 / page</option>
+            </select>
+          </div>
+          <div id="actions-pagination" class="pagination-bar"></div>
+          <div id="actions-list" class="event-list"></div>
         </section>
       </section>
     </div>
@@ -760,8 +786,31 @@ def register_status_routes(
             )
 
         recent_delivery_rows = []
+        recent_twitch_action_rows = []
         for trace in traces[:120]:
             if trace.direction != "outgoing":
+                if trace.local_transport == "twitch_api":
+                    payload = _safe_json_loads(trace.payload_json)
+                    broadcaster_user_id = str(payload.get("broadcaster_user_id", "")).strip()
+                    broadcaster_login = broadcaster_names.get(broadcaster_user_id)
+                    if not broadcaster_login and broadcaster_user_id:
+                        identity = identity_by_user_id.get(broadcaster_user_id)
+                        if identity:
+                            broadcaster_login = str(identity.broadcaster_display_name or "").strip() or str(identity.broadcaster_login or "").strip()
+                    recent_twitch_action_rows.append(
+                        {
+                            "timestamp": _fmt_dt(trace.created_at),
+                            "service_name": service_name_by_id.get(str(trace.service_account_id), "unknown"),
+                            "service_account_id_masked": _short_id(str(trace.service_account_id)),
+                            "event_type": trace.event_type,
+                            "target": trace.target or "-",
+                            "broadcaster_label": f"chan:{_mask_name(broadcaster_login or broadcaster_user_id)}"
+                            if (broadcaster_login or broadcaster_user_id)
+                            else "chan:unknown",
+                            "broadcaster_user_id_masked": _mask_id(broadcaster_user_id),
+                            "body_pretty": _format_trace_body(trace.payload_json),
+                        }
+                    )
                 continue
             payload = _safe_json_loads(trace.payload_json)
             delivery = payload.get("_delivery")
@@ -926,6 +975,7 @@ def register_status_routes(
             "broadcasters": broadcaster_rows,
             "recent_events": recent_event_rows,
             "recent_deliveries": recent_delivery_rows,
+            "recent_twitch_actions": recent_twitch_action_rows,
             "logs": recent_logs,
         }
 

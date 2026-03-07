@@ -199,15 +199,23 @@ body {
 .field-input {
   min-height: 38px;
   border: 1px solid var(--line);
-  background: rgba(255,255,255,0.03);
+  background: var(--panel-2);
   color: var(--text);
   border-radius: 12px;
   padding: 8px 12px;
   font: inherit;
+  color-scheme: dark;
 }
 
 .field-input::placeholder {
   color: var(--muted);
+}
+
+select.field-input,
+select.field-input option,
+select.field-input optgroup {
+  background: var(--panel-2);
+  color: var(--text);
 }
 
 .panel h2 {
