@@ -7,7 +7,7 @@ import pytest
 
 from app.event_router import InterestRegistry, LocalEventHub
 from app.eventsub_manager import EventSubManager
-from app.models import BotAccount, TwitchSubscription
+from app.models import BotAccount, ServiceInterest, TwitchSubscription
 
 
 class DummyTwitchClient:
@@ -192,3 +192,54 @@ async def test_list_eventsub_subscriptions_all_tokens_dedupes_across_app_and_bot
     assert ids == ["app-only", "bot1-only", "bot2-only", "shared"]
     assert twitch.calls[0] == "app"
     assert sorted(twitch.calls[1:]) == ["token-bot-1", "token-bot-2"]
+
+
+@pytest.mark.asyncio
+async def test_ensure_all_subscriptions_uses_bounded_concurrency(monkeypatch):
+    bot_id = uuid.uuid4()
+    service_id = uuid.uuid4()
+    registry = InterestRegistry()
+    manager = EventSubManager(
+        DummyTwitchClient(),
+        make_session_factory(),
+        registry,
+        LocalEventHub(),
+    )
+    manager._session_id = "session-1"
+    manager._subscription_ensure_concurrency = 3
+
+    for broadcaster_id in ("100", "101", "102", "103", "104", "105"):
+        await registry.add(
+            ServiceInterest(
+                id=uuid.uuid4(),
+                service_account_id=service_id,
+                bot_account_id=bot_id,
+                event_type="stream.online",
+                broadcaster_user_id=broadcaster_id,
+                transport="websocket",
+                webhook_url=None,
+            )
+        )
+
+    running = 0
+    max_running = 0
+    seen: list[str] = []
+    state_lock = asyncio.Lock()
+
+    async def _fake_ensure(key):
+        nonlocal running, max_running
+        async with state_lock:
+            running += 1
+            max_running = max(max_running, running)
+            seen.append(key.broadcaster_user_id)
+        await asyncio.sleep(0.02)
+        async with state_lock:
+            running -= 1
+
+    monkeypatch.setattr(manager, "_ensure_subscription", _fake_ensure)
+    monkeypatch.setattr(manager, "reject_interests_for_key", lambda **_: asyncio.sleep(0))
+
+    await manager._ensure_all_subscriptions()
+
+    assert sorted(seen) == ["100", "101", "102", "103", "104", "105"]
+    assert max_running == 3

@@ -66,7 +66,9 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
         self._stop = asyncio.Event()
         self._session_id: str | None = None
         self._zero_listener_since: datetime | None = None
-        self._subscription_lock = asyncio.Lock()
+        self._subscription_key_locks: dict[InterestKey, asyncio.Lock] = {}
+        self._subscription_key_locks_guard = asyncio.Lock()
+        self._subscription_ensure_concurrency = 8
         self._subscription_error_cooldown = timedelta(minutes=1)
         self._subscription_error_last_sent: dict[
             tuple[uuid.UUID, uuid.UUID, str, str, str], datetime
@@ -111,6 +113,20 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
         finally:
             elapsed_ms = int((time.perf_counter() - started) * 1000)
             logger.info("EventSub phase %s completed in %dms", label, elapsed_ms)
+
+    async def _acquire_subscription_key_lock(self, key: InterestKey) -> asyncio.Lock:
+        async with self._subscription_key_locks_guard:
+            lock = self._subscription_key_locks.get(key)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._subscription_key_locks[key] = lock
+            return lock
+
+    async def _release_subscription_key_lock(self, key: InterestKey, lock: asyncio.Lock) -> None:
+        async with self._subscription_key_locks_guard:
+            current = self._subscription_key_locks.get(key)
+            if current is lock and not lock.locked():
+                self._subscription_key_locks.pop(key, None)
 
     async def start(self) -> None:
         started = time.perf_counter()

@@ -207,23 +207,39 @@ class EventSubSubscriptionMixin:
             )
 
     async def _ensure_all_subscriptions(self) -> None:
-        for key in await self.registry.keys():
-            if self._transport_for_event(key.event_type) == "websocket" and not self._session_id:
-                logger.info("Skipping remaining websocket subscription ensures; EventSub session is unavailable")
-                break
-            try:
-                await self._ensure_subscription(key)
-            except Exception as exc:
-                logger.warning("Failed ensuring subscription for %s: %s", key, exc)
-                await self.reject_interests_for_key(
-                    key=key,
-                    reason=str(exc),
-                    upstream_transport=self._transport_for_event(key.event_type),
+        keys = await self.registry.keys()
+        concurrency = max(1, int(getattr(self, "_subscription_ensure_concurrency", 1)))
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def _ensure_key(key: InterestKey) -> None:
+            upstream_transport = self._transport_for_event(key.event_type)
+            if upstream_transport == "websocket" and not self._session_id:
+                logger.info(
+                    "Skipping websocket subscription ensure for %s/%s; EventSub session is unavailable",
+                    key.event_type,
+                    key.broadcaster_user_id,
                 )
+                return
+            async with semaphore:
+                try:
+                    await self._ensure_subscription(key)
+                except Exception as exc:
+                    logger.warning("Failed ensuring subscription for %s: %s", key, exc)
+                    await self.reject_interests_for_key(
+                        key=key,
+                        reason=str(exc),
+                        upstream_transport=upstream_transport,
+                    )
+
+        await asyncio.gather(*(_ensure_key(key) for key in keys))
 
     async def _ensure_webhook_subscriptions(self) -> None:
-        for key in await self.registry.keys():
-            if self._transport_for_event(key.event_type) == "webhook":
+        keys = [key for key in await self.registry.keys() if self._transport_for_event(key.event_type) == "webhook"]
+        concurrency = max(1, int(getattr(self, "_subscription_ensure_concurrency", 1)))
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def _ensure_key(key: InterestKey) -> None:
+            async with semaphore:
                 try:
                     await self._ensure_subscription(key)
                 except Exception as exc:
@@ -231,216 +247,222 @@ class EventSubSubscriptionMixin:
                     await self.reject_interests_for_key(
                         key=key,
                         reason=str(exc),
-                        upstream_transport=self._transport_for_event(key.event_type),
+                        upstream_transport="webhook",
                     )
 
+        await asyncio.gather(*(_ensure_key(key) for key in keys))
+
     async def _ensure_subscription(self, key: InterestKey) -> None:
-        async with self._subscription_lock:
-            upstream_transport = self._transport_for_event(key.event_type)
-            version = preferred_eventsub_version(key.event_type)
-            session_id_snapshot = self._session_id
-            if upstream_transport == "websocket" and not session_id_snapshot:
-                return
-            async with self.session_factory() as session:
-                db_sub = await session.scalar(
-                    select(TwitchSubscription).where(
-                        TwitchSubscription.bot_account_id == key.bot_account_id,
-                        TwitchSubscription.event_type == key.event_type,
-                        TwitchSubscription.broadcaster_user_id == key.broadcaster_user_id,
-                    )
-                )
-                if db_sub and self._is_subscription_reusable_status(db_sub.status):
-                    if upstream_transport == "webhook":
-                        return
-                    if upstream_transport == "websocket" and db_sub.session_id == session_id_snapshot:
-                        return
-                if db_sub and db_sub.twitch_subscription_id:
-                    delete_access_token: str | None = None
-                    if upstream_transport == "websocket":
-                        bot = await session.get(BotAccount, key.bot_account_id)
-                        if bot and bot.enabled:
-                            with suppress(Exception):
-                                delete_access_token = await ensure_bot_access_token(session, self.twitch, bot)
-                    try:
-                        await self.twitch.delete_eventsub_subscription(
-                            db_sub.twitch_subscription_id, access_token=delete_access_token
+        lock = await self._acquire_subscription_key_lock(key)
+        try:
+            async with lock:
+                upstream_transport = self._transport_for_event(key.event_type)
+                version = preferred_eventsub_version(key.event_type)
+                session_id_snapshot = self._session_id
+                if upstream_transport == "websocket" and not session_id_snapshot:
+                    return
+                async with self.session_factory() as session:
+                    db_sub = await session.scalar(
+                        select(TwitchSubscription).where(
+                            TwitchSubscription.bot_account_id == key.bot_account_id,
+                            TwitchSubscription.event_type == key.event_type,
+                            TwitchSubscription.broadcaster_user_id == key.broadcaster_user_id,
                         )
-                    except TwitchApiError as exc:
-                        if not self._is_subscription_not_found_error(exc):
+                    )
+                    if db_sub and self._is_subscription_reusable_status(db_sub.status):
+                        if upstream_transport == "webhook":
+                            return
+                        if upstream_transport == "websocket" and db_sub.session_id == session_id_snapshot:
+                            return
+                    if db_sub and db_sub.twitch_subscription_id:
+                        delete_access_token: str | None = None
+                        if upstream_transport == "websocket":
+                            bot = await session.get(BotAccount, key.bot_account_id)
+                            if bot and bot.enabled:
+                                with suppress(Exception):
+                                    delete_access_token = await ensure_bot_access_token(session, self.twitch, bot)
+                        try:
+                            await self.twitch.delete_eventsub_subscription(
+                                db_sub.twitch_subscription_id, access_token=delete_access_token
+                            )
+                        except TwitchApiError as exc:
+                            if not self._is_subscription_not_found_error(exc):
+                                await self._notify_subscription_failure(
+                                    key=key,
+                                    upstream_transport=upstream_transport,
+                                    reason=(
+                                        f"Cannot rotate EventSub subscription {db_sub.twitch_subscription_id}: {exc}"
+                                    ),
+                                )
+                                logger.warning(
+                                    "Cannot rotate EventSub subscription %s for %s/%s: %s",
+                                    db_sub.twitch_subscription_id,
+                                    key.event_type,
+                                    key.broadcaster_user_id,
+                                    exc,
+                                )
+                                return
+                        await session.delete(db_sub)
+                        await session.flush()
+                    if upstream_transport == "webhook":
+                        if not self.webhook_callback_url or not self.webhook_secret:
+                            reason = (
+                                "TWITCH_EVENTSUB_WEBHOOK_CALLBACK_URL and "
+                                "TWITCH_EVENTSUB_WEBHOOK_SECRET are required for webhook events"
+                            )
                             await self._notify_subscription_failure(
                                 key=key,
                                 upstream_transport=upstream_transport,
-                                reason=(
-                                    f"Cannot rotate EventSub subscription {db_sub.twitch_subscription_id}: {exc}"
-                                ),
+                                reason=reason,
                             )
-                            logger.warning(
-                                "Cannot rotate EventSub subscription %s for %s/%s: %s",
-                                db_sub.twitch_subscription_id,
+                            raise RuntimeError(reason)
+                        transport: dict[str, str] = {
+                            "method": "webhook",
+                            "callback": self.webhook_callback_url,
+                            "secret": self.webhook_secret,
+                        }
+                    else:
+                        if self._session_id != session_id_snapshot or not session_id_snapshot:
+                            logger.info(
+                                "Skipping websocket subscription create for %s/%s due to session change",
                                 key.event_type,
                                 key.broadcaster_user_id,
-                                exc,
                             )
                             return
-                    await session.delete(db_sub)
-                    await session.flush()
-                if upstream_transport == "webhook":
-                    if not self.webhook_callback_url or not self.webhook_secret:
-                        reason = (
-                            "TWITCH_EVENTSUB_WEBHOOK_CALLBACK_URL and "
-                            "TWITCH_EVENTSUB_WEBHOOK_SECRET are required for webhook events"
-                        )
+                        transport = {"method": "websocket", "session_id": session_id_snapshot}
+                    condition: dict[str, str] = {"broadcaster_user_id": key.broadcaster_user_id}
+                    create_access_token: str | None = None
+                    bot = await session.get(BotAccount, key.bot_account_id)
+                    if not bot:
+                        reason = f"Bot account missing for subscription: {key.bot_account_id}"
                         await self._notify_subscription_failure(
                             key=key,
                             upstream_transport=upstream_transport,
                             reason=reason,
                         )
                         raise RuntimeError(reason)
-                    transport: dict[str, str] = {
-                        "method": "webhook",
-                        "callback": self.webhook_callback_url,
-                        "secret": self.webhook_secret,
-                    }
-                else:
-                    if self._session_id != session_id_snapshot or not session_id_snapshot:
-                        logger.info(
-                            "Skipping websocket subscription create for %s/%s due to session change",
-                            key.event_type,
-                            key.broadcaster_user_id,
+                    if not bot.enabled:
+                        reason = f"Bot account disabled for subscription: {key.bot_account_id}"
+                        await self._notify_subscription_failure(
+                            key=key,
+                            upstream_transport=upstream_transport,
+                            reason=reason,
                         )
-                        return
-                    transport = {"method": "websocket", "session_id": session_id_snapshot}
-                condition: dict[str, str] = {"broadcaster_user_id": key.broadcaster_user_id}
-                create_access_token: str | None = None
-                bot = await session.get(BotAccount, key.bot_account_id)
-                if not bot:
-                    reason = f"Bot account missing for subscription: {key.bot_account_id}"
-                    await self._notify_subscription_failure(
-                        key=key,
-                        upstream_transport=upstream_transport,
-                        reason=reason,
-                    )
-                    raise RuntimeError(reason)
-                if not bot.enabled:
-                    reason = f"Bot account disabled for subscription: {key.bot_account_id}"
-                    await self._notify_subscription_failure(
-                        key=key,
-                        upstream_transport=upstream_transport,
-                        reason=reason,
-                    )
-                    raise RuntimeError(reason)
-                if upstream_transport == "websocket":
-                    create_access_token = await ensure_bot_access_token(session, self.twitch, bot)
-                if requires_condition_user_id(key.event_type):
-                    condition["user_id"] = bot.twitch_user_id
+                        raise RuntimeError(reason)
+                    if upstream_transport == "websocket":
+                        create_access_token = await ensure_bot_access_token(session, self.twitch, bot)
+                    if requires_condition_user_id(key.event_type):
+                        condition["user_id"] = bot.twitch_user_id
 
-                required_scope_groups = required_scope_any_of_groups(key.event_type)
-                if required_scope_groups:
-                    def _has_required_scopes(scopes: set[str]) -> bool:
-                        return all(any(item in scopes for item in group) for group in required_scope_groups)
+                    required_scope_groups = required_scope_any_of_groups(key.event_type)
+                    if required_scope_groups:
+                        def _has_required_scopes(scopes: set[str]) -> bool:
+                            return all(any(item in scopes for item in group) for group in required_scope_groups)
 
-                    missing = " and ".join(["|".join(sorted(group)) for group in required_scope_groups])
-                    combined_scopes: set[str] = set()
-                    broadcaster_scopes: set[str] = set()
-                    bot_scopes: set[str] = set()
+                        missing = " and ".join(["|".join(sorted(group)) for group in required_scope_groups])
+                        combined_scopes: set[str] = set()
+                        broadcaster_scopes: set[str] = set()
+                        bot_scopes: set[str] = set()
 
-                    service_ids = {interest.service_account_id for interest in await self.registry.interested(key)}
-                    if service_ids:
-                        auth_rows = list(
-                            (
-                                await session.scalars(
-                                    select(BroadcasterAuthorization).where(
-                                        BroadcasterAuthorization.service_account_id.in_(service_ids),
-                                        BroadcasterAuthorization.broadcaster_user_id == key.broadcaster_user_id,
+                        service_ids = {interest.service_account_id for interest in await self.registry.interested(key)}
+                        if service_ids:
+                            auth_rows = list(
+                                (
+                                    await session.scalars(
+                                        select(BroadcasterAuthorization).where(
+                                            BroadcasterAuthorization.service_account_id.in_(service_ids),
+                                            BroadcasterAuthorization.broadcaster_user_id == key.broadcaster_user_id,
+                                        )
                                     )
-                                )
-                            ).all()
-                        )
-                    else:
-                        auth_rows = list(
-                            (
-                                await session.scalars(
-                                    select(BroadcasterAuthorization).where(
-                                        BroadcasterAuthorization.broadcaster_user_id == key.broadcaster_user_id,
-                                    )
-                                )
-                            ).all()
-                        )
-                    for row in auth_rows:
-                        broadcaster_scopes.update(
-                            {x.strip() for x in row.scopes_csv.split(",") if x.strip()}
-                        )
-                    combined_scopes.update(broadcaster_scopes)
-
-                    needs_bot_scope_check = (
-                        upstream_transport == "websocket"
-                        or key.broadcaster_user_id == bot.twitch_user_id
-                        or any(any(not scope.startswith("channel:") for scope in group) for group in required_scope_groups)
-                    )
-                    if needs_bot_scope_check:
-                        token_for_check = create_access_token or await ensure_bot_access_token(
-                            session, self.twitch, bot
-                        )
-                        token_info = await self.twitch.validate_user_token(token_for_check)
-                        bot_scopes = {x.strip() for x in token_info.get("scopes", []) if str(x).strip()}
-                        combined_scopes.update(bot_scopes)
-
-                    if not _has_required_scopes(combined_scopes):
-                        if key.broadcaster_user_id == bot.twitch_user_id:
-                            reason = (
-                                "subscription missing proper authorization: "
-                                f"bot token is missing required scope(s) ({missing})"
-                            )
-                        elif not broadcaster_scopes:
-                            reason = (
-                                "subscription missing proper authorization: "
-                                f"broadcaster grant is missing required scope(s) ({missing})"
+                                ).all()
                             )
                         else:
-                            reason = (
-                                "subscription missing proper authorization: "
-                                f"bot token and broadcaster grant scopes do not satisfy required scope(s) ({missing})"
+                            auth_rows = list(
+                                (
+                                    await session.scalars(
+                                        select(BroadcasterAuthorization).where(
+                                            BroadcasterAuthorization.broadcaster_user_id == key.broadcaster_user_id,
+                                        )
+                                    )
+                                ).all()
                             )
+                        for row in auth_rows:
+                            broadcaster_scopes.update(
+                                {x.strip() for x in row.scopes_csv.split(",") if x.strip()}
+                            )
+                        combined_scopes.update(broadcaster_scopes)
+
+                        needs_bot_scope_check = (
+                            upstream_transport == "websocket"
+                            or key.broadcaster_user_id == bot.twitch_user_id
+                            or any(any(not scope.startswith("channel:") for scope in group) for group in required_scope_groups)
+                        )
+                        if needs_bot_scope_check:
+                            token_for_check = create_access_token or await ensure_bot_access_token(
+                                session, self.twitch, bot
+                            )
+                            token_info = await self.twitch.validate_user_token(token_for_check)
+                            bot_scopes = {x.strip() for x in token_info.get("scopes", []) if str(x).strip()}
+                            combined_scopes.update(bot_scopes)
+
+                        if not _has_required_scopes(combined_scopes):
+                            if key.broadcaster_user_id == bot.twitch_user_id:
+                                reason = (
+                                    "subscription missing proper authorization: "
+                                    f"bot token is missing required scope(s) ({missing})"
+                                )
+                            elif not broadcaster_scopes:
+                                reason = (
+                                    "subscription missing proper authorization: "
+                                    f"broadcaster grant is missing required scope(s) ({missing})"
+                                )
+                            else:
+                                reason = (
+                                    "subscription missing proper authorization: "
+                                    f"bot token and broadcaster grant scopes do not satisfy required scope(s) ({missing})"
+                                )
+                            await self._notify_subscription_failure(
+                                key=key,
+                                upstream_transport=upstream_transport,
+                                reason=reason,
+                            )
+                            raise RuntimeError(reason)
+                    try:
+                        created = await self.twitch.create_eventsub_subscription(
+                            event_type=key.event_type,
+                            version=version,
+                            condition=condition,
+                            transport=transport,
+                            access_token=create_access_token,
+                        )
+                    except TwitchApiError as exc:
+                        if upstream_transport == "websocket" and self._is_stale_websocket_session_error(exc):
+                            logger.info(
+                                "EventSub websocket session became stale during create (%s); will retry on next welcome",
+                                session_id_snapshot,
+                            )
+                            if self._session_id == session_id_snapshot:
+                                self._session_id = None
+                            return
                         await self._notify_subscription_failure(
                             key=key,
                             upstream_transport=upstream_transport,
-                            reason=reason,
+                            reason=str(exc),
                         )
-                        raise RuntimeError(reason)
-                try:
-                    created = await self.twitch.create_eventsub_subscription(
+                        raise
+                    new_sub = TwitchSubscription(
+                        bot_account_id=key.bot_account_id,
                         event_type=key.event_type,
-                        version=version,
-                        condition=condition,
-                        transport=transport,
-                        access_token=create_access_token,
+                        broadcaster_user_id=key.broadcaster_user_id,
+                        twitch_subscription_id=created["id"],
+                        status=created.get("status", "enabled"),
+                        session_id=created.get("transport", {}).get("session_id"),
+                        last_seen_at=datetime.now(UTC),
                     )
-                except TwitchApiError as exc:
-                    if upstream_transport == "websocket" and self._is_stale_websocket_session_error(exc):
-                        logger.info(
-                            "EventSub websocket session became stale during create (%s); will retry on next welcome",
-                            session_id_snapshot,
-                        )
-                        if self._session_id == session_id_snapshot:
-                            self._session_id = None
-                        return
-                    await self._notify_subscription_failure(
-                        key=key,
-                        upstream_transport=upstream_transport,
-                        reason=str(exc),
-                    )
-                    raise
-                new_sub = TwitchSubscription(
-                    bot_account_id=key.bot_account_id,
-                    event_type=key.event_type,
-                    broadcaster_user_id=key.broadcaster_user_id,
-                    twitch_subscription_id=created["id"],
-                    status=created.get("status", "enabled"),
-                    session_id=created.get("transport", {}).get("session_id"),
-                    last_seen_at=datetime.now(UTC),
-                )
-                session.add(new_sub)
-                await session.commit()
+                    session.add(new_sub)
+                    await session.commit()
+        finally:
+            await self._release_subscription_key_lock(key, lock)
 
     @staticmethod
     def _classify_subscription_failure(reason: str) -> tuple[str, str]:
