@@ -8,6 +8,8 @@
   const el = {
     pill: document.getElementById("connection-pill"),
     generatedAt: document.getElementById("generated-at"),
+    tabs: document.getElementById("status-tabs"),
+    tabPanels: document.querySelectorAll("[data-tab-panel]"),
     summaryCards: document.getElementById("summary-cards"),
     startupMeta: document.getElementById("startup-meta"),
     startupPhases: document.getElementById("startup-phases"),
@@ -20,8 +22,13 @@
     logsMeta: document.getElementById("logs-meta"),
     logsList: document.getElementById("logs-list"),
     eventsMeta: document.getElementById("events-meta"),
+    eventsPagination: document.getElementById("events-pagination"),
     eventsList: document.getElementById("events-list"),
     eventsPauseToggle: document.getElementById("events-pause-toggle"),
+    eventsFilterText: document.getElementById("events-filter-text"),
+    eventsFilterDirection: document.getElementById("events-filter-direction"),
+    eventsFilterService: document.getElementById("events-filter-service"),
+    eventsPageSize: document.getElementById("events-page-size"),
     eventsModal: document.getElementById("events-modal"),
     eventsModalBackdrop: document.getElementById("events-modal-backdrop"),
     eventsModalClose: document.getElementById("events-modal-close"),
@@ -35,7 +42,11 @@
   let socket = null;
   let currentBroadcasters = [];
   let eventsPaused = false;
-  let pausedEvents = [];
+  let allEvents = [];
+  let activeTab = "overview";
+  let eventsPage = 1;
+  let pendingSnapshot = null;
+  let selectionResumeTimer = null;
 
   function fmtDate(value) {
     if (!value) return "-";
@@ -47,6 +58,26 @@
   function setPill(kind, label) {
     el.pill.className = `pill pill-${kind}`;
     el.pill.textContent = label;
+  }
+
+  function escapeHtml(value) {
+    return String(value || "").replace(/[&<>"']/g, (ch) => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      "\"": "&quot;",
+      "'": "&#39;",
+    }[ch]));
+  }
+
+  function setActiveTab(name) {
+    activeTab = name;
+    Array.from(el.tabs.querySelectorAll("[data-tab-target]")).forEach((button) => {
+      button.classList.toggle("is-active", button.dataset.tabTarget === name);
+    });
+    Array.from(el.tabPanels).forEach((panel) => {
+      panel.classList.toggle("is-active", panel.dataset.tabPanel === name);
+    });
   }
 
   function renderSummary(cards) {
@@ -152,10 +183,58 @@
     `).join("") || `<div class="log-row"><div class="muted">No logs buffered yet.</div></div>`;
   }
 
+  function renderEventServiceFilter(rows) {
+    const selected = el.eventsFilterService.value;
+    const names = Array.from(new Set((rows || []).map((row) => row.service_name).filter(Boolean))).sort();
+    el.eventsFilterService.innerHTML = ['<option value="">All services</option>', ...names.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`)].join("");
+    if (names.includes(selected)) {
+      el.eventsFilterService.value = selected;
+    }
+  }
+
+  function getFilteredEvents() {
+    const text = (el.eventsFilterText.value || "").trim().toLowerCase();
+    const direction = el.eventsFilterDirection.value || "";
+    const service = el.eventsFilterService.value || "";
+    return allEvents.filter((row) => {
+      if (direction && row.direction !== direction) return false;
+      if (service && row.service_name !== service) return false;
+      if (!text) return true;
+      const haystack = [
+        row.event_type,
+        row.service_name,
+        row.broadcaster_label,
+        row.target,
+        row.transport,
+      ].join(" ").toLowerCase();
+      return haystack.includes(text);
+    });
+  }
+
+  function renderEventPagination(totalItems, totalPages, currentPage) {
+    if (totalItems <= 0) {
+      el.eventsPagination.innerHTML = `<span class="muted">No matching events</span>`;
+      return;
+    }
+    el.eventsPagination.innerHTML = `
+      <div class="muted">Showing page ${currentPage} / ${totalPages} • ${totalItems} matched</div>
+      <div class="pagination-actions">
+        <button class="ghost-button" type="button" data-page-nav="prev" ${currentPage <= 1 ? "disabled" : ""}>Prev</button>
+        <button class="ghost-button" type="button" data-page-nav="next" ${currentPage >= totalPages ? "disabled" : ""}>Next</button>
+      </div>
+    `;
+  }
+
   function renderEvents(rows) {
     const items = Array.isArray(rows) ? rows : [];
-    el.eventsMeta.textContent = `${items.length} buffered events${eventsPaused ? " | paused" : ""}`;
-    el.eventsList.innerHTML = items.map((row) => `
+    const pageSize = Math.max(1, Number(el.eventsPageSize.value || 25));
+    const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+    eventsPage = Math.min(totalPages, Math.max(1, eventsPage));
+    const start = (eventsPage - 1) * pageSize;
+    const pageRows = items.slice(start, start + pageSize);
+    el.eventsMeta.textContent = `${items.length} matched events${eventsPaused ? " | paused" : ""}`;
+    renderEventPagination(items.length, totalPages, eventsPage);
+    el.eventsList.innerHTML = pageRows.map((row) => `
       <details class="event-row">
         <summary class="event-summary">
           <div class="event-main">
@@ -177,7 +256,37 @@
     `).join("") || `<div class="log-row"><div class="muted">No traced events yet.</div></div>`;
   }
 
+  function refreshEvents() {
+    renderEventServiceFilter(allEvents);
+    renderEvents(getFilteredEvents());
+  }
+
+  function hasActiveSelectionLock() {
+    const selection = window.getSelection ? window.getSelection() : null;
+    if (!selection) return false;
+    return !selection.isCollapsed && String(selection).trim().length > 0;
+  }
+
+  function scheduleSelectionResume() {
+    if (selectionResumeTimer) return;
+    selectionResumeTimer = window.setInterval(() => {
+      if (hasActiveSelectionLock()) return;
+      window.clearInterval(selectionResumeTimer);
+      selectionResumeTimer = null;
+      if (pendingSnapshot) {
+        const snapshot = pendingSnapshot;
+        pendingSnapshot = null;
+        render(snapshot);
+      }
+    }, 600);
+  }
+
   function render(snapshot) {
+    if (hasActiveSelectionLock()) {
+      pendingSnapshot = snapshot;
+      scheduleSelectionResume();
+      return;
+    }
     el.generatedAt.textContent = `snapshot ${fmtDate(snapshot.generated_at)}`;
     renderSummary(snapshot.summary_cards || []);
     renderPhases(snapshot.eventsub || {});
@@ -185,12 +294,12 @@
     renderEventSub(snapshot.eventsub || {});
     renderBroadcasters(snapshot.broadcasters || []);
     if (!eventsPaused) {
-      pausedEvents = Array.isArray(snapshot.recent_events) ? snapshot.recent_events : [];
-      renderEvents(pausedEvents);
+      allEvents = Array.isArray(snapshot.recent_events) ? snapshot.recent_events : [];
+      refreshEvents();
     } else if (!el.eventsList.innerHTML) {
-      renderEvents(pausedEvents);
+      refreshEvents();
     } else {
-      el.eventsMeta.textContent = `${pausedEvents.length} buffered events | paused`;
+      el.eventsMeta.textContent = `${allEvents.length} buffered events | paused`;
     }
     renderLogs(snapshot.logs || []);
   }
@@ -266,6 +375,17 @@
     });
   }
 
+  function handleEventFilterChange(resetPage) {
+    if (resetPage) eventsPage = 1;
+    refreshEvents();
+  }
+
+  el.tabs.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-tab-target]");
+    if (!button) return;
+    setActiveTab(button.dataset.tabTarget);
+  });
+
   el.broadcasterTable.addEventListener("click", (event) => {
     const button = event.target.closest("[data-broadcaster-index]");
     if (!button) return;
@@ -286,10 +406,22 @@
     eventsPaused = !eventsPaused;
     el.eventsPauseToggle.textContent = eventsPaused ? "Resume" : "Pause";
     if (!eventsPaused) {
-      renderEvents(pausedEvents);
+      refreshEvents();
     } else {
-      el.eventsMeta.textContent = `${pausedEvents.length} buffered events | paused`;
+      el.eventsMeta.textContent = `${allEvents.length} buffered events | paused`;
     }
+  });
+
+  el.eventsFilterText.addEventListener("input", () => handleEventFilterChange(true));
+  el.eventsFilterDirection.addEventListener("change", () => handleEventFilterChange(true));
+  el.eventsFilterService.addEventListener("change", () => handleEventFilterChange(true));
+  el.eventsPageSize.addEventListener("change", () => handleEventFilterChange(true));
+  el.eventsPagination.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-page-nav]");
+    if (!button) return;
+    if (button.dataset.pageNav === "prev") eventsPage -= 1;
+    if (button.dataset.pageNav === "next") eventsPage += 1;
+    refreshEvents();
   });
 
   loadInitial().catch((err) => {

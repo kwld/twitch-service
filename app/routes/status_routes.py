@@ -44,50 +44,59 @@ STATUS_HTML = """<!doctype html>
         </div>
       </header>
 
-      <section class="grid summary-grid" id="summary-cards"></section>
+      <nav class="tab-bar" id="status-tabs">
+        <button class="tab-button is-active" type="button" data-tab-target="overview">Overview</button>
+        <button class="tab-button" type="button" data-tab-target="broadcasters">Broadcasters</button>
+        <button class="tab-button" type="button" data-tab-target="events">Events</button>
+        <button class="tab-button" type="button" data-tab-target="logs">Logs</button>
+      </nav>
 
-      <section class="panel">
-        <div class="panel-head">
-          <h2>Startup Timeline</h2>
-          <div id="startup-meta" class="panel-meta"></div>
-        </div>
-        <div id="startup-phases" class="phase-list"></div>
-      </section>
-
-      <section class="grid two-up">
-        <section class="panel">
-          <div class="panel-head">
-            <h2>Service Accounts</h2>
-            <div id="services-meta" class="panel-meta"></div>
-          </div>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Service</th>
-                  <th>State</th>
-                  <th>WS</th>
-                  <th>Interests</th>
-                  <th>Working</th>
-                  <th>Events Sent</th>
-                  <th>Last Activity</th>
-                </tr>
-              </thead>
-              <tbody id="services-table"></tbody>
-            </table>
-          </div>
-        </section>
+      <section class="tab-panel is-active" data-tab-panel="overview">
+        <section class="grid summary-grid" id="summary-cards"></section>
 
         <section class="panel">
           <div class="panel-head">
-            <h2>EventSub Snapshot</h2>
-            <div id="eventsub-meta" class="panel-meta"></div>
+            <h2>Startup Timeline</h2>
+            <div id="startup-meta" class="panel-meta"></div>
           </div>
-          <div id="eventsub-groups" class="compact-list"></div>
+          <div id="startup-phases" class="phase-list"></div>
+        </section>
+
+        <section class="grid two-up">
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Service Accounts</h2>
+              <div id="services-meta" class="panel-meta"></div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Service</th>
+                    <th>State</th>
+                    <th>WS</th>
+                    <th>Interests</th>
+                    <th>Working</th>
+                    <th>Events Sent</th>
+                    <th>Last Activity</th>
+                  </tr>
+                </thead>
+                <tbody id="services-table"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <h2>EventSub Snapshot</h2>
+              <div id="eventsub-meta" class="panel-meta"></div>
+            </div>
+            <div id="eventsub-groups" class="compact-list"></div>
+          </section>
         </section>
       </section>
 
-      <section class="grid two-up">
+      <section class="tab-panel" data-tab-panel="broadcasters">
         <section class="panel">
           <div class="panel-head">
             <h2>Broadcaster State</h2>
@@ -111,7 +120,39 @@ STATUS_HTML = """<!doctype html>
             </table>
           </div>
         </section>
+      </section>
 
+      <section class="tab-panel" data-tab-panel="events">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Live Event Feed</h2>
+            <div class="panel-actions">
+              <div id="events-meta" class="panel-meta"></div>
+              <button id="events-pause-toggle" class="ghost-button" type="button">Pause</button>
+            </div>
+          </div>
+          <div class="event-toolbar">
+            <input id="events-filter-text" class="field-input" type="search" placeholder="Filter by event, service, broadcaster, target">
+            <select id="events-filter-direction" class="field-input">
+              <option value="">All directions</option>
+              <option value="incoming">Incoming</option>
+              <option value="outgoing">Outgoing</option>
+            </select>
+            <select id="events-filter-service" class="field-input">
+              <option value="">All services</option>
+            </select>
+            <select id="events-page-size" class="field-input">
+              <option value="10">10 / page</option>
+              <option value="25" selected>25 / page</option>
+              <option value="50">50 / page</option>
+            </select>
+          </div>
+          <div id="events-pagination" class="pagination-bar"></div>
+          <div id="events-list" class="event-list"></div>
+        </section>
+      </section>
+
+      <section class="tab-panel" data-tab-panel="logs">
         <section class="panel">
           <div class="panel-head">
             <h2>Recent Logs</h2>
@@ -119,17 +160,6 @@ STATUS_HTML = """<!doctype html>
           </div>
           <div id="logs-list" class="log-list"></div>
         </section>
-      </section>
-
-      <section class="panel">
-        <div class="panel-head">
-          <h2>Live Event Feed</h2>
-          <div class="panel-actions">
-            <div id="events-meta" class="panel-meta"></div>
-            <button id="events-pause-toggle" class="ghost-button" type="button">Pause</button>
-          </div>
-        </div>
-        <div id="events-list" class="event-list"></div>
       </section>
     </div>
   </div>

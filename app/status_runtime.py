@@ -46,6 +46,10 @@ class StatusLogHandler(logging.Handler):
             return True
         if any(token in lower for token in ("get /status", "post /status", "/ws/status", "status_snapshot")):
             return True
+        if "built db eventsub subscription snapshot" in lower:
+            return True
+        if "built live eventsub subscription snapshot" in lower:
+            return True
         return False
 
 

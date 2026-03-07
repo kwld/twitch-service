@@ -119,6 +119,38 @@ body {
   margin-bottom: 18px;
 }
 
+.tab-bar {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+}
+
+.tab-button {
+  border: 1px solid var(--line);
+  background: rgba(255,255,255,0.03);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 10px 14px;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.tab-button.is-active {
+  color: var(--text);
+  border-color: rgba(93,176,255,0.6);
+  background: rgba(93,176,255,0.14);
+}
+
+.tab-panel {
+  display: none;
+}
+
+.tab-panel.is-active {
+  display: block;
+}
+
 .panel-head {
   display: flex;
   justify-content: space-between;
@@ -131,6 +163,38 @@ body {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+.event-toolbar,
+.pagination-bar,
+.pagination-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.event-toolbar {
+  margin-bottom: 12px;
+}
+
+.pagination-bar {
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.field-input {
+  min-height: 38px;
+  border: 1px solid var(--line);
+  background: rgba(255,255,255,0.03);
+  color: var(--text);
+  border-radius: 12px;
+  padding: 8px 12px;
+  font: inherit;
+}
+
+.field-input::placeholder {
+  color: var(--muted);
 }
 
 .panel h2 {
@@ -234,6 +298,11 @@ th {
 .ghost-button:hover {
   border-color: rgba(93,176,255,0.55);
   background: rgba(93,176,255,0.10);
+}
+
+.ghost-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .eventsub-cell {
@@ -350,4 +419,5 @@ th {
   .hero-status { align-items: flex-start; }
   .panel-actions, .event-summary { flex-direction: column; align-items: flex-start; }
   .event-side { justify-content: flex-start; }
+  .event-toolbar, .pagination-bar { flex-direction: column; align-items: stretch; }
 }
