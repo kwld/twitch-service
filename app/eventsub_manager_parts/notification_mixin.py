@@ -14,6 +14,7 @@ from sqlalchemy import select
 from app.event_router import InterestKey
 from app.models import (
     BotAccount,
+    BroadcasterIdentity,
     ChannelState,
     ServiceAccount,
     ServiceEventTrace,
@@ -339,6 +340,11 @@ class EventSubNotificationMixin:
         if provided_name:
             name = str(provided_name).strip()
             if name:
+                await self._store_broadcaster_identity(
+                    broadcaster_user_id=broadcaster_user_id,
+                    broadcaster_login=name.lower() if name.lower() == name else None,
+                    broadcaster_display_name=name,
+                )
                 async with self._name_cache_lock:
                     self._broadcaster_name_cache[broadcaster_user_id] = (name, datetime.now(UTC))
                 return name
@@ -348,17 +354,60 @@ class EventSubNotificationMixin:
                 return cached
         name: str | None = None
         try:
+            async with self.session_factory() as session:
+                cached_identity = await session.get(BroadcasterIdentity, broadcaster_user_id)
+                if cached_identity:
+                    name = (
+                        str(cached_identity.broadcaster_display_name or "").strip()
+                        or str(cached_identity.broadcaster_login or "").strip()
+                    )
+            if name:
+                async with self._name_cache_lock:
+                    self._broadcaster_name_cache[broadcaster_user_id] = (name, datetime.now(UTC))
+                return name
             user = await self.twitch.get_user_by_id_app(broadcaster_user_id)
             if user:
                 login = str(user.get("login", "")).strip()
                 display_name = str(user.get("display_name", "")).strip()
                 name = display_name or login
+                await self._store_broadcaster_identity(
+                    broadcaster_user_id=broadcaster_user_id,
+                    broadcaster_login=login or None,
+                    broadcaster_display_name=display_name or None,
+                )
         except Exception:
             return None
         if name:
             async with self._name_cache_lock:
                 self._broadcaster_name_cache[broadcaster_user_id] = (name, datetime.now(UTC))
         return name
+
+    async def _store_broadcaster_identity(
+        self,
+        *,
+        broadcaster_user_id: str,
+        broadcaster_login: str | None,
+        broadcaster_display_name: str | None,
+    ) -> None:
+        try:
+            async with self.session_factory() as session:
+                row = await session.get(BroadcasterIdentity, broadcaster_user_id)
+                if row is None:
+                    row = BroadcasterIdentity(
+                        broadcaster_user_id=broadcaster_user_id,
+                        broadcaster_login=(broadcaster_login or "").strip().lower() or None,
+                        broadcaster_display_name=(broadcaster_display_name or "").strip() or None,
+                    )
+                    session.add(row)
+                else:
+                    if broadcaster_login:
+                        row.broadcaster_login = broadcaster_login.strip().lower()
+                    if broadcaster_display_name:
+                        row.broadcaster_display_name = broadcaster_display_name.strip()
+                    row.last_resolved_at = datetime.now(UTC)
+                await session.commit()
+        except Exception:
+            return
 
     @staticmethod
     def _is_sensitive_key(key: str) -> bool:
@@ -465,25 +514,40 @@ class EventSubNotificationMixin:
         audit_payload: dict,
     ) -> None:
         async with self._fanout_semaphore:
+            delivery: dict[str, object]
             # Prioritize delivery path; traces/logging are secondary.
             if interest.transport == "webhook" and interest.webhook_url:
-                with suppress(Exception):
-                    await self.event_hub.publish_webhook(
-                        interest.service_account_id,
-                        interest.webhook_url,
-                        envelope,
-                    )
+                delivery = await self.event_hub.publish_webhook(
+                    interest.service_account_id,
+                    interest.webhook_url,
+                    envelope,
+                )
             else:
-                await self.event_hub.publish_to_service(interest.service_account_id, envelope)
+                delivery = await self.event_hub.publish_to_service(interest.service_account_id, envelope)
+            trace_payload = {
+                "envelope": envelope,
+                "_delivery": {
+                    **delivery,
+                    "transport": interest.transport,
+                    "target": interest.webhook_url if interest.transport == "webhook" else "/ws/events",
+                },
+            }
+            merged_audit_payload = {
+                **audit_payload,
+                "delivery": dict(delivery),
+            }
             await asyncio.gather(
-                self._audit_log(level=audit_level, payload=audit_payload),
+                self._audit_log(
+                    level="warning" if str(delivery.get("outcome")) in {"failed", "no_listener"} else audit_level,
+                    payload=merged_audit_payload,
+                ),
                 self._record_service_trace(
                     service_account_id=interest.service_account_id,
                     direction="outgoing",
                     local_transport=interest.transport,
                     event_type=event_type,
                     target=interest.webhook_url if interest.transport == "webhook" else "/ws/events",
-                    payload=envelope,
+                    payload=trace_payload,
                 ),
                 return_exceptions=True,
             )
@@ -652,4 +716,3 @@ class EventSubNotificationMixin:
                 continue
             per_bot.setdefault(key.bot_account_id, set()).add(key.broadcaster_user_id)
         await self._refresh_stream_states_for_bot_targets(per_bot)
-

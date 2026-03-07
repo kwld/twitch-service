@@ -102,6 +102,9 @@ class DummyEventSubManager:
             "has_stream_state_interest": True,
             "active_snapshot_cost_total": 2,
             "active_snapshot_max_total_cost": 10,
+            "active_snapshot_total_cost_by_bot": {
+                str(uuid.UUID("11111111-1111-1111-1111-111111111111")): 2,
+            },
             "active_snapshot_max_cost_by_bot": {
                 str(uuid.UUID("11111111-1111-1111-1111-111111111111")): 10,
             },
@@ -295,6 +298,7 @@ def test_status_post_returns_json_snapshot_with_masking():
     assert payload["eventsub"]["active_snapshot_rows"][0]["service_names"] == ["main-app"]
     assert payload["eventsub"]["active_snapshot_rows"][0]["service_count"] == 1
     assert payload["eventsub"]["active_snapshot_rows"][0]["bot_name_masked"] != "unknown"
+    assert payload["eventsub"]["active_snapshot_rows"][0]["broadcaster_masked"].startswith("chan:")
     assert payload["services"]["rows"][0]["name"] == "main-app"
     assert payload["bots"][0]["eventsub_cost_total"] == 2
     assert payload["bots"][0]["eventsub_cost_max"] == 10
@@ -311,6 +315,7 @@ def test_status_post_returns_json_snapshot_with_masking():
     assert payload["recent_events"][0]["broadcaster_label"] != "chan:bakusiowa_vibe"
     assert payload["recent_events"][0]["broadcaster_user_id_masked"] != "1316870220"
     assert "broadcaster_user_login" in payload["recent_events"][0]["body_pretty"]
+    assert isinstance(payload["recent_deliveries"], list)
 
 
 def test_status_websocket_emits_snapshot():

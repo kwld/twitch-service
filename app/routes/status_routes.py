@@ -11,6 +11,7 @@ from sqlalchemy import select
 
 from app.models import (
     BotAccount,
+    BroadcasterIdentity,
     ChannelState,
     ServiceAccount,
     ServiceBotAccess,
@@ -48,6 +49,7 @@ STATUS_HTML = """<!doctype html>
         <button class="tab-button is-active" type="button" data-tab-target="overview">Overview</button>
         <button class="tab-button" type="button" data-tab-target="broadcasters">Broadcasters</button>
         <button class="tab-button" type="button" data-tab-target="events">Events</button>
+        <button class="tab-button" type="button" data-tab-target="deliveries">Deliveries</button>
         <button class="tab-button" type="button" data-tab-target="logs">Logs</button>
       </nav>
 
@@ -93,12 +95,25 @@ STATUS_HTML = """<!doctype html>
             </div>
             <div id="eventsub-counters" class="summary-grid mini-summary-grid"></div>
             <div class="event-toolbar">
-              <input id="eventsub-filter-text" class="field-input" type="search" placeholder="Filter by event, service, bot, broadcaster">
+              <input id="eventsub-filter-text" class="field-input" type="search" placeholder="Event">
+              <input id="eventsub-filter-broadcaster" class="field-input" type="search" placeholder="Broadcaster">
+              <input id="eventsub-filter-cost" class="field-input" type="search" placeholder="Cost">
               <select id="eventsub-filter-service" class="field-input">
                 <option value="">All services</option>
               </select>
               <select id="eventsub-filter-bot" class="field-input">
                 <option value="">All bot accounts</option>
+              </select>
+              <select id="eventsub-filter-transport" class="field-input">
+                <option value="">All transports</option>
+              </select>
+              <select id="eventsub-filter-status" class="field-input">
+                <option value="">All statuses</option>
+              </select>
+              <select id="eventsub-filter-session" class="field-input">
+                <option value="">All sessions</option>
+                <option value="has-session">Has session</option>
+                <option value="no-session">No session</option>
               </select>
               <select id="eventsub-page-size" class="field-input">
                 <option value="10">10 / page</option>
@@ -236,6 +251,39 @@ STATUS_HTML = """<!doctype html>
           <div id="logs-list" class="log-list"></div>
         </section>
       </section>
+
+      <section class="tab-panel" data-tab-panel="deliveries">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Delivery Feed</h2>
+            <div id="deliveries-meta" class="panel-meta"></div>
+          </div>
+          <div class="event-toolbar">
+            <input id="deliveries-filter-text" class="field-input" type="search" placeholder="Filter by event, service, broadcaster, target">
+            <select id="deliveries-filter-transport" class="field-input">
+              <option value="">All transports</option>
+              <option value="websocket">WebSocket</option>
+              <option value="webhook">Webhook</option>
+            </select>
+            <select id="deliveries-filter-outcome" class="field-input">
+              <option value="">All outcomes</option>
+              <option value="delivered">Delivered</option>
+              <option value="failed">Failed</option>
+              <option value="no_listener">No listener</option>
+            </select>
+            <select id="deliveries-filter-service" class="field-input">
+              <option value="">All services</option>
+            </select>
+            <select id="deliveries-page-size" class="field-input">
+              <option value="10">10 / page</option>
+              <option value="25" selected>25 / page</option>
+              <option value="50">50 / page</option>
+            </select>
+          </div>
+          <div id="deliveries-pagination" class="pagination-bar"></div>
+          <div id="deliveries-list" class="event-list"></div>
+        </section>
+      </section>
     </div>
   </div>
   <div id="events-modal" class="modal-shell hidden" aria-hidden="true">
@@ -320,6 +368,11 @@ def _trace_event_payload(trace: ServiceEventTrace) -> dict[str, Any]:
     event = payload.get("event")
     if isinstance(event, dict):
         return event
+    envelope = payload.get("envelope")
+    if isinstance(envelope, dict):
+        inner_event = envelope.get("event")
+        if isinstance(inner_event, dict):
+            return inner_event
     return payload
 
 
@@ -410,6 +463,44 @@ def register_status_routes(
     snapshot_cache_ttl = 2.0
     snapshot_lock = asyncio.Lock()
 
+    async def refresh_broadcaster_identities(user_ids: set[str]) -> dict[str, str]:
+        unresolved = sorted({str(user_id).strip() for user_id in user_ids if str(user_id).strip()})
+        if not unresolved:
+            return {}
+        resolved: dict[str, str] = {}
+        try:
+            token = await eventsub_manager.twitch.app_access_token()
+            for idx in range(0, len(unresolved), 100):
+                batch = unresolved[idx : idx + 100]
+                users = await eventsub_manager.twitch.get_users_by_query(token, user_ids=batch)
+                if not users:
+                    continue
+                async with session_factory() as session:
+                    for user in users:
+                        user_id = str(user.get("id", "")).strip()
+                        login = str(user.get("login", "")).strip().lower()
+                        display_name = str(user.get("display_name", "")).strip()
+                        if not user_id:
+                            continue
+                        resolved[user_id] = display_name or login or user_id
+                        row = await session.get(BroadcasterIdentity, user_id)
+                        if row is None:
+                            row = BroadcasterIdentity(
+                                broadcaster_user_id=user_id,
+                                broadcaster_login=login or None,
+                                broadcaster_display_name=display_name or None,
+                                last_resolved_at=_utc_now(),
+                            )
+                            session.add(row)
+                        else:
+                            row.broadcaster_login = login or row.broadcaster_login
+                            row.broadcaster_display_name = display_name or row.broadcaster_display_name
+                            row.last_resolved_at = _utc_now()
+                    await session.commit()
+        except Exception:
+            return resolved
+        return resolved
+
     async def build_status_snapshot() -> dict[str, Any]:
         now = _utc_now()
         async with session_factory() as session:
@@ -420,6 +511,7 @@ def register_status_routes(
             bot_rows = list((await session.scalars(select(BotAccount))).all())
             access_rows = list((await session.scalars(select(ServiceBotAccess))).all())
             channel_states = list((await session.scalars(select(ChannelState))).all())
+            identity_rows = list((await session.scalars(select(BroadcasterIdentity))).all())
             traces = list(
                 (
                     await session.scalars(
@@ -432,6 +524,7 @@ def register_status_routes(
         stats_by_service = {row.service_account_id: row for row in stats_rows}
         service_name_by_id = {str(service.id): service.name for service in services}
         bot_by_id = {str(bot.id): bot for bot in bot_rows}
+        identity_by_user_id = {str(row.broadcaster_user_id): row for row in identity_rows}
         bot_meta_rows = [
             {
                 "id": str(bot.id),
@@ -498,6 +591,23 @@ def register_status_routes(
 
         broadcaster_names: dict[str, str] = {}
         message_counts_by_broadcaster: dict[str, dict[str, int]] = {}
+        for user_id, identity in identity_by_user_id.items():
+            name = str(identity.broadcaster_display_name or "").strip() or str(identity.broadcaster_login or "").strip()
+            if name:
+                broadcaster_names[user_id] = name
+        fallback_broadcaster_ids = {
+            str(state.broadcaster_user_id).strip()
+            for state in channel_states
+        } | {
+            str(row.get("broadcaster_user_id", "")).strip()
+            for row in active_snapshot
+        }
+        missing_ids = {
+            user_id for user_id in fallback_broadcaster_ids
+            if user_id and user_id not in broadcaster_names
+        }
+        if missing_ids:
+            broadcaster_names.update(await refresh_broadcaster_identities(missing_ids))
         for trace in traces:
             broadcaster_user_id = _trace_broadcaster_user_id(trace)
             if not broadcaster_user_id:
@@ -517,7 +627,10 @@ def register_status_routes(
                 counters["messages_sent"] += 1
 
         eventsub_names_by_broadcaster: dict[str, set[str]] = {}
-        eventsub_cost_by_bot: dict[str, int] = {}
+        eventsub_cost_by_bot: dict[str, int] = {
+            str(key): int(value or 0)
+            for key, value in (eventsub_summary.get("active_snapshot_total_cost_by_bot") or {}).items()
+        }
         eventsub_max_cost_by_bot: dict[str, int] = {
             str(key): int(value or 0)
             for key, value in (eventsub_summary.get("active_snapshot_max_cost_by_bot") or {}).items()
@@ -529,8 +642,12 @@ def register_status_routes(
             cost = int(row.get("cost", 0) or 0)
             if broadcaster_user_id and event_type:
                 eventsub_names_by_broadcaster.setdefault(broadcaster_user_id, set()).add(event_type)
-            if bot_account_id:
-                eventsub_cost_by_bot[bot_account_id] = eventsub_cost_by_bot.get(bot_account_id, 0) + cost
+            if broadcaster_user_id and broadcaster_user_id not in broadcaster_names:
+                identity = identity_by_user_id.get(broadcaster_user_id)
+                if identity:
+                    resolved_name = str(identity.broadcaster_display_name or "").strip() or str(identity.broadcaster_login or "").strip()
+                    if resolved_name:
+                        broadcaster_names[broadcaster_user_id] = resolved_name
         for row in working_interests:
             broadcaster_user_id = str(row.broadcaster_user_id).strip()
             event_type = str(row.event_type).strip()
@@ -642,6 +759,45 @@ def register_status_routes(
                 }
             )
 
+        recent_delivery_rows = []
+        for trace in traces[:120]:
+            if trace.direction != "outgoing":
+                continue
+            payload = _safe_json_loads(trace.payload_json)
+            delivery = payload.get("_delivery")
+            envelope = payload.get("envelope")
+            if not isinstance(delivery, dict):
+                continue
+            broadcaster_user_id = _trace_broadcaster_user_id(trace)
+            broadcaster_login = _trace_broadcaster_login(trace) or broadcaster_names.get(str(broadcaster_user_id or ""))
+            candidate_bot_ids = sorted(bot_ids_by_broadcaster.get(str(broadcaster_user_id or ""), set()))
+            bot = bot_by_id.get(candidate_bot_ids[0]) if len(candidate_bot_ids) == 1 else None
+            recent_delivery_rows.append(
+                {
+                    "timestamp": _fmt_dt(trace.created_at),
+                    "service_name": service_name_by_id.get(str(trace.service_account_id), "unknown"),
+                    "service_account_id_masked": _short_id(str(trace.service_account_id)),
+                    "event_type": trace.event_type,
+                    "transport": str(delivery.get("transport") or trace.local_transport or ""),
+                    "target": str(delivery.get("target") or trace.target or "-"),
+                    "outcome": str(delivery.get("outcome") or "unknown"),
+                    "duration_ms": int(delivery.get("duration_ms", 0) or 0),
+                    "listener_count": int(delivery.get("listener_count", 0) or 0),
+                    "delivered_count": int(delivery.get("delivered_count", 0) or 0),
+                    "failed_count": int(delivery.get("failed_count", 0) or 0),
+                    "status_code": delivery.get("status_code"),
+                    "error": str(delivery.get("error") or ""),
+                    "broadcaster_label": f"chan:{_mask_name(broadcaster_login or broadcaster_user_id)}"
+                    if (broadcaster_login or broadcaster_user_id)
+                    else "chan:unknown",
+                    "broadcaster_user_id_masked": _mask_id(broadcaster_user_id),
+                    "bot_account_id": str(bot.id) if bot else "",
+                    "bot_account_id_masked": _short_id(str(bot.id)) if bot else ("multiple" if len(candidate_bot_ids) > 1 else "n/a"),
+                    "bot_name_masked": _mask_name(bot.name) if bot else ("multiple" if len(candidate_bot_ids) > 1 else "unknown"),
+                    "body_pretty": _format_trace_body(json.dumps(envelope if isinstance(envelope, dict) else payload)),
+                }
+            )
+
         bot_summary = []
         for bot in bot_rows:
             bot_subs = subs_by_bot.get(str(bot.id), [])
@@ -734,7 +890,7 @@ def register_status_routes(
                         "status": str(row.get("status", "unknown")),
                         "cost": int(row.get("cost", 0) or 0),
                         "event_type": str(row.get("event_type", "")),
-                        "broadcaster_masked": _short_id(str(row.get("broadcaster_user_id", ""))),
+                        "broadcaster_masked": f"chan:{_mask_name(broadcaster_names.get(str(row.get('broadcaster_user_id', '')).strip()) or str(row.get('broadcaster_user_id', '')))}",
                         "broadcaster_user_id_masked": _mask_id(str(row.get("broadcaster_user_id", ""))),
                         "bot_account_id_masked": _short_id(str(row.get("bot_account_id", ""))),
                         "bot_account_id": str(row.get("bot_account_id", "")),
@@ -769,6 +925,7 @@ def register_status_routes(
             "bots": bot_summary,
             "broadcasters": broadcaster_rows,
             "recent_events": recent_event_rows,
+            "recent_deliveries": recent_delivery_rows,
             "logs": recent_logs,
         }
 

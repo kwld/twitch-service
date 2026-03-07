@@ -19,9 +19,14 @@
     servicesTable: document.getElementById("services-table"),
     eventsubMeta: document.getElementById("eventsub-meta"),
     eventsubCounters: document.getElementById("eventsub-counters"),
-    eventsubFilterText: document.getElementById("eventsub-filter-text"),
+    eventsubFilterEvent: document.getElementById("eventsub-filter-text"),
+    eventsubFilterBroadcaster: document.getElementById("eventsub-filter-broadcaster"),
+    eventsubFilterCost: document.getElementById("eventsub-filter-cost"),
     eventsubFilterService: document.getElementById("eventsub-filter-service"),
     eventsubFilterBot: document.getElementById("eventsub-filter-bot"),
+    eventsubFilterTransport: document.getElementById("eventsub-filter-transport"),
+    eventsubFilterStatus: document.getElementById("eventsub-filter-status"),
+    eventsubFilterSession: document.getElementById("eventsub-filter-session"),
     eventsubPageSize: document.getElementById("eventsub-page-size"),
     eventsubPagination: document.getElementById("eventsub-pagination"),
     eventsubTable: document.getElementById("eventsub-table"),
@@ -47,6 +52,14 @@
     eventsModalLabel: document.getElementById("events-modal-label"),
     eventsModalId: document.getElementById("events-modal-id"),
     eventsModalList: document.getElementById("events-modal-list"),
+    deliveriesMeta: document.getElementById("deliveries-meta"),
+    deliveriesFilterText: document.getElementById("deliveries-filter-text"),
+    deliveriesFilterTransport: document.getElementById("deliveries-filter-transport"),
+    deliveriesFilterOutcome: document.getElementById("deliveries-filter-outcome"),
+    deliveriesFilterService: document.getElementById("deliveries-filter-service"),
+    deliveriesPageSize: document.getElementById("deliveries-page-size"),
+    deliveriesPagination: document.getElementById("deliveries-pagination"),
+    deliveriesList: document.getElementById("deliveries-list"),
   };
 
   let reconnectDelay = 1000;
@@ -59,9 +72,11 @@
   let allLogs = [];
   let allBots = [];
   let allEventSubRows = [];
+  let allDeliveries = [];
   let activeTab = "overview";
   let eventsPage = 1;
   let eventsubPage = 1;
+  let deliveriesPage = 1;
   let pendingSnapshot = null;
   let selectionResumeTimer = null;
   let openEventKeys = new Set();
@@ -278,26 +293,36 @@
     }
   }
 
+  function renderEventSubSelectFilter(element, values, selected, allLabel) {
+    element.innerHTML = [`<option value="">${allLabel}</option>`, ...values.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`)].join("");
+    if (values.includes(selected)) {
+      element.value = selected;
+    }
+  }
+
   function getFilteredEventSubRows() {
-    const text = (el.eventsubFilterText.value || "").trim().toLowerCase();
+    const eventText = (el.eventsubFilterEvent.value || "").trim().toLowerCase();
+    const broadcasterText = (el.eventsubFilterBroadcaster.value || "").trim().toLowerCase();
+    const costText = (el.eventsubFilterCost.value || "").trim().toLowerCase();
     const service = el.eventsubFilterService.value || "";
     const bot = el.eventsubFilterBot.value || "";
+    const transport = el.eventsubFilterTransport.value || "";
+    const status = el.eventsubFilterStatus.value || "";
+    const session = el.eventsubFilterSession.value || "";
     return allEventSubRows.filter((row) => {
       if (service && !(Array.isArray(row.service_names) && row.service_names.includes(service))) return false;
       if (bot && row.bot_account_id !== bot) return false;
-      if (!text) return true;
-      const haystack = [
-        row.event_type,
-        row.broadcaster_masked,
-        row.broadcaster_user_id_masked,
-        row.bot_name_masked,
-        row.bot_account_id_masked,
-        row.transport,
-        row.status,
-        row.service_names_display,
-        row.subscription_id,
-      ].join(" ").toLowerCase();
-      return haystack.includes(text);
+      if (transport && row.transport !== transport) return false;
+      if (status && row.status !== status) return false;
+      if (session === "has-session" && (!row.session_id_masked || row.session_id_masked === "no-session")) return false;
+      if (session === "no-session" && row.session_id_masked && row.session_id_masked !== "no-session") return false;
+      if (eventText && !String(row.event_type || "").toLowerCase().includes(eventText)) return false;
+      if (broadcasterText) {
+        const haystack = [row.broadcaster_masked, row.broadcaster_user_id_masked].join(" ").toLowerCase();
+        if (!haystack.includes(broadcasterText)) return false;
+      }
+      if (costText && !String(row.cost || "").toLowerCase().includes(costText)) return false;
+      return true;
     });
   }
 
@@ -338,7 +363,90 @@
   }
 
   function refreshEventSub() {
+    renderEventSubSelectFilter(
+      el.eventsubFilterTransport,
+      Array.from(new Set(allEventSubRows.map((row) => row.transport).filter(Boolean))).sort(),
+      el.eventsubFilterTransport.value,
+      "All transports",
+    );
+    renderEventSubSelectFilter(
+      el.eventsubFilterStatus,
+      Array.from(new Set(allEventSubRows.map((row) => row.status).filter(Boolean))).sort(),
+      el.eventsubFilterStatus.value,
+      "All statuses",
+    );
     renderEventSubRows(getFilteredEventSubRows());
+  }
+
+  function renderDeliveryServiceFilter(rows) {
+    const selected = el.deliveriesFilterService.value;
+    const names = Array.from(new Set((rows || []).map((row) => row.service_name).filter(Boolean))).sort();
+    el.deliveriesFilterService.innerHTML = ['<option value="">All services</option>', ...names.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`)].join("");
+    if (names.includes(selected)) {
+      el.deliveriesFilterService.value = selected;
+    }
+  }
+
+  function getFilteredDeliveries() {
+    const text = (el.deliveriesFilterText.value || "").trim().toLowerCase();
+    const transport = el.deliveriesFilterTransport.value || "";
+    const outcome = el.deliveriesFilterOutcome.value || "";
+    const service = el.deliveriesFilterService.value || "";
+    return allDeliveries.filter((row) => {
+      if (transport && row.transport !== transport) return false;
+      if (outcome && row.outcome !== outcome) return false;
+      if (service && row.service_name !== service) return false;
+      if (!text) return true;
+      const haystack = [
+        row.event_type,
+        row.service_name,
+        row.broadcaster_label,
+        row.target,
+        row.error,
+        row.transport,
+        row.outcome,
+      ].join(" ").toLowerCase();
+      return haystack.includes(text);
+    });
+  }
+
+  function renderDeliveries(rows) {
+    const items = Array.isArray(rows) ? rows : [];
+    const pageSize = Math.max(1, Number(el.deliveriesPageSize.value || 25));
+    const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+    deliveriesPage = Math.min(totalPages, Math.max(1, deliveriesPage));
+    const start = (deliveriesPage - 1) * pageSize;
+    const pageRows = items.slice(start, start + pageSize);
+    el.deliveriesMeta.textContent = `${items.length} delivery attempts`;
+    renderGenericPagination(el.deliveriesPagination, items.length, totalPages, deliveriesPage, "deliveries-page");
+    el.deliveriesList.innerHTML = pageRows.map((row) => `
+      <details class="event-row">
+        <summary class="event-summary">
+          <div class="event-main">
+            <span class="badge badge-${row.outcome === "delivered" ? "good" : row.outcome === "failed" ? "bad" : "warn"}">${row.outcome}</span>
+            <strong>${row.event_type}</strong>
+            <span class="muted">${row.broadcaster_label}</span>
+            <span class="badge badge-info">${row.transport}</span>
+            <span class="badge badge-warn">${row.duration_ms}ms</span>
+          </div>
+          <div class="event-side">
+            <span class="muted">${row.service_name}</span>
+            <span class="muted">${fmtDate(row.timestamp)}</span>
+          </div>
+        </summary>
+        <div class="event-meta">
+          <div class="muted mono">${row.target} • listeners=${row.listener_count} • sent=${row.delivered_count} • failed=${row.failed_count} • status=${row.status_code || "-"}</div>
+          <div class="muted mono">${row.broadcaster_user_id_masked} • ${row.bot_name_masked || "unknown"} • ${row.bot_account_id_masked || "n/a"}</div>
+        </div>
+        ${row.error ? `<div class="message delivery-error">${escapeHtml(row.error)}</div>` : ""}
+        <pre class="event-body">${row.body_pretty}</pre>
+      </details>
+    `).join("") || `<div class="log-row"><div class="muted">No delivery attempts recorded yet.</div></div>`;
+  }
+
+  function refreshDeliveries() {
+    renderDeliveryServiceFilter(allDeliveries);
+    renderDeliveries(getFilteredDeliveries());
   }
 
   function getFilteredEvents() {
@@ -469,6 +577,8 @@
     } else {
       el.eventsMeta.textContent = `${allEvents.length} buffered events | paused`;
     }
+    allDeliveries = Array.isArray(snapshot.recent_deliveries) ? snapshot.recent_deliveries : [];
+    refreshDeliveries();
     renderLogs(snapshot.logs || []);
   }
 
@@ -586,10 +696,20 @@
   el.eventsFilterService.addEventListener("change", () => handleEventFilterChange(true));
   el.eventsFilterBot.addEventListener("change", () => handleEventFilterChange(true));
   el.eventsPageSize.addEventListener("change", () => handleEventFilterChange(true));
-  el.eventsubFilterText.addEventListener("input", () => { eventsubPage = 1; refreshEventSub(); });
+  el.eventsubFilterEvent.addEventListener("input", () => { eventsubPage = 1; refreshEventSub(); });
+  el.eventsubFilterBroadcaster.addEventListener("input", () => { eventsubPage = 1; refreshEventSub(); });
+  el.eventsubFilterCost.addEventListener("input", () => { eventsubPage = 1; refreshEventSub(); });
   el.eventsubFilterService.addEventListener("change", () => { eventsubPage = 1; refreshEventSub(); });
   el.eventsubFilterBot.addEventListener("change", () => { eventsubPage = 1; refreshEventSub(); });
+  el.eventsubFilterTransport.addEventListener("change", () => { eventsubPage = 1; refreshEventSub(); });
+  el.eventsubFilterStatus.addEventListener("change", () => { eventsubPage = 1; refreshEventSub(); });
+  el.eventsubFilterSession.addEventListener("change", () => { eventsubPage = 1; refreshEventSub(); });
   el.eventsubPageSize.addEventListener("change", () => { eventsubPage = 1; refreshEventSub(); });
+  el.deliveriesFilterText.addEventListener("input", () => { deliveriesPage = 1; refreshDeliveries(); });
+  el.deliveriesFilterTransport.addEventListener("change", () => { deliveriesPage = 1; refreshDeliveries(); });
+  el.deliveriesFilterOutcome.addEventListener("change", () => { deliveriesPage = 1; refreshDeliveries(); });
+  el.deliveriesFilterService.addEventListener("change", () => { deliveriesPage = 1; refreshDeliveries(); });
+  el.deliveriesPageSize.addEventListener("change", () => { deliveriesPage = 1; refreshDeliveries(); });
   el.broadcasterFilterBot.addEventListener("change", () => renderBroadcasters(allBroadcasters));
   el.logsFilterBot.addEventListener("change", () => renderLogs(allLogs));
   el.eventsPagination.addEventListener("click", (event) => {
@@ -605,6 +725,13 @@
     if (button.dataset.eventsubPageNav === "prev") eventsubPage -= 1;
     if (button.dataset.eventsubPageNav === "next") eventsubPage += 1;
     refreshEventSub();
+  });
+  el.deliveriesPagination.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-deliveries-page-nav]");
+    if (!button) return;
+    if (button.dataset.deliveriesPageNav === "prev") deliveriesPage -= 1;
+    if (button.dataset.deliveriesPageNav === "next") deliveriesPage += 1;
+    refreshDeliveries();
   });
   el.eventsList.addEventListener("toggle", (event) => {
     const details = event.target.closest("details[data-event-key]");

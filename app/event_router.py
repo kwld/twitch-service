@@ -6,6 +6,7 @@ import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import time
 
 import httpx
 from fastapi import WebSocket
@@ -114,23 +115,38 @@ class LocalEventHub:
         async with self._lock:
             return len(self._clients.get(service_account_id, set()))
 
-    async def publish_to_service(self, service_account_id: uuid.UUID, payload: dict) -> None:
+    async def publish_to_service(self, service_account_id: uuid.UUID, payload: dict) -> dict:
+        started = time.perf_counter()
         async with self._lock:
             sockets = list(self._clients.get(service_account_id, set()))
         if not sockets:
-            return
+            return {
+                "outcome": "no_listener",
+                "duration_ms": int((time.perf_counter() - started) * 1000),
+                "listener_count": 0,
+                "delivered_count": 0,
+                "failed_count": 0,
+            }
         text = json.dumps(payload, default=str)
         send_results = await asyncio.gather(
             *(ws.send_text(text) for ws in sockets),
             return_exceptions=True,
         )
         dead = [ws for ws, result in zip(sockets, send_results, strict=False) if isinstance(result, Exception)]
+        delivered_count = sum(1 for result in send_results if not isinstance(result, Exception))
         if dead:
             async with self._lock:
                 for ws in dead:
                     self._clients[service_account_id].discard(ws)
         if self.on_service_ws_event and sockets:
             await self.on_service_ws_event(service_account_id)
+        return {
+            "outcome": "delivered" if delivered_count > 0 else "failed",
+            "duration_ms": int((time.perf_counter() - started) * 1000),
+            "listener_count": len(sockets),
+            "delivered_count": delivered_count,
+            "failed_count": len(dead),
+        }
 
     async def publish_webhook(
         self,
@@ -138,10 +154,25 @@ class LocalEventHub:
         url: str,
         payload: dict,
         timeout: int = 10,
-    ) -> None:
-        await self._http_client.post(url, json=payload, timeout=timeout)
+    ) -> dict:
+        started = time.perf_counter()
+        try:
+            response = await self._http_client.post(url, json=payload, timeout=timeout)
+            response.raise_for_status()
+        except Exception as exc:
+            return {
+                "outcome": "failed",
+                "duration_ms": int((time.perf_counter() - started) * 1000),
+                "status_code": getattr(getattr(exc, "response", None), "status_code", None),
+                "error": str(exc),
+            }
         if self.on_service_webhook_event:
             await self.on_service_webhook_event(service_account_id)
+        return {
+            "outcome": "delivered",
+            "duration_ms": int((time.perf_counter() - started) * 1000),
+            "status_code": response.status_code,
+        }
 
     async def close(self) -> None:
         await self._http_client.aclose()

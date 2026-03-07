@@ -84,6 +84,7 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
         self._active_subscriptions_cache: list[dict] = []
         self._active_subscriptions_total_cost = 0
         self._active_subscriptions_max_total_cost = 0
+        self._active_subscriptions_total_cost_by_bot: dict[str, int] = {}
         self._active_subscriptions_max_cost_by_bot: dict[str, int] = {}
         self._name_cache_ttl = timedelta(minutes=15)
         self._name_cache_lock = asyncio.Lock()
@@ -604,6 +605,10 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
             self._active_subscriptions_cached_at = now
             self._active_subscriptions_total_cost = sum(int(item.get("cost", 0) or 0) for item in snapshot)
             self._active_subscriptions_max_total_cost = int(cost_meta.get("global_max_total_cost", 0) or 0)
+            self._active_subscriptions_total_cost_by_bot = {
+                str(key): int(value or 0)
+                for key, value in (cost_meta.get("total_cost_by_bot") or {}).items()
+            }
             self._active_subscriptions_max_cost_by_bot = {
                 str(key): int(value or 0)
                 for key, value in (cost_meta.get("max_cost_by_bot") or {}).items()
@@ -638,6 +643,7 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
         ]
         self._active_subscriptions_total_cost = 0
         self._active_subscriptions_max_total_cost = 0
+        self._active_subscriptions_total_cost_by_bot = {}
         self._active_subscriptions_max_cost_by_bot = {}
         logger.info(
             "Built DB EventSub subscription snapshot: rows=%d in %dms",
@@ -685,6 +691,7 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
                 ),
                 "active_snapshot_cost_total": int(self._active_subscriptions_total_cost or 0),
                 "active_snapshot_max_total_cost": int(self._active_subscriptions_max_total_cost or 0),
+                "active_snapshot_total_cost_by_bot": dict(self._active_subscriptions_total_cost_by_bot),
                 "active_snapshot_max_cost_by_bot": dict(self._active_subscriptions_max_cost_by_bot),
             }
         )

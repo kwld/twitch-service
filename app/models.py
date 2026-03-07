@@ -173,6 +173,20 @@ class ChannelState(Base):
     )
 
 
+class BroadcasterIdentity(Base):
+    __tablename__ = "broadcaster_identities"
+
+    broadcaster_user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    broadcaster_login: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    broadcaster_display_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    last_resolved_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
 class OAuthCallback(Base):
     __tablename__ = "oauth_callbacks"
 

@@ -331,6 +331,13 @@ th {
   word-break: break-word;
 }
 
+.delivery-error {
+  margin: 10px 0 0;
+  color: var(--bad);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .log-row.log-info {
   border-color: rgba(93,176,255,0.35);
   background: rgba(93,176,255,0.07);
