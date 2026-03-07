@@ -43,7 +43,8 @@ class EventSubSubscriptionMixin:
 
     async def _sync_from_twitch_and_reconcile(self) -> None:
         started = time.perf_counter()
-        subs = await self._list_eventsub_subscriptions_all_tokens()
+        listed = await self._list_eventsub_subscriptions_all_tokens()
+        subs = listed[0] if isinstance(listed, tuple) else listed
         async with self.session_factory() as session:
             existing_rows = list((await session.scalars(select(TwitchSubscription))).all())
             previous_sub_owner = {
