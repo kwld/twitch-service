@@ -56,10 +56,12 @@ from app.models import (
 from app.routes import (
     register_admin_routes,
     register_service_routes,
+    register_status_routes,
     register_system_routes,
     register_twitch_routes,
     register_ws_routes,
 )
+from app.status_runtime import StatusLogHandler, StatusRuntime
 from app.twitch import TwitchClient
 from app.twitch_chat_assets import TwitchChatAssetCache
 
@@ -118,6 +120,7 @@ eventsub_manager = EventSubManager(
     webhook_secret=settings.twitch_eventsub_webhook_secret,
 )
 runtime_state = RuntimeState(settings=settings)
+status_runtime = StatusRuntime()
 DEFAULT_STREAM_EVENTS = ("stream.online", "stream.offline")
 BROADCASTER_AUTH_SCOPES = ("channel:bot",)
 SERVICE_USER_AUTH_SCOPES = ("user:read:email",)
@@ -127,6 +130,17 @@ SERVICE_AUTH_CACHE_TTL = timedelta(seconds=60)
 SERVICE_API_STATS_FLUSH_DELAY = 1.0
 ws_token_store = WsTokenStore(ttl=WS_TOKEN_TTL)
 eventsub_message_deduper = EventSubMessageDeduper(ttl=EVENTSUB_MESSAGE_DEDUP_TTL)
+_status_log_handler = StatusLogHandler(status_runtime)
+for _logger_name in (
+    "twitch-eventsub-service",
+    "app.eventsub_manager",
+    "app.eventsub_manager_parts.subscription_mixin",
+    "app.routes.twitch_routes",
+    "uvicorn.error",
+):
+    _target_logger = logging.getLogger(_logger_name)
+    if not any(isinstance(handler, StatusLogHandler) for handler in _target_logger.handlers):
+        _target_logger.addHandler(_status_log_handler)
 _service_auth_cache_lock = asyncio.Lock()
 _service_auth_cache: dict[str, tuple[datetime, ServiceAccount]] = {}
 _service_api_stats_lock = asyncio.Lock()
@@ -573,6 +587,17 @@ register_system_routes(
     is_new_eventsub_message_id=_is_new_eventsub_message_id,
     broadcaster_auth_scopes=BROADCASTER_AUTH_SCOPES,
     service_user_auth_scopes=SERVICE_USER_AUTH_SCOPES,
+)
+register_status_routes(
+    app,
+    settings=settings,
+    logger=logger,
+    session_factory=session_factory,
+    eventsub_manager=eventsub_manager,
+    status_runtime=status_runtime,
+    resolve_client_ip=resolve_client_ip,
+    is_ip_allowed=lambda client_ip: is_ip_allowed(client_ip, allowed_ip_networks),
+    filter_working_interests=_filter_working_interests,
 )
 
 register_admin_routes(

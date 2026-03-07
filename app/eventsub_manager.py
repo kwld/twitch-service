@@ -88,6 +88,16 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
         self._bot_name_cache: dict[uuid.UUID, tuple[str, datetime]] = {}
         self._broadcaster_name_cache: dict[str, tuple[str, datetime]] = {}
         self._startup_refresh_deferred_to_session_welcome = False
+        self._status_lock = asyncio.Lock()
+        self._startup_state = "idle"
+        self._startup_started_at: datetime | None = None
+        self._startup_finished_at: datetime | None = None
+        self._phase_history: list[dict] = []
+        self._last_error: dict | None = None
+        self._session_welcome_count = 0
+        self._last_session_welcome_at: datetime | None = None
+        self._run_loop_started_at: datetime | None = None
+        self._connect_cycle_count = 0
 
     def _transport_for_event(self, event_type: str) -> Literal["websocket", "webhook"]:
         transport, _ = best_transport_for_service(
@@ -112,6 +122,15 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
             return await func(*args, **kwargs)
         finally:
             elapsed_ms = int((time.perf_counter() - started) * 1000)
+            async with self._status_lock:
+                self._phase_history.append(
+                    {
+                        "label": label,
+                        "elapsed_ms": elapsed_ms,
+                        "completed_at": datetime.now(UTC).isoformat(),
+                    }
+                )
+                self._phase_history = self._phase_history[-40:]
             logger.info("EventSub phase %s completed in %dms", label, elapsed_ms)
 
     async def _acquire_subscription_key_lock(self, key: InterestKey) -> asyncio.Lock:
@@ -130,6 +149,12 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
 
     async def start(self) -> None:
         started = time.perf_counter()
+        async with self._status_lock:
+            self._startup_state = "starting"
+            self._startup_started_at = datetime.now(UTC)
+            self._startup_finished_at = None
+            self._phase_history = []
+            self._last_error = None
         await self._timed_phase("load_interests", self._load_interests)
         await self._timed_phase("reconcile_from_twitch", self._sync_from_twitch_and_reconcile)
         await self._timed_phase(
@@ -157,6 +182,9 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
         self._cleanup_task = asyncio.create_task(
             self._cleanup_stale_interests_loop(), name="eventsub-interest-cleanup"
         )
+        async with self._status_lock:
+            self._startup_state = "ready"
+            self._startup_finished_at = datetime.now(UTC)
         logger.info(
             "EventSub manager startup finished in %dms",
             int((time.perf_counter() - started) * 1000),
@@ -278,8 +306,12 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
         await self.registry.load(interests)
 
     async def _run(self) -> None:
+        async with self._status_lock:
+            self._run_loop_started_at = datetime.now(UTC)
         while not self._stop.is_set():
             try:
+                async with self._status_lock:
+                    self._connect_cycle_count += 1
                 if not await self._has_websocket_interest():
                     self._session_id = None
                     self._zero_listener_since = None
@@ -296,6 +328,12 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
                     continue
                 await self._run_single_connection(None)
             except ConnectionClosedError as exc:
+                async with self._status_lock:
+                    self._last_error = {
+                        "kind": "connection_closed",
+                        "message": str(exc),
+                        "recorded_at": datetime.now(UTC).isoformat(),
+                    }
                 if exc.code == 4003:
                     logger.info("EventSub websocket closed as unused (4003); waiting for websocket interests")
                     self._session_id = None
@@ -306,6 +344,12 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                async with self._status_lock:
+                    self._last_error = {
+                        "kind": "run_loop_exception",
+                        "message": str(exc),
+                        "recorded_at": datetime.now(UTC).isoformat(),
+                    }
                 logger.exception("EventSub manager crashed: %s", exc)
                 await asyncio.sleep(3)
 
@@ -343,6 +387,9 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
                 if msg_type == "session_welcome":
                     started = time.perf_counter()
                     self._session_id = payload["session"]["id"]
+                    async with self._status_lock:
+                        self._session_welcome_count += 1
+                        self._last_session_welcome_at = datetime.now(UTC)
                     logger.info("EventSub websocket session_welcome received: session_id=%s", self._session_id)
                     await self._timed_phase("session_welcome_ensure_all_subscriptions", self._ensure_all_subscriptions)
                     if self._startup_refresh_deferred_to_session_welcome:
@@ -568,4 +615,45 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
             int((time.perf_counter() - started) * 1000),
         )
         return snapshot, now
+
+    async def get_status_summary(self) -> dict:
+        active_ws, latest_disconnect = await self._service_ws_listener_activity()
+        cooldown_remaining = await self._websocket_listener_cooldown_remaining()
+        registry_keys = await self.registry.keys()
+        async with self._status_lock:
+            state = {
+                "startup_state": self._startup_state,
+                "startup_started_at": self._startup_started_at.isoformat() if self._startup_started_at else None,
+                "startup_finished_at": self._startup_finished_at.isoformat() if self._startup_finished_at else None,
+                "session_id_masked": (
+                    f"{self._session_id[:6]}...{self._session_id[-4:]}"
+                    if self._session_id and len(self._session_id) > 12
+                    else self._session_id
+                ),
+                "session_welcome_count": self._session_welcome_count,
+                "last_session_welcome_at": (
+                    self._last_session_welcome_at.isoformat() if self._last_session_welcome_at else None
+                ),
+                "phase_history": list(self._phase_history),
+                "last_error": dict(self._last_error) if self._last_error else None,
+                "connect_cycle_count": self._connect_cycle_count,
+                "run_loop_started_at": self._run_loop_started_at.isoformat() if self._run_loop_started_at else None,
+            }
+        state.update(
+            {
+                "registry_key_count": len(registry_keys),
+                "active_service_ws_connections": active_ws,
+                "last_service_disconnect_at": latest_disconnect.isoformat() if latest_disconnect else None,
+                "websocket_listener_cooldown_seconds": (
+                    max(0, int(cooldown_remaining.total_seconds())) if cooldown_remaining is not None else None
+                ),
+                "has_websocket_interest": any(
+                    self._transport_for_event(key.event_type) == "websocket" for key in registry_keys
+                ),
+                "has_stream_state_interest": any(
+                    key.event_type in {"stream.online", "stream.offline"} for key in registry_keys
+                ),
+            }
+        )
+        return state
 
