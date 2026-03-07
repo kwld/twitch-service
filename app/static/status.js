@@ -80,6 +80,7 @@
   let pendingSnapshot = null;
   let selectionResumeTimer = null;
   let openEventKeys = new Set();
+  let openDeliveryKeys = new Set();
 
   function fmtDate(value) {
     if (!value) return "-";
@@ -120,6 +121,18 @@
       row.direction,
       row.event_type,
       row.target,
+      row.broadcaster_user_id_masked,
+    ].join("|");
+  }
+
+  function deliveryRowKey(row) {
+    return [
+      row.timestamp,
+      row.service_name,
+      row.event_type,
+      row.transport,
+      row.target,
+      row.outcome,
       row.broadcaster_user_id_masked,
     ].join("|");
   }
@@ -411,6 +424,12 @@
   }
 
   function renderDeliveries(rows) {
+    const currentOpen = new Set(openDeliveryKeys);
+    Array.from(el.deliveriesList.querySelectorAll("details[data-delivery-key][open]")).forEach((node) => {
+      currentOpen.add(node.dataset.deliveryKey);
+    });
+    openDeliveryKeys = currentOpen;
+
     const items = Array.isArray(rows) ? rows : [];
     const pageSize = Math.max(1, Number(el.deliveriesPageSize.value || 25));
     const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
@@ -420,7 +439,7 @@
     el.deliveriesMeta.textContent = `${items.length} delivery attempts`;
     renderGenericPagination(el.deliveriesPagination, items.length, totalPages, deliveriesPage, "deliveries-page");
     el.deliveriesList.innerHTML = pageRows.map((row) => `
-      <details class="event-row">
+      <details class="event-row" data-delivery-key="${escapeHtml(deliveryRowKey(row))}" ${openDeliveryKeys.has(deliveryRowKey(row)) ? "open" : ""}>
         <summary class="event-summary">
           <div class="event-main">
             <span class="badge badge-${row.outcome === "delivered" ? "good" : row.outcome === "failed" ? "bad" : "warn"}">${row.outcome}</span>
@@ -740,6 +759,14 @@
     if (!key) return;
     if (details.open) openEventKeys.add(key);
     else openEventKeys.delete(key);
+  }, true);
+  el.deliveriesList.addEventListener("toggle", (event) => {
+    const details = event.target.closest("details[data-delivery-key]");
+    if (!details) return;
+    const key = details.dataset.deliveryKey;
+    if (!key) return;
+    if (details.open) openDeliveryKeys.add(key);
+    else openDeliveryKeys.delete(key);
   }, true);
 
   loadInitial().catch((err) => {
