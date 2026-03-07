@@ -40,6 +40,8 @@ from app.schemas import (
     EventSubCatalogResponse,
     EventSubScopeRequirement,
     InterestResponse,
+    RetainedInterestStatusItem,
+    RetainedInterestStatusResponse,
     ResolveEventSubScopesRequest,
     ResolveEventSubScopesResponse,
     ServiceSubscriptionItem,
@@ -230,6 +232,91 @@ def register_service_routes(
             )
             working = await filter_working_interests(session, interests)
         return working
+
+    @app.get("/v1/interests/retained-status", response_model=RetainedInterestStatusResponse)
+    async def list_retained_interest_status(
+        bot_account_id: uuid.UUID,
+        broadcaster_user_ids: str,
+        service: ServiceAccount = Depends(service_auth),
+    ):
+        requested_ids = sorted(
+            {
+                str(value).strip()
+                for value in broadcaster_user_ids.split(",")
+                if str(value).strip()
+            }
+        )
+        if not requested_ids:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="broadcaster_user_ids is required",
+            )
+
+        requested_id_set = set(requested_ids)
+        async with session_factory() as session:
+            interests = list(
+                (
+                    await session.scalars(
+                        select(ServiceInterest).where(ServiceInterest.service_account_id == service.id)
+                    )
+                ).all()
+            )
+            filtered_interests = [
+                interest
+                for interest in interests
+                if interest.bot_account_id == bot_account_id
+                and interest.broadcaster_user_id in requested_id_set
+            ]
+            working_interests = await filter_working_interests(session, filtered_interests)
+            channel_states = list(
+                (
+                    await session.scalars(
+                        select(ChannelState).where(ChannelState.bot_account_id == bot_account_id)
+                    )
+                ).all()
+            )
+
+        working_by_broadcaster: dict[str, list[ServiceInterest]] = {}
+        for interest in working_interests:
+            working_by_broadcaster.setdefault(interest.broadcaster_user_id, []).append(interest)
+
+        all_by_broadcaster: dict[str, list[ServiceInterest]] = {}
+        for interest in filtered_interests:
+            all_by_broadcaster.setdefault(interest.broadcaster_user_id, []).append(interest)
+
+        channel_state_by_broadcaster = {
+            state.broadcaster_user_id: state
+            for state in channel_states
+            if state.broadcaster_user_id in requested_id_set
+        }
+
+        items: list[RetainedInterestStatusItem] = []
+        for broadcaster_user_id in requested_ids:
+            all_rows = all_by_broadcaster.get(broadcaster_user_id, [])
+            working_rows = working_by_broadcaster.get(broadcaster_user_id, [])
+            if not all_rows and not working_rows:
+                continue
+            heartbeat_values = [row.last_heartbeat_at for row in all_rows if row.last_heartbeat_at is not None]
+            channel_state = channel_state_by_broadcaster.get(broadcaster_user_id)
+            items.append(
+                RetainedInterestStatusItem(
+                    bot_account_id=bot_account_id,
+                    broadcaster_user_id=broadcaster_user_id,
+                    total_interest_count=len(all_rows),
+                    working_interest_count=len(working_rows),
+                    retained_event_types=sorted({row.event_type for row in working_rows}),
+                    has_channel_state=channel_state is not None,
+                    channel_is_live=(channel_state.is_live if channel_state is not None else None),
+                    last_heartbeat_at=max(heartbeat_values) if heartbeat_values else None,
+                )
+            )
+
+        return RetainedInterestStatusResponse(
+            bot_account_id=bot_account_id,
+            requested_broadcaster_user_ids=requested_ids,
+            matched_broadcaster_count=len(items),
+            items=items,
+        )
 
     @app.get("/v1/subscriptions", response_model=ServiceSubscriptionsResponse)
     async def list_service_subscriptions(service: ServiceAccount = Depends(service_auth)):

@@ -75,6 +75,24 @@ class ActiveTwitchSubscriptionsResponse(BaseModel):
     items: list[ActiveTwitchSubscriptionItem]
 
 
+class RetainedInterestStatusItem(BaseModel):
+    bot_account_id: uuid.UUID
+    broadcaster_user_id: str
+    total_interest_count: int
+    working_interest_count: int
+    retained_event_types: list[str]
+    has_channel_state: bool = False
+    channel_is_live: bool | None = None
+    last_heartbeat_at: datetime | None = None
+
+
+class RetainedInterestStatusResponse(BaseModel):
+    bot_account_id: uuid.UUID
+    requested_broadcaster_user_ids: list[str]
+    matched_broadcaster_count: int
+    items: list[RetainedInterestStatusItem]
+
+
 class EventEnvelope(BaseModel):
     id: str
     subscription_type: str
