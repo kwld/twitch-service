@@ -27,6 +27,7 @@
     eventsPauseToggle: document.getElementById("events-pause-toggle"),
     eventsFilterText: document.getElementById("events-filter-text"),
     eventsFilterDirection: document.getElementById("events-filter-direction"),
+    eventsFilterOrigin: document.getElementById("events-filter-origin"),
     eventsFilterService: document.getElementById("events-filter-service"),
     eventsPageSize: document.getElementById("events-page-size"),
     eventsModal: document.getElementById("events-modal"),
@@ -47,6 +48,7 @@
   let eventsPage = 1;
   let pendingSnapshot = null;
   let selectionResumeTimer = null;
+  let openEventKeys = new Set();
 
   function fmtDate(value) {
     if (!value) return "-";
@@ -78,6 +80,32 @@
     Array.from(el.tabPanels).forEach((panel) => {
       panel.classList.toggle("is-active", panel.dataset.tabPanel === name);
     });
+  }
+
+  function eventRowKey(row) {
+    return [
+      row.timestamp,
+      row.service_name,
+      row.direction,
+      row.event_type,
+      row.target,
+      row.broadcaster_user_id_masked,
+    ].join("|");
+  }
+
+  function eventOrigin(row) {
+    const transport = String(row.transport || "").toLowerCase();
+    const target = String(row.target || "").toLowerCase();
+    if (transport.startsWith("twitch_") || target === "twitch:eventsub") {
+      return "twitch";
+    }
+    if (transport === "webhook") {
+      return "webhook";
+    }
+    if (transport === "websocket" || target === "/ws/events") {
+      return "websocket";
+    }
+    return "service";
   }
 
   function renderSummary(cards) {
@@ -172,7 +200,7 @@
     const rows = logs || [];
     el.logsMeta.textContent = `${rows.length} buffered lines`;
     el.logsList.innerHTML = rows.slice().reverse().map((row) => `
-      <div class="log-row">
+      <div class="log-row log-${String(row.level || "INFO").toLowerCase()}">
         <div class="log-top">
           <strong>${row.level}</strong>
           <span class="muted">${fmtDate(row.timestamp)}</span>
@@ -195,10 +223,16 @@
   function getFilteredEvents() {
     const text = (el.eventsFilterText.value || "").trim().toLowerCase();
     const direction = el.eventsFilterDirection.value || "";
+    const origin = el.eventsFilterOrigin.value || "";
     const service = el.eventsFilterService.value || "";
     return allEvents.filter((row) => {
       if (direction && row.direction !== direction) return false;
       if (service && row.service_name !== service) return false;
+      if (origin) {
+        const rowOrigin = eventOrigin(row);
+        if (origin === "service" && (rowOrigin === "twitch")) return false;
+        if (origin !== "service" && rowOrigin !== origin) return false;
+      }
       if (!text) return true;
       const haystack = [
         row.event_type,
@@ -206,6 +240,7 @@
         row.broadcaster_label,
         row.target,
         row.transport,
+        eventOrigin(row),
       ].join(" ").toLowerCase();
       return haystack.includes(text);
     });
@@ -226,6 +261,12 @@
   }
 
   function renderEvents(rows) {
+    const currentOpen = new Set(openEventKeys);
+    Array.from(el.eventsList.querySelectorAll("details[data-event-key][open]")).forEach((node) => {
+      currentOpen.add(node.dataset.eventKey);
+    });
+    openEventKeys = currentOpen;
+
     const items = Array.isArray(rows) ? rows : [];
     const pageSize = Math.max(1, Number(el.eventsPageSize.value || 25));
     const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
@@ -235,12 +276,13 @@
     el.eventsMeta.textContent = `${items.length} matched events${eventsPaused ? " | paused" : ""}`;
     renderEventPagination(items.length, totalPages, eventsPage);
     el.eventsList.innerHTML = pageRows.map((row) => `
-      <details class="event-row">
+      <details class="event-row" data-event-key="${escapeHtml(eventRowKey(row))}" ${openEventKeys.has(eventRowKey(row)) ? "open" : ""}>
         <summary class="event-summary">
           <div class="event-main">
             <span class="badge ${row.direction === "incoming" ? "badge-good" : "badge-info"}">${row.direction}</span>
             <strong>${row.event_type}</strong>
             <span class="muted">${row.broadcaster_label}</span>
+            <span class="badge badge-warn">${eventOrigin(row)}</span>
           </div>
           <div class="event-side">
             <span class="muted">${row.service_name}</span>
@@ -414,6 +456,7 @@
 
   el.eventsFilterText.addEventListener("input", () => handleEventFilterChange(true));
   el.eventsFilterDirection.addEventListener("change", () => handleEventFilterChange(true));
+  el.eventsFilterOrigin.addEventListener("change", () => handleEventFilterChange(true));
   el.eventsFilterService.addEventListener("change", () => handleEventFilterChange(true));
   el.eventsPageSize.addEventListener("change", () => handleEventFilterChange(true));
   el.eventsPagination.addEventListener("click", (event) => {
@@ -423,6 +466,14 @@
     if (button.dataset.pageNav === "next") eventsPage += 1;
     refreshEvents();
   });
+  el.eventsList.addEventListener("toggle", (event) => {
+    const details = event.target.closest("details[data-event-key]");
+    if (!details) return;
+    const key = details.dataset.eventKey;
+    if (!key) return;
+    if (details.open) openEventKeys.add(key);
+    else openEventKeys.delete(key);
+  }, true);
 
   loadInitial().catch((err) => {
     console.error(err);

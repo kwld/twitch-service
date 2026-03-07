@@ -138,6 +138,13 @@ STATUS_HTML = """<!doctype html>
               <option value="incoming">Incoming</option>
               <option value="outgoing">Outgoing</option>
             </select>
+            <select id="events-filter-origin" class="field-input">
+              <option value="">All origins</option>
+              <option value="twitch">From Twitch</option>
+              <option value="service">From Service</option>
+              <option value="websocket">Via Service WebSocket</option>
+              <option value="webhook">Via Webhook</option>
+            </select>
             <select id="events-filter-service" class="field-input">
               <option value="">All services</option>
             </select>

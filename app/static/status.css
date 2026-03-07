@@ -317,6 +317,35 @@ th {
   word-break: break-word;
 }
 
+.log-row.log-info {
+  border-color: rgba(93,176,255,0.35);
+  background: rgba(93,176,255,0.07);
+}
+
+.log-row.log-warning,
+.log-row.log-warn {
+  border-color: rgba(247,185,85,0.38);
+  background: rgba(247,185,85,0.08);
+}
+
+.log-row.log-error {
+  border-color: rgba(255,107,107,0.42);
+  background: rgba(255,107,107,0.09);
+}
+
+.log-row.log-info .log-top strong {
+  color: var(--info);
+}
+
+.log-row.log-warning .log-top strong,
+.log-row.log-warn .log-top strong {
+  color: var(--warn);
+}
+
+.log-row.log-error .log-top strong {
+  color: var(--bad);
+}
+
 .event-list {
   display: grid;
   gap: 10px;
