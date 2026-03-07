@@ -241,7 +241,44 @@ def build_app():
                     }
                 ),
                 created_at=now,
-            )
+            ),
+            ServiceEventTrace(
+                id=uuid.uuid4(),
+                service_account_id=service_id,
+                direction="incoming",
+                local_transport="service_api",
+                event_type="service.twitch.chat.send",
+                target="/v1/twitch/chat/messages",
+                payload_json=json.dumps(
+                    {
+                        "_action_id": "action-chat-1",
+                        "_action_status": "pending",
+                        "bot_account_id": str(bot_id),
+                        "broadcaster_user_id": "1316870220",
+                        "reply_parent_message_id": None,
+                    }
+                ),
+                created_at=now,
+            ),
+            ServiceEventTrace(
+                id=uuid.uuid4(),
+                service_account_id=service_id,
+                direction="outgoing",
+                local_transport="twitch_api",
+                event_type="twitch.chat.send",
+                target="helix:/chat/messages",
+                payload_json=json.dumps(
+                    {
+                        "_action_id": "action-chat-1",
+                        "_action_status": "completed",
+                        "bot_account_id": str(bot_id),
+                        "broadcaster_user_id": "1316870220",
+                        "is_sent": True,
+                        "duration_ms": 1319,
+                    }
+                ),
+                created_at=now,
+            ),
         ],
         "twitch_subscriptions": [
             TwitchSubscription(
@@ -316,6 +353,11 @@ def test_status_post_returns_json_snapshot_with_masking():
     assert payload["recent_events"][0]["broadcaster_user_id_masked"] != "1316870220"
     assert "broadcaster_user_login" in payload["recent_events"][0]["body_pretty"]
     assert isinstance(payload["recent_deliveries"], list)
+    assert isinstance(payload["recent_twitch_actions"], list)
+    assert payload["recent_twitch_actions"][0]["status"] == "completed"
+    assert payload["recent_twitch_actions"][0]["step_count"] == 2
+    assert payload["recent_twitch_actions"][0]["steps"][0]["event_type"] == "service.twitch.chat.send"
+    assert payload["recent_twitch_actions"][0]["steps"][1]["event_type"] == "twitch.chat.send"
 
 
 def test_status_websocket_emits_snapshot():

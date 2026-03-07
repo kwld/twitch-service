@@ -28,7 +28,7 @@ STATUS_HTML = """<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Twitch Service Status</title>
-  <link rel="stylesheet" href="/static/status.css?v=1">
+  <link rel="stylesheet" href="/static/status.css?v=2">
 </head>
 <body>
   <div id="app" data-status-endpoint="/status" data-status-ws="/ws/status">
@@ -289,7 +289,7 @@ STATUS_HTML = """<!doctype html>
       <section class="tab-panel" data-tab-panel="actions">
         <section class="panel">
           <div class="panel-head">
-            <h2>Twitch API Actions</h2>
+            <h2>Action Flows</h2>
             <div id="actions-meta" class="panel-meta"></div>
           </div>
           <div class="event-toolbar">
@@ -298,6 +298,14 @@ STATUS_HTML = """<!doctype html>
               <option value="">All directions</option>
               <option value="incoming">Incoming</option>
               <option value="outgoing">Outgoing</option>
+            </select>
+            <select id="actions-filter-status" class="field-input">
+              <option value="">All results</option>
+              <option value="completed">Completed</option>
+              <option value="local_only">Local only</option>
+              <option value="not_sent">Not sent</option>
+              <option value="failed">Failed</option>
+              <option value="pending">Pending</option>
             </select>
             <select id="actions-filter-transport" class="field-input">
               <option value="">All transports</option>
@@ -340,7 +348,7 @@ STATUS_HTML = """<!doctype html>
       <div id="events-modal-list" class="compact-list"></div>
     </section>
   </div>
-  <script src="/static/status.js?v=1" defer></script>
+  <script src="/static/status.js?v=2" defer></script>
 </body>
 </html>
 """
@@ -400,6 +408,16 @@ def _safe_json_loads(value: str | None) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _strip_internal_trace_meta(payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        key: value
+        for key, value in payload.items()
+        if not str(key).startswith("_action_")
+    }
+
+
 def _trace_event_payload(trace: ServiceEventTrace) -> dict[str, Any]:
     payload = _safe_json_loads(trace.payload_json)
     event = payload.get("event")
@@ -436,13 +454,23 @@ def _trace_broadcaster_login(trace: ServiceEventTrace) -> str | None:
 
 
 def _format_trace_body(payload_json: str | None) -> str:
-    payload = _safe_json_loads(payload_json)
+    payload = _strip_internal_trace_meta(_safe_json_loads(payload_json))
     if not payload:
         return "{}"
     try:
         return json.dumps(payload, indent=2, ensure_ascii=True, sort_keys=True)
     except Exception:
         return str(payload_json or "{}")
+
+
+def _trace_action_id(payload: dict[str, Any]) -> str | None:
+    value = str(payload.get("_action_id", "")).strip()
+    return value or None
+
+
+def _trace_action_status(payload: dict[str, Any]) -> str | None:
+    value = str(payload.get("_action_status", "")).strip().lower()
+    return value or None
 
 
 def _relative_age(value: datetime | None) -> str:
@@ -797,36 +825,9 @@ def register_status_routes(
             )
 
         recent_delivery_rows = []
+        raw_twitch_action_rows = []
         recent_twitch_action_rows = []
-        for trace in traces[:120]:
-            if trace.direction != "outgoing":
-                if trace.local_transport in {"twitch_api", "service_api", "eventsub_action"}:
-                    payload = _safe_json_loads(trace.payload_json)
-                    broadcaster_user_id = str(payload.get("broadcaster_user_id", "")).strip()
-                    if not broadcaster_user_id:
-                        broadcaster_user_id = _trace_broadcaster_user_id(trace) or ""
-                    broadcaster_login = broadcaster_names.get(broadcaster_user_id)
-                    if not broadcaster_login and broadcaster_user_id:
-                        identity = identity_by_user_id.get(broadcaster_user_id)
-                        if identity:
-                            broadcaster_login = str(identity.broadcaster_display_name or "").strip() or str(identity.broadcaster_login or "").strip()
-                    recent_twitch_action_rows.append(
-                        {
-                            "timestamp": _fmt_dt(trace.created_at),
-                            "service_name": service_name_by_id.get(str(trace.service_account_id), "unknown"),
-                            "service_account_id_masked": _short_id(str(trace.service_account_id)),
-                            "direction": trace.direction,
-                            "transport": trace.local_transport,
-                            "event_type": trace.event_type,
-                            "target": trace.target or "-",
-                            "broadcaster_label": f"chan:{_mask_name(broadcaster_login or broadcaster_user_id)}"
-                            if (broadcaster_login or broadcaster_user_id)
-                            else "chan:unknown",
-                            "broadcaster_user_id_masked": _mask_id(broadcaster_user_id),
-                            "body_pretty": _format_trace_body(trace.payload_json),
-                        }
-                    )
-                continue
+        for trace in traces[:160]:
             if trace.local_transport in {"twitch_api", "service_api", "eventsub_action"}:
                 payload = _safe_json_loads(trace.payload_json)
                 broadcaster_user_id = str(payload.get("broadcaster_user_id", "")).strip()
@@ -837,11 +838,16 @@ def register_status_routes(
                     identity = identity_by_user_id.get(broadcaster_user_id)
                     if identity:
                         broadcaster_login = str(identity.broadcaster_display_name or "").strip() or str(identity.broadcaster_login or "").strip()
-                recent_twitch_action_rows.append(
+                bot_account_id = str(payload.get("bot_account_id", "")).strip()
+                bot = bot_by_id.get(bot_account_id) if bot_account_id else None
+                raw_twitch_action_rows.append(
                     {
+                        "id": str(trace.id),
                         "timestamp": _fmt_dt(trace.created_at),
+                        "timestamp_dt": trace.created_at,
                         "service_name": service_name_by_id.get(str(trace.service_account_id), "unknown"),
                         "service_account_id_masked": _short_id(str(trace.service_account_id)),
+                        "service_account_id": str(trace.service_account_id),
                         "direction": trace.direction,
                         "transport": trace.local_transport,
                         "event_type": trace.event_type,
@@ -850,6 +856,12 @@ def register_status_routes(
                         if (broadcaster_login or broadcaster_user_id)
                         else "chan:unknown",
                         "broadcaster_user_id_masked": _mask_id(broadcaster_user_id),
+                        "broadcaster_user_id": broadcaster_user_id,
+                        "bot_account_id": bot_account_id,
+                        "bot_account_id_masked": _short_id(bot_account_id) if bot_account_id else "n/a",
+                        "bot_name_masked": _mask_name(bot.name) if bot else "unknown",
+                        "action_id": _trace_action_id(payload) or f"trace:{trace.id}",
+                        "action_status_hint": _trace_action_status(payload),
                         "body_pretty": _format_trace_body(trace.payload_json),
                     }
                 )
@@ -888,6 +900,91 @@ def register_status_routes(
                     "body_pretty": _format_trace_body(json.dumps(envelope if isinstance(envelope, dict) else payload)),
                 }
             )
+
+        grouped_action_rows: dict[str, list[dict[str, Any]]] = {}
+        for row in raw_twitch_action_rows:
+            grouped_action_rows.setdefault(str(row.get("action_id") or ""), []).append(row)
+
+        for group_id, group_rows in grouped_action_rows.items():
+            ordered = sorted(
+                group_rows,
+                key=lambda row: (
+                    row.get("timestamp_dt") or now,
+                    0 if row.get("direction") == "incoming" else 1,
+                    str(row.get("transport") or ""),
+                ),
+            )
+            first = ordered[0]
+            last = ordered[-1]
+            incoming = next((row for row in ordered if row.get("direction") == "incoming"), None)
+            outgoing = next((row for row in reversed(ordered) if row.get("direction") == "outgoing"), None)
+            wait_ms = None
+            if incoming and outgoing and incoming.get("timestamp_dt") and outgoing.get("timestamp_dt"):
+                wait_ms = max(
+                    0,
+                    int(
+                        (
+                            outgoing["timestamp_dt"] - incoming["timestamp_dt"]
+                        ).total_seconds()
+                        * 1000
+                    ),
+                )
+            status_hints = [str(row.get("action_status_hint") or "") for row in ordered if row.get("action_status_hint")]
+            if "failed" in status_hints:
+                action_status = "failed"
+            elif "not_sent" in status_hints:
+                action_status = "not_sent"
+            elif "completed" in status_hints:
+                action_status = "completed"
+            elif "local_only" in status_hints:
+                action_status = "local_only"
+            else:
+                action_status = "pending" if incoming and not outgoing else "completed"
+            transports = [str(row.get("transport") or "") for row in ordered]
+            events = [str(row.get("event_type") or "") for row in ordered]
+            recent_twitch_action_rows.append(
+                {
+                    "action_id": group_id,
+                    "timestamp": first.get("timestamp"),
+                    "completed_at": last.get("timestamp"),
+                    "service_name": first.get("service_name"),
+                    "service_account_id_masked": first.get("service_account_id_masked"),
+                    "direction": "incoming" if incoming else "outgoing",
+                    "directions": sorted({str(row.get("direction") or "") for row in ordered if row.get("direction")}),
+                    "transport": first.get("transport"),
+                    "transports": sorted({value for value in transports if value}),
+                    "event_type": incoming.get("event_type") if incoming else first.get("event_type"),
+                    "event_types": sorted({value for value in events if value}),
+                    "target": incoming.get("target") if incoming else first.get("target"),
+                    "targets": [str(row.get("target") or "-") for row in ordered],
+                    "broadcaster_label": first.get("broadcaster_label"),
+                    "broadcaster_user_id_masked": first.get("broadcaster_user_id_masked"),
+                    "bot_account_id": first.get("bot_account_id"),
+                    "bot_account_id_masked": first.get("bot_account_id_masked"),
+                    "bot_name_masked": first.get("bot_name_masked"),
+                    "status": action_status,
+                    "wait_ms": wait_ms,
+                    "step_count": len(ordered),
+                    "steps": [
+                        {
+                            "timestamp": row.get("timestamp"),
+                            "direction": row.get("direction"),
+                            "transport": row.get("transport"),
+                            "event_type": row.get("event_type"),
+                            "target": row.get("target"),
+                            "body_pretty": row.get("body_pretty"),
+                        }
+                        for row in ordered
+                    ],
+                }
+            )
+        recent_twitch_action_rows.sort(
+            key=lambda row: (
+                row.get("completed_at") or row.get("timestamp") or "",
+                row.get("action_id") or "",
+            ),
+            reverse=True,
+        )
 
         bot_summary = []
         for bot in bot_rows:

@@ -417,6 +417,35 @@ th {
   padding: 0 14px 10px;
 }
 
+.flow-rail,
+.action-steps {
+  display: grid;
+  gap: 10px;
+  width: 100%;
+}
+
+.flow-rail {
+  grid-auto-flow: column;
+  grid-auto-columns: max-content;
+  align-items: center;
+  justify-content: start;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.flow-arrow {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.action-step {
+  border-top: 1px solid var(--line);
+}
+
+.action-step .event-meta {
+  padding-top: 12px;
+}
+
 .event-body {
   margin: 0;
   padding: 12px 14px 14px;

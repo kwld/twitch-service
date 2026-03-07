@@ -44,7 +44,9 @@ class EventSubSubscriptionMixin:
         if not service_ids:
             return
         try:
-            payload_json = json.dumps(payload, default=str)
+            payload_dict = payload if isinstance(payload, dict) else {"value": payload}
+            payload_dict.setdefault("_action_status", "completed")
+            payload_json = json.dumps(payload_dict, default=str)
             if len(payload_json) > getattr(self, "_trace_payload_max_chars", 12000):
                 payload_json = payload_json[: getattr(self, "_trace_payload_max_chars", 12000)] + "... [truncated]"
             async with self.session_factory() as session:

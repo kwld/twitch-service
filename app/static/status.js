@@ -63,6 +63,7 @@
     actionsMeta: document.getElementById("actions-meta"),
     actionsFilterText: document.getElementById("actions-filter-text"),
     actionsFilterDirection: document.getElementById("actions-filter-direction"),
+    actionsFilterStatus: document.getElementById("actions-filter-status"),
     actionsFilterTransport: document.getElementById("actions-filter-transport"),
     actionsFilterService: document.getElementById("actions-filter-service"),
     actionsFilterEvent: document.getElementById("actions-filter-event"),
@@ -150,13 +151,21 @@
   }
 
   function actionRowKey(row) {
-    return [
+    return row.action_id || [
       row.timestamp,
       row.service_name,
       row.event_type,
       row.target,
       row.broadcaster_user_id_masked,
     ].join("|");
+  }
+
+  function actionStatusTone(status) {
+    if (status === "completed") return "badge-good";
+    if (status === "failed") return "badge-bad";
+    if (status === "not_sent") return "badge-warn";
+    if (status === "local_only") return "badge-info";
+    return "badge-warn";
   }
 
   function eventOrigin(row) {
@@ -493,31 +502,42 @@
   function renderActionFilters(rows) {
     const serviceSelected = el.actionsFilterService.value;
     const eventSelected = el.actionsFilterEvent.value;
+    const transportSelected = el.actionsFilterTransport.value;
     const serviceNames = Array.from(new Set((rows || []).map((row) => row.service_name).filter(Boolean))).sort();
-    const eventNames = Array.from(new Set((rows || []).map((row) => row.event_type).filter(Boolean))).sort();
+    const eventNames = Array.from(new Set((rows || []).flatMap((row) => Array.isArray(row.event_types) ? row.event_types : [row.event_type]).filter(Boolean))).sort();
+    const transportNames = Array.from(new Set((rows || []).flatMap((row) => Array.isArray(row.transports) ? row.transports : [row.transport]).filter(Boolean))).sort();
     el.actionsFilterService.innerHTML = ['<option value="">All services</option>', ...serviceNames.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`)].join("");
     el.actionsFilterEvent.innerHTML = ['<option value="">All action types</option>', ...eventNames.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`)].join("");
+    el.actionsFilterTransport.innerHTML = ['<option value="">All transports</option>', ...transportNames.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`)].join("");
     if (serviceNames.includes(serviceSelected)) el.actionsFilterService.value = serviceSelected;
     if (eventNames.includes(eventSelected)) el.actionsFilterEvent.value = eventSelected;
+    if (transportNames.includes(transportSelected)) el.actionsFilterTransport.value = transportSelected;
   }
 
   function getFilteredActions() {
     const text = (el.actionsFilterText.value || "").trim().toLowerCase();
     const direction = el.actionsFilterDirection.value || "";
+    const status = el.actionsFilterStatus.value || "";
     const transport = el.actionsFilterTransport.value || "";
     const service = el.actionsFilterService.value || "";
     const eventType = el.actionsFilterEvent.value || "";
     return allActions.filter((row) => {
-      if (direction && row.direction !== direction) return false;
-      if (transport && row.transport !== transport) return false;
+      if (direction && !(Array.isArray(row.directions) ? row.directions : [row.direction]).includes(direction)) return false;
+      if (status && row.status !== status) return false;
+      if (transport && !(Array.isArray(row.transports) ? row.transports : [row.transport]).includes(transport)) return false;
       if (service && row.service_name !== service) return false;
-      if (eventType && row.event_type !== eventType) return false;
+      if (eventType && !(Array.isArray(row.event_types) ? row.event_types : [row.event_type]).includes(eventType)) return false;
       if (!text) return true;
       const haystack = [
         row.event_type,
+        (row.event_types || []).join(" "),
         row.service_name,
         row.broadcaster_label,
         row.target,
+        row.status,
+        row.bot_name_masked,
+        (row.targets || []).join(" "),
+        (row.transports || []).join(" "),
       ].join(" ").toLowerCase();
       return haystack.includes(text);
     });
@@ -535,16 +555,17 @@
     actionsPage = Math.min(totalPages, Math.max(1, actionsPage));
     const start = (actionsPage - 1) * pageSize;
     const pageRows = items.slice(start, start + pageSize);
-    el.actionsMeta.textContent = `${items.length} Twitch API actions`;
+    el.actionsMeta.textContent = `${items.length} action flows`;
     renderGenericPagination(el.actionsPagination, items.length, totalPages, actionsPage, "actions-page");
     el.actionsList.innerHTML = pageRows.map((row) => `
       <details class="event-row" data-action-key="${escapeHtml(actionRowKey(row))}" ${openActionKeys.has(actionRowKey(row)) ? "open" : ""}>
         <summary class="event-summary">
           <div class="event-main">
-            <span class="badge ${row.direction === "incoming" ? "badge-good" : "badge-info"}">${row.direction}</span>
-            <span class="badge badge-warn">${row.transport}</span>
+            <span class="badge ${actionStatusTone(row.status)}">${row.status || "pending"}</span>
             <strong>${row.event_type}</strong>
             <span class="muted">${row.broadcaster_label}</span>
+            <span class="badge badge-info">${row.bot_name_masked || "unknown"}</span>
+            ${row.wait_ms != null ? `<span class="badge badge-warn">${row.wait_ms}ms</span>` : ""}
           </div>
           <div class="event-side">
             <span class="muted">${row.service_name}</span>
@@ -552,12 +573,32 @@
           </div>
         </summary>
         <div class="event-meta">
-          <div class="muted mono">${row.target}</div>
-          <div class="muted mono">${row.broadcaster_user_id_masked} • ${row.service_account_id_masked}</div>
+          <div class="flow-rail">${(row.steps || []).map((step, index) => `
+            <span class="badge ${step.direction === "incoming" ? "badge-good" : "badge-info"}">${step.direction}</span>
+            <span class="badge badge-warn">${step.transport}</span>
+            <span class="muted mono">${step.event_type}</span>
+            ${index < (row.steps || []).length - 1 ? '<span class="flow-arrow">-&gt;</span>' : ''}
+          `).join("")}</div>
+          <div class="muted mono">${row.broadcaster_user_id_masked} • ${row.bot_account_id_masked || "n/a"} • ${row.service_account_id_masked}</div>
         </div>
-        <pre class="event-body">${row.body_pretty}</pre>
+        <div class="action-steps">${(row.steps || []).map((step) => `
+          <section class="action-step">
+            <div class="event-meta">
+              <div class="event-main">
+                <span class="badge ${step.direction === "incoming" ? "badge-good" : "badge-info"}">${step.direction}</span>
+                <span class="badge badge-warn">${step.transport}</span>
+                <strong>${step.event_type}</strong>
+              </div>
+              <div class="event-side">
+                <span class="muted mono">${step.target}</span>
+                <span class="muted">${fmtDate(step.timestamp)}</span>
+              </div>
+            </div>
+            <pre class="event-body">${step.body_pretty}</pre>
+          </section>
+        `).join("")}</div>
       </details>
-    `).join("") || `<div class="log-row"><div class="muted">No Twitch API actions recorded yet.</div></div>`;
+    `).join("") || `<div class="log-row"><div class="muted">No action flows recorded yet.</div></div>`;
   }
 
   function refreshActions() {
@@ -830,6 +871,7 @@
   el.deliveriesPageSize.addEventListener("change", () => { deliveriesPage = 1; refreshDeliveries(); });
   el.actionsFilterText.addEventListener("input", () => { actionsPage = 1; refreshActions(); });
   el.actionsFilterDirection.addEventListener("change", () => { actionsPage = 1; refreshActions(); });
+  el.actionsFilterStatus.addEventListener("change", () => { actionsPage = 1; refreshActions(); });
   el.actionsFilterTransport.addEventListener("change", () => { actionsPage = 1; refreshActions(); });
   el.actionsFilterService.addEventListener("change", () => { actionsPage = 1; refreshActions(); });
   el.actionsFilterEvent.addEventListener("change", () => { actionsPage = 1; refreshActions(); });

@@ -45,7 +45,8 @@ def register_twitch_routes(
         payload: object,
     ) -> None:
         try:
-            payload_json = json.dumps(payload, default=str)
+            payload_dict = payload if isinstance(payload, dict) else {"value": payload}
+            payload_json = json.dumps(payload_dict, default=str)
             if len(payload_json) > 12000:
                 payload_json = payload_json[:12000] + "... [truncated]"
             async with session_factory() as session:
@@ -559,6 +560,7 @@ def register_twitch_routes(
         service: ServiceAccount = Depends(service_auth),
     ):
         started = time.perf_counter()
+        action_id = str(uuid.uuid4())
         broadcaster_user_id = req.broadcaster_user_id.strip()
         await _record_twitch_action(
             service_account_id=service.id,
@@ -567,6 +569,8 @@ def register_twitch_routes(
             event_type="service.twitch.chat.send",
             target="/v1/twitch/chat/messages",
             payload={
+                "_action_id": action_id,
+                "_action_status": "pending",
                 "bot_account_id": str(req.bot_account_id),
                 "broadcaster_user_id": broadcaster_user_id,
                 "auth_mode_requested": req.auth_mode,
@@ -641,6 +645,23 @@ def register_twitch_routes(
             else:
                 result, auth_mode_used = await _send_with_mode(req.auth_mode)
         except Exception as exc:
+            await _record_twitch_action(
+                service_account_id=service.id,
+                direction="outgoing",
+                local_transport="twitch_api",
+                event_type="twitch.chat.send",
+                target="helix:/chat/messages",
+                payload={
+                    "_action_id": action_id,
+                    "_action_status": "failed",
+                    "bot_account_id": str(req.bot_account_id),
+                    "broadcaster_user_id": broadcaster_user_id,
+                    "auth_mode_requested": req.auth_mode,
+                    "duration_ms": int((time.perf_counter() - started) * 1000),
+                    "is_sent": False,
+                    "error": str(exc),
+                },
+            )
             extra = ""
             if req.auth_mode == "auto" and send_error is not None:
                 extra = f" (app-token attempt failed first: {send_error})"
@@ -685,6 +706,8 @@ def register_twitch_routes(
             event_type="twitch.chat.send",
             target="helix:/chat/messages",
             payload={
+                "_action_id": action_id,
+                "_action_status": "completed" if bool(result.get("is_sent", False)) else "not_sent",
                 "bot_account_id": str(req.bot_account_id),
                 "broadcaster_user_id": broadcaster_user_id,
                 "auth_mode_requested": req.auth_mode,
@@ -702,6 +725,7 @@ def register_twitch_routes(
         service: ServiceAccount = Depends(service_auth),
     ):
         started = time.perf_counter()
+        action_id = str(uuid.uuid4())
         broadcaster_user_id = req.broadcaster_user_id.strip()
         await _record_twitch_action(
             service_account_id=service.id,
@@ -710,6 +734,8 @@ def register_twitch_routes(
             event_type="service.twitch.clip.create",
             target="/v1/twitch/clips",
             payload={
+                "_action_id": action_id,
+                "_action_status": "pending",
                 "bot_account_id": str(req.bot_account_id),
                 "broadcaster_user_id": broadcaster_user_id,
                 "title": req.title,
@@ -745,6 +771,21 @@ def register_twitch_routes(
                 has_delay=req.has_delay,
             )
         except Exception as exc:
+            await _record_twitch_action(
+                service_account_id=service.id,
+                direction="outgoing",
+                local_transport="twitch_api",
+                event_type="twitch.clip.create",
+                target="helix:/clips",
+                payload={
+                    "_action_id": action_id,
+                    "_action_status": "failed",
+                    "bot_account_id": str(req.bot_account_id),
+                    "broadcaster_user_id": broadcaster_user_id,
+                    "duration_ms": int((time.perf_counter() - started) * 1000),
+                    "error": str(exc),
+                },
+            )
             raise HTTPException(status_code=502, detail=f"Failed creating clip: {exc}") from exc
 
         clip_id = str(create_payload.get("id", ""))
@@ -786,6 +827,8 @@ def register_twitch_routes(
                 event_type="twitch.clip.create",
                 target="helix:/clips",
                 payload={
+                    "_action_id": action_id,
+                    "_action_status": "completed",
                     "bot_account_id": str(req.bot_account_id),
                     "broadcaster_user_id": broadcaster_user_id,
                     "clip_id": clip_id,
@@ -822,6 +865,8 @@ def register_twitch_routes(
             event_type="twitch.clip.create",
             target="helix:/clips",
             payload={
+                "_action_id": action_id,
+                "_action_status": "completed",
                 "bot_account_id": str(req.bot_account_id),
                 "broadcaster_user_id": broadcaster_user_id,
                 "clip_id": clip_id,
