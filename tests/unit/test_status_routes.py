@@ -54,10 +54,17 @@ def make_session_factory(rows_by_table):
 class DummyEventSubManager:
     async def get_db_active_subscriptions_snapshot(self):
         return (
+            [],
+            datetime.now(UTC),
+        )
+
+    async def get_active_subscriptions_snapshot(self, force_refresh: bool = False):
+        return (
             [
                 {
                     "twitch_subscription_id": "sub-12345678",
                     "status": "enabled",
+                    "cost": 2,
                     "event_type": "channel.chat.message",
                     "broadcaster_user_id": "1316870220",
                     "upstream_transport": "websocket",
@@ -66,6 +73,7 @@ class DummyEventSubManager:
                 }
             ],
             datetime.now(UTC),
+            False,
         )
 
     async def get_status_summary(self):
@@ -277,7 +285,9 @@ def test_status_post_returns_json_snapshot_with_masking():
     payload = resp.json()
     assert payload["schema_version"] == "twitch-service-status.v1"
     assert payload["eventsub"]["startup_state"] == "ready"
+    assert payload["eventsub"]["active_snapshot_cost_total"] == 2
     assert payload["services"]["rows"][0]["name"] == "main-app"
+    assert payload["bots"][0]["eventsub_cost_total"] == 2
     assert payload["broadcasters"][0]["title_masked"] != "Very Secret Stream Title"
     assert payload["broadcasters"][0]["broadcaster_user_id_masked"] != "1316870220"
     assert payload["broadcasters"][0]["broadcaster_label"].startswith("chan:")

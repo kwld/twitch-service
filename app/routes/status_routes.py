@@ -109,6 +109,7 @@ STATUS_HTML = """<!doctype html>
                   <th>Channels</th>
                   <th>Subscriptions</th>
                   <th>Enabled Subs</th>
+                  <th>EventSub Cost</th>
                 </tr>
               </thead>
               <tbody id="bots-table"></tbody>
@@ -436,7 +437,14 @@ def register_status_routes(
             channel_count_by_bot[key] = channel_count_by_bot.get(key, 0) + 1
             bot_ids_by_broadcaster.setdefault(str(state.broadcaster_user_id), set()).add(key)
 
-        active_snapshot, active_cached_at = await eventsub_manager.get_db_active_subscriptions_snapshot()
+        try:
+            active_snapshot, active_cached_at, active_snapshot_from_cache = await eventsub_manager.get_active_subscriptions_snapshot(
+                force_refresh=False
+            )
+            active_snapshot_source = "live-cache" if active_snapshot_from_cache else "live"
+        except Exception:
+            active_snapshot, active_cached_at = await eventsub_manager.get_db_active_subscriptions_snapshot()
+            active_snapshot_source = "db-fallback"
         eventsub_summary = await eventsub_manager.get_status_summary()
 
         broadcaster_names: dict[str, str] = {}
@@ -460,11 +468,16 @@ def register_status_routes(
                 counters["messages_sent"] += 1
 
         eventsub_names_by_broadcaster: dict[str, set[str]] = {}
+        eventsub_cost_by_bot: dict[str, int] = {}
         for row in active_snapshot:
             broadcaster_user_id = str(row.get("broadcaster_user_id", "")).strip()
             event_type = str(row.get("event_type", "")).strip()
+            bot_account_id = str(row.get("bot_account_id", "")).strip()
+            cost = int(row.get("cost", 0) or 0)
             if broadcaster_user_id and event_type:
                 eventsub_names_by_broadcaster.setdefault(broadcaster_user_id, set()).add(event_type)
+            if bot_account_id:
+                eventsub_cost_by_bot[bot_account_id] = eventsub_cost_by_bot.get(bot_account_id, 0) + cost
         for row in working_interests:
             broadcaster_user_id = str(row.broadcaster_user_id).strip()
             event_type = str(row.event_type).strip()
@@ -589,6 +602,7 @@ def register_status_routes(
                     "channel_count": channel_count_by_bot.get(str(bot.id), 0),
                     "subscription_count": len(bot_subs),
                     "enabled_subscription_count": sum(1 for row in bot_subs if str(row.status).startswith("enabled")),
+                    "eventsub_cost_total": eventsub_cost_by_bot.get(str(bot.id), 0),
                 }
             )
 
@@ -650,15 +664,19 @@ def register_status_routes(
             "eventsub": {
                 **eventsub_summary,
                 "active_snapshot_cached_at": active_cached_at.isoformat(),
+                "active_snapshot_source": active_snapshot_source,
                 "active_snapshot_total": len(active_snapshot),
+                "active_snapshot_cost_total": sum(int(row.get("cost", 0) or 0) for row in active_snapshot),
                 "active_snapshot_by_status": _group_counts(active_snapshot, "status"),
                 "active_snapshot_by_transport": _group_counts(active_snapshot, "upstream_transport"),
                 "active_snapshot_sample": [
                     {
                         "subscription_id": _short_id(str(row.get("twitch_subscription_id"))),
                         "status": str(row.get("status", "unknown")),
+                        "cost": int(row.get("cost", 0) or 0),
                         "event_type": str(row.get("event_type", "")),
                         "broadcaster_masked": _short_id(str(row.get("broadcaster_user_id", ""))),
+                        "bot_account_id_masked": _short_id(str(row.get("bot_account_id", ""))),
                         "transport": str(row.get("upstream_transport", "")),
                         "session_id_masked": _short_id(str(row.get("session_id") or "")),
                     }

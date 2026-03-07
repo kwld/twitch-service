@@ -571,6 +571,7 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
                         {
                             "twitch_subscription_id": sub_id,
                             "status": status,
+                            "cost": int(sub.get("cost", 0) or 0),
                             "event_type": event_type,
                             "broadcaster_user_id": broadcaster_user_id,
                             "upstream_transport": method,
@@ -599,6 +600,7 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
             {
                 "twitch_subscription_id": row.twitch_subscription_id,
                 "status": row.status,
+                "cost": 0,
                 "event_type": row.event_type,
                 "broadcaster_user_id": row.broadcaster_user_id,
                 "upstream_transport": self._transport_for_event(row.event_type),

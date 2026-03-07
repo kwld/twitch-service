@@ -176,8 +176,9 @@
         <td>${row.channel_count || 0}</td>
         <td>${row.subscription_count || 0}</td>
         <td>${row.enabled_subscription_count || 0}</td>
+        <td><span class="badge badge-warn">${row.eventsub_cost_total || 0}</span></td>
       </tr>
-    `).join("") || `<tr><td colspan="5" class="muted">No bot accounts found.</td></tr>`;
+    `).join("") || `<tr><td colspan="6" class="muted">No bot accounts found.</td></tr>`;
     const broadcasterSelected = el.broadcasterFilterBot.value;
     const eventSelected = el.eventsFilterBot.value;
     const logSelected = el.logsFilterBot.value;
@@ -194,7 +195,7 @@
     const transportRows = eventsub.active_snapshot_by_transport || [];
     const statusRows = eventsub.active_snapshot_by_status || [];
     const sampleRows = eventsub.active_snapshot_sample || [];
-    el.eventsubMeta.textContent = `registry=${eventsub.registry_key_count || 0} | active_subs=${eventsub.active_snapshot_total || 0} | ws_listeners=${eventsub.active_service_ws_connections || 0}`;
+    el.eventsubMeta.textContent = `registry=${eventsub.registry_key_count || 0} | active_subs=${eventsub.active_snapshot_total || 0} | total_cost=${eventsub.active_snapshot_cost_total || 0} | source=${eventsub.active_snapshot_source || "unknown"} | ws_listeners=${eventsub.active_service_ws_connections || 0}`;
     el.eventsubGroups.innerHTML = [
       ...transportRows.map((row) => `<div class="compact-item"><div class="compact-top"><strong>Transport ${row.label}</strong><span class="badge badge-info">${row.count}</span></div></div>`),
       ...statusRows.map((row) => `<div class="compact-item"><div class="compact-top"><strong>Status ${row.label}</strong><span class="badge badge-warn">${row.count}</span></div></div>`),
@@ -202,9 +203,12 @@
         <div class="compact-item">
           <div class="compact-top">
             <strong>${row.event_type}</strong>
-            <span class="badge badge-info">${row.transport}</span>
+            <span>
+              <span class="badge badge-info">${row.transport}</span>
+              <span class="badge badge-warn">cost ${row.cost || 0}</span>
+            </span>
           </div>
-          <div class="muted mono">${row.subscription_id} • ${row.broadcaster_masked} • ${row.session_id_masked || "no-session"}</div>
+          <div class="muted mono">${row.subscription_id} • ${row.broadcaster_masked} • ${row.bot_account_id_masked || "n/a"} • ${row.session_id_masked || "no-session"}</div>
         </div>
       `)
     ].join("") || `<div class="compact-item"><div class="muted">No EventSub snapshot rows.</div></div>`;
