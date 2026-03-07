@@ -100,6 +100,11 @@ class DummyEventSubManager:
             "websocket_listener_cooldown_seconds": None,
             "has_websocket_interest": True,
             "has_stream_state_interest": True,
+            "active_snapshot_cost_total": 2,
+            "active_snapshot_max_total_cost": 10,
+            "active_snapshot_max_cost_by_bot": {
+                str(uuid.UUID("11111111-1111-1111-1111-111111111111")): 10,
+            },
         }
 
 
@@ -286,8 +291,13 @@ def test_status_post_returns_json_snapshot_with_masking():
     assert payload["schema_version"] == "twitch-service-status.v1"
     assert payload["eventsub"]["startup_state"] == "ready"
     assert payload["eventsub"]["active_snapshot_cost_total"] == 2
+    assert payload["eventsub"]["active_snapshot_max_total_cost"] == 10
+    assert payload["eventsub"]["active_snapshot_rows"][0]["service_names"] == ["main-app"]
+    assert payload["eventsub"]["active_snapshot_rows"][0]["service_count"] == 1
+    assert payload["eventsub"]["active_snapshot_rows"][0]["bot_name_masked"] != "unknown"
     assert payload["services"]["rows"][0]["name"] == "main-app"
     assert payload["bots"][0]["eventsub_cost_total"] == 2
+    assert payload["bots"][0]["eventsub_cost_max"] == 10
     assert payload["broadcasters"][0]["title_masked"] != "Very Secret Stream Title"
     assert payload["broadcasters"][0]["broadcaster_user_id_masked"] != "1316870220"
     assert payload["broadcasters"][0]["broadcaster_label"].startswith("chan:")

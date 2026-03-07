@@ -82,6 +82,9 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
         self._active_subscriptions_cache_lock = asyncio.Lock()
         self._active_subscriptions_cached_at: datetime | None = None
         self._active_subscriptions_cache: list[dict] = []
+        self._active_subscriptions_total_cost = 0
+        self._active_subscriptions_max_total_cost = 0
+        self._active_subscriptions_max_cost_by_bot: dict[str, int] = {}
         self._name_cache_ttl = timedelta(minutes=15)
         self._name_cache_lock = asyncio.Lock()
         self._service_name_cache: dict[uuid.UUID, tuple[str, datetime]] = {}
@@ -470,29 +473,36 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
         message = str(exc).lower()
         return "not found" in message or "does not exist" in message
 
-    async def _list_eventsub_subscriptions_all_tokens(self) -> list[dict]:
+    async def _list_eventsub_subscriptions_all_tokens(self) -> tuple[list[dict], dict]:
         started = time.perf_counter()
         merged: dict[str, dict] = {}
+        app_total_cost = 0
+        app_max_total_cost = 0
         with suppress(TwitchApiError):
-            for sub in await self.twitch.list_eventsub_subscriptions():
+            app_payload = await self.twitch.list_eventsub_subscriptions_with_meta()
+            app_total_cost = int(app_payload.get("total_cost", 0) or 0)
+            app_max_total_cost = int(app_payload.get("max_total_cost", 0) or 0)
+            for sub in app_payload.get("data", []):
                 sub_id = str(sub.get("id", ""))
                 if sub_id:
                     merged[sub_id] = sub
         async with self.session_factory() as session:
             bots = list((await session.scalars(select(BotAccount).where(BotAccount.enabled.is_(True)))).all())
         semaphore = asyncio.Semaphore(4)
+        max_cost_by_bot: dict[str, int] = {}
+        total_cost_by_bot: dict[str, int] = {}
 
-        async def _fetch_bot_subscriptions(bot: BotAccount) -> list[dict]:
+        async def _fetch_bot_subscriptions(bot: BotAccount) -> tuple[str, dict]:
             async with semaphore:
                 try:
                     async with self.session_factory() as bot_session:
                         bot_row = await bot_session.get(BotAccount, bot.id)
                         if not bot_row or not bot_row.enabled:
-                            return []
+                            return str(bot.id), {"data": [], "total_cost": 0, "max_total_cost": 0}
                         token = await ensure_bot_access_token(bot_session, self.twitch, bot_row)
-                    return await self.twitch.list_eventsub_subscriptions(access_token=token)
+                    return str(bot.id), await self.twitch.list_eventsub_subscriptions_with_meta(access_token=token)
                 except Exception:
-                    return []
+                    return str(bot.id), {"data": [], "total_cost": 0, "max_total_cost": 0}
 
         if bots:
             results = await asyncio.gather(
@@ -502,7 +512,10 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
             for result in results:
                 if isinstance(result, Exception):
                     continue
-                for sub in result:
+                bot_id, payload = result
+                max_cost_by_bot[bot_id] = int(payload.get("max_total_cost", 0) or 0)
+                total_cost_by_bot[bot_id] = int(payload.get("total_cost", 0) or 0)
+                for sub in payload.get("data", []):
                     sub_id = str(sub.get("id", ""))
                     if sub_id:
                         merged[sub_id] = sub
@@ -512,7 +525,13 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
             len(merged),
             int((time.perf_counter() - started) * 1000),
         )
-        return list(merged.values())
+        return list(merged.values()), {
+            "app_total_cost": app_total_cost,
+            "app_max_total_cost": app_max_total_cost,
+            "total_cost_by_bot": total_cost_by_bot,
+            "max_cost_by_bot": max_cost_by_bot,
+            "global_max_total_cost": max([app_max_total_cost, *max_cost_by_bot.values()], default=0),
+        }
 
     async def get_active_subscriptions_snapshot(
         self,
@@ -532,7 +551,7 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
                 )
 
             started = time.perf_counter()
-            subs = await self._list_eventsub_subscriptions_all_tokens()
+            subs, cost_meta = await self._list_eventsub_subscriptions_all_tokens()
             snapshot: list[dict] = []
             async with self.session_factory() as session:
                 existing_rows = list((await session.scalars(select(TwitchSubscription))).all())
@@ -583,6 +602,12 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
                     )
             self._active_subscriptions_cache = [dict(item) for item in snapshot]
             self._active_subscriptions_cached_at = now
+            self._active_subscriptions_total_cost = sum(int(item.get("cost", 0) or 0) for item in snapshot)
+            self._active_subscriptions_max_total_cost = int(cost_meta.get("global_max_total_cost", 0) or 0)
+            self._active_subscriptions_max_cost_by_bot = {
+                str(key): int(value or 0)
+                for key, value in (cost_meta.get("max_cost_by_bot") or {}).items()
+            }
             logger.info(
                 "Built live EventSub subscription snapshot: upstream=%d matched=%d in %dms",
                 len(subs),
@@ -611,6 +636,9 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
             }
             for row in rows
         ]
+        self._active_subscriptions_total_cost = 0
+        self._active_subscriptions_max_total_cost = 0
+        self._active_subscriptions_max_cost_by_bot = {}
         logger.info(
             "Built DB EventSub subscription snapshot: rows=%d in %dms",
             len(snapshot),
@@ -655,6 +683,9 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
                 "has_stream_state_interest": any(
                     key.event_type in {"stream.online", "stream.offline"} for key in registry_keys
                 ),
+                "active_snapshot_cost_total": int(self._active_subscriptions_total_cost or 0),
+                "active_snapshot_max_total_cost": int(self._active_subscriptions_max_total_cost or 0),
+                "active_snapshot_max_cost_by_bot": dict(self._active_subscriptions_max_cost_by_bot),
             }
         )
         return state

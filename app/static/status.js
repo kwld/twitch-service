@@ -18,7 +18,13 @@
     servicesMeta: document.getElementById("services-meta"),
     servicesTable: document.getElementById("services-table"),
     eventsubMeta: document.getElementById("eventsub-meta"),
-    eventsubGroups: document.getElementById("eventsub-groups"),
+    eventsubCounters: document.getElementById("eventsub-counters"),
+    eventsubFilterText: document.getElementById("eventsub-filter-text"),
+    eventsubFilterService: document.getElementById("eventsub-filter-service"),
+    eventsubFilterBot: document.getElementById("eventsub-filter-bot"),
+    eventsubPageSize: document.getElementById("eventsub-page-size"),
+    eventsubPagination: document.getElementById("eventsub-pagination"),
+    eventsubTable: document.getElementById("eventsub-table"),
     broadcasterMeta: document.getElementById("broadcaster-meta"),
     broadcasterTable: document.getElementById("broadcaster-table"),
     broadcasterFilterBot: document.getElementById("broadcaster-filter-bot"),
@@ -52,8 +58,10 @@
   let allEvents = [];
   let allLogs = [];
   let allBots = [];
+  let allEventSubRows = [];
   let activeTab = "overview";
   let eventsPage = 1;
+  let eventsubPage = 1;
   let pendingSnapshot = null;
   let selectionResumeTimer = null;
   let openEventKeys = new Set();
@@ -176,7 +184,7 @@
         <td>${row.channel_count || 0}</td>
         <td>${row.subscription_count || 0}</td>
         <td>${row.enabled_subscription_count || 0}</td>
-        <td><span class="badge badge-warn">${row.eventsub_cost_total || 0}</span></td>
+        <td><span class="badge badge-warn">${row.eventsub_cost_total || 0}/${row.eventsub_cost_max || 0}</span></td>
       </tr>
     `).join("") || `<tr><td colspan="6" class="muted">No bot accounts found.</td></tr>`;
     const broadcasterSelected = el.broadcasterFilterBot.value;
@@ -189,29 +197,25 @@
     if (items.some((row) => row.bot_account_id === broadcasterSelected)) el.broadcasterFilterBot.value = broadcasterSelected;
     if (items.some((row) => row.bot_account_id === eventSelected)) el.eventsFilterBot.value = eventSelected;
     if (items.some((row) => row.bot_account_id === logSelected)) el.logsFilterBot.value = logSelected;
+    const eventsubSelected = el.eventsubFilterBot.value;
+    el.eventsubFilterBot.innerHTML = options.join("");
+    if (items.some((row) => row.bot_account_id === eventsubSelected)) el.eventsubFilterBot.value = eventsubSelected;
   }
 
   function renderEventSub(eventsub) {
     const transportRows = eventsub.active_snapshot_by_transport || [];
     const statusRows = eventsub.active_snapshot_by_status || [];
-    const sampleRows = eventsub.active_snapshot_sample || [];
-    el.eventsubMeta.textContent = `registry=${eventsub.registry_key_count || 0} | active_subs=${eventsub.active_snapshot_total || 0} | total_cost=${eventsub.active_snapshot_cost_total || 0} | source=${eventsub.active_snapshot_source || "unknown"} | ws_listeners=${eventsub.active_service_ws_connections || 0}`;
-    el.eventsubGroups.innerHTML = [
-      ...transportRows.map((row) => `<div class="compact-item"><div class="compact-top"><strong>Transport ${row.label}</strong><span class="badge badge-info">${row.count}</span></div></div>`),
-      ...statusRows.map((row) => `<div class="compact-item"><div class="compact-top"><strong>Status ${row.label}</strong><span class="badge badge-warn">${row.count}</span></div></div>`),
-      ...sampleRows.slice(0, 8).map((row) => `
-        <div class="compact-item">
-          <div class="compact-top">
-            <strong>${row.event_type}</strong>
-            <span>
-              <span class="badge badge-info">${row.transport}</span>
-              <span class="badge badge-warn">cost ${row.cost || 0}</span>
-            </span>
-          </div>
-          <div class="muted mono">${row.subscription_id} • ${row.broadcaster_masked} • ${row.bot_account_id_masked || "n/a"} • ${row.session_id_masked || "no-session"}</div>
-        </div>
-      `)
-    ].join("") || `<div class="compact-item"><div class="muted">No EventSub snapshot rows.</div></div>`;
+    const rows = Array.isArray(eventsub.active_snapshot_rows) ? eventsub.active_snapshot_rows : [];
+    allEventSubRows = rows.slice();
+    el.eventsubMeta.textContent = `registry=${eventsub.registry_key_count || 0} | active_subs=${eventsub.active_snapshot_total || 0} | total_cost=${eventsub.active_snapshot_cost_total || 0}/${eventsub.active_snapshot_max_total_cost || 0} | source=${eventsub.active_snapshot_source || "unknown"} | ws_listeners=${eventsub.active_service_ws_connections || 0}`;
+    el.eventsubCounters.innerHTML = [
+      `<article class="summary-card neutral"><div class="label">Active Subs</div><div class="value">${eventsub.active_snapshot_total || 0}</div></article>`,
+      `<article class="summary-card warn"><div class="label">Cost</div><div class="value">${eventsub.active_snapshot_cost_total || 0}/${eventsub.active_snapshot_max_total_cost || 0}</div></article>`,
+      ...transportRows.map((row) => `<article class="summary-card neutral"><div class="label">Transport ${row.label}</div><div class="value">${row.count}</div></article>`),
+      ...statusRows.map((row) => `<article class="summary-card neutral"><div class="label">Status ${row.label}</div><div class="value">${row.count}</div></article>`),
+    ].join("");
+    renderEventSubServiceFilter(rows);
+    refreshEventSub();
   }
 
   function renderBroadcasters(rows) {
@@ -263,6 +267,78 @@
     if (names.includes(selected)) {
       el.eventsFilterService.value = selected;
     }
+  }
+
+  function renderEventSubServiceFilter(rows) {
+    const selected = el.eventsubFilterService.value;
+    const names = Array.from(new Set((rows || []).flatMap((row) => Array.isArray(row.service_names) ? row.service_names : []).filter(Boolean))).sort();
+    el.eventsubFilterService.innerHTML = ['<option value="">All services</option>', ...names.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`)].join("");
+    if (names.includes(selected)) {
+      el.eventsubFilterService.value = selected;
+    }
+  }
+
+  function getFilteredEventSubRows() {
+    const text = (el.eventsubFilterText.value || "").trim().toLowerCase();
+    const service = el.eventsubFilterService.value || "";
+    const bot = el.eventsubFilterBot.value || "";
+    return allEventSubRows.filter((row) => {
+      if (service && !(Array.isArray(row.service_names) && row.service_names.includes(service))) return false;
+      if (bot && row.bot_account_id !== bot) return false;
+      if (!text) return true;
+      const haystack = [
+        row.event_type,
+        row.broadcaster_masked,
+        row.broadcaster_user_id_masked,
+        row.bot_name_masked,
+        row.bot_account_id_masked,
+        row.transport,
+        row.status,
+        row.service_names_display,
+        row.subscription_id,
+      ].join(" ").toLowerCase();
+      return haystack.includes(text);
+    });
+  }
+
+  function renderGenericPagination(target, totalItems, totalPages, currentPage, prefix) {
+    if (totalItems <= 0) {
+      target.innerHTML = `<span class="muted">No matching rows</span>`;
+      return;
+    }
+    target.innerHTML = `
+      <div class="muted">Showing page ${currentPage} / ${totalPages} • ${totalItems} matched</div>
+      <div class="pagination-actions">
+        <button class="ghost-button" type="button" data-${prefix}-nav="prev" ${currentPage <= 1 ? "disabled" : ""}>Prev</button>
+        <button class="ghost-button" type="button" data-${prefix}-nav="next" ${currentPage >= totalPages ? "disabled" : ""}>Next</button>
+      </div>
+    `;
+  }
+
+  function renderEventSubRows(rows) {
+    const items = Array.isArray(rows) ? rows : [];
+    const pageSize = Math.max(1, Number(el.eventsubPageSize.value || 25));
+    const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+    eventsubPage = Math.min(totalPages, Math.max(1, eventsubPage));
+    const start = (eventsubPage - 1) * pageSize;
+    const pageRows = items.slice(start, start + pageSize);
+    renderGenericPagination(el.eventsubPagination, items.length, totalPages, eventsubPage, "eventsub-page");
+    el.eventsubTable.innerHTML = pageRows.map((row) => `
+      <tr>
+        <td><strong>${row.event_type}</strong><div class="muted mono">${row.subscription_id}</div></td>
+        <td><strong>${row.broadcaster_masked}</strong><div class="muted mono">${row.broadcaster_user_id_masked}</div></td>
+        <td><strong>${row.bot_name_masked || "unknown"}</strong><div class="muted mono">${row.bot_account_id_masked || "n/a"}</div></td>
+        <td><strong>${row.service_count || 0}</strong><div class="muted">${escapeHtml(row.service_names_display || "none")}</div></td>
+        <td><span class="badge badge-info">${row.transport || "unknown"}</span></td>
+        <td><span class="badge ${String(row.status || "").startsWith("enabled") ? "badge-good" : "badge-warn"}">${row.status || "unknown"}</span></td>
+        <td><span class="badge badge-warn">${row.cost || 0}</span></td>
+        <td><span class="muted mono">${row.session_id_masked || "no-session"}</span></td>
+      </tr>
+    `).join("") || `<tr><td colspan="8" class="muted">No EventSub snapshot rows.</td></tr>`;
+  }
+
+  function refreshEventSub() {
+    renderEventSubRows(getFilteredEventSubRows());
   }
 
   function getFilteredEvents() {
@@ -510,6 +586,10 @@
   el.eventsFilterService.addEventListener("change", () => handleEventFilterChange(true));
   el.eventsFilterBot.addEventListener("change", () => handleEventFilterChange(true));
   el.eventsPageSize.addEventListener("change", () => handleEventFilterChange(true));
+  el.eventsubFilterText.addEventListener("input", () => { eventsubPage = 1; refreshEventSub(); });
+  el.eventsubFilterService.addEventListener("change", () => { eventsubPage = 1; refreshEventSub(); });
+  el.eventsubFilterBot.addEventListener("change", () => { eventsubPage = 1; refreshEventSub(); });
+  el.eventsubPageSize.addEventListener("change", () => { eventsubPage = 1; refreshEventSub(); });
   el.broadcasterFilterBot.addEventListener("change", () => renderBroadcasters(allBroadcasters));
   el.logsFilterBot.addEventListener("change", () => renderLogs(allLogs));
   el.eventsPagination.addEventListener("click", (event) => {
@@ -518,6 +598,13 @@
     if (button.dataset.pageNav === "prev") eventsPage -= 1;
     if (button.dataset.pageNav === "next") eventsPage += 1;
     refreshEvents();
+  });
+  el.eventsubPagination.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-eventsub-page-nav]");
+    if (!button) return;
+    if (button.dataset.eventsubPageNav === "prev") eventsubPage -= 1;
+    if (button.dataset.eventsubPageNav === "next") eventsubPage += 1;
+    refreshEventSub();
   });
   el.eventsList.addEventListener("toggle", (event) => {
     const details = event.target.closest("details[data-event-key]");

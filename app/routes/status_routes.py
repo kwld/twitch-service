@@ -91,7 +91,39 @@ STATUS_HTML = """<!doctype html>
               <h2>EventSub Snapshot</h2>
               <div id="eventsub-meta" class="panel-meta"></div>
             </div>
-            <div id="eventsub-groups" class="compact-list"></div>
+            <div id="eventsub-counters" class="summary-grid mini-summary-grid"></div>
+            <div class="event-toolbar">
+              <input id="eventsub-filter-text" class="field-input" type="search" placeholder="Filter by event, service, bot, broadcaster">
+              <select id="eventsub-filter-service" class="field-input">
+                <option value="">All services</option>
+              </select>
+              <select id="eventsub-filter-bot" class="field-input">
+                <option value="">All bot accounts</option>
+              </select>
+              <select id="eventsub-page-size" class="field-input">
+                <option value="10">10 / page</option>
+                <option value="25" selected>25 / page</option>
+                <option value="50">50 / page</option>
+              </select>
+            </div>
+            <div id="eventsub-pagination" class="pagination-bar"></div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Event</th>
+                    <th>Broadcaster</th>
+                    <th>Bot</th>
+                    <th>Service</th>
+                    <th>Transport</th>
+                    <th>Status</th>
+                    <th>Cost</th>
+                    <th>Session</th>
+                  </tr>
+                </thead>
+                <tbody id="eventsub-table"></tbody>
+              </table>
+            </div>
           </section>
         </section>
 
@@ -418,13 +450,30 @@ def register_status_routes(
         subs_by_bot: dict[str, list[TwitchSubscription]] = {}
         channel_count_by_bot: dict[str, int] = {}
         bot_ids_by_broadcaster: dict[str, set[str]] = {}
+        service_names_by_eventsub_key: dict[tuple[str, str, str], set[str]] = {}
 
         for row in interests:
             key = str(row.service_account_id)
             interests_by_service[key] = interests_by_service.get(key, 0) + 1
+            eventsub_key = (
+                str(row.broadcaster_user_id).strip(),
+                str(row.event_type).strip(),
+                str(row.bot_account_id),
+            )
+            service_name = service_name_by_id.get(str(row.service_account_id))
+            if service_name:
+                service_names_by_eventsub_key.setdefault(eventsub_key, set()).add(service_name)
         for row in working_interests:
             key = str(row.service_account_id)
             working_by_service[key] = working_by_service.get(key, 0) + 1
+            eventsub_key = (
+                str(row.broadcaster_user_id).strip(),
+                str(row.event_type).strip(),
+                str(row.bot_account_id),
+            )
+            service_name = service_name_by_id.get(str(row.service_account_id))
+            if service_name:
+                service_names_by_eventsub_key.setdefault(eventsub_key, set()).add(service_name)
         for row in access_rows:
             key = str(row.service_account_id)
             access_by_service[key] = access_by_service.get(key, 0) + 1
@@ -469,6 +518,10 @@ def register_status_routes(
 
         eventsub_names_by_broadcaster: dict[str, set[str]] = {}
         eventsub_cost_by_bot: dict[str, int] = {}
+        eventsub_max_cost_by_bot: dict[str, int] = {
+            str(key): int(value or 0)
+            for key, value in (eventsub_summary.get("active_snapshot_max_cost_by_bot") or {}).items()
+        }
         for row in active_snapshot:
             broadcaster_user_id = str(row.get("broadcaster_user_id", "")).strip()
             event_type = str(row.get("event_type", "")).strip()
@@ -603,6 +656,10 @@ def register_status_routes(
                     "subscription_count": len(bot_subs),
                     "enabled_subscription_count": sum(1 for row in bot_subs if str(row.status).startswith("enabled")),
                     "eventsub_cost_total": eventsub_cost_by_bot.get(str(bot.id), 0),
+                    "eventsub_cost_max": eventsub_max_cost_by_bot.get(
+                        str(bot.id),
+                        int(eventsub_summary.get("active_snapshot_max_total_cost", 0) or 0),
+                    ),
                 }
             )
 
@@ -667,20 +724,42 @@ def register_status_routes(
                 "active_snapshot_source": active_snapshot_source,
                 "active_snapshot_total": len(active_snapshot),
                 "active_snapshot_cost_total": sum(int(row.get("cost", 0) or 0) for row in active_snapshot),
+                "active_snapshot_max_total_cost": int(eventsub_summary.get("active_snapshot_max_total_cost", 0) or 0),
                 "active_snapshot_by_status": _group_counts(active_snapshot, "status"),
                 "active_snapshot_by_transport": _group_counts(active_snapshot, "upstream_transport"),
-                "active_snapshot_sample": [
+                "active_snapshot_rows": [
                     {
                         "subscription_id": _short_id(str(row.get("twitch_subscription_id"))),
+                        "subscription_id_full": str(row.get("twitch_subscription_id", "")),
                         "status": str(row.get("status", "unknown")),
                         "cost": int(row.get("cost", 0) or 0),
                         "event_type": str(row.get("event_type", "")),
                         "broadcaster_masked": _short_id(str(row.get("broadcaster_user_id", ""))),
+                        "broadcaster_user_id_masked": _mask_id(str(row.get("broadcaster_user_id", ""))),
                         "bot_account_id_masked": _short_id(str(row.get("bot_account_id", ""))),
+                        "bot_account_id": str(row.get("bot_account_id", "")),
+                        "bot_name_masked": _mask_name(bot_by_id.get(str(row.get("bot_account_id", ""))).name)
+                        if bot_by_id.get(str(row.get("bot_account_id", "")))
+                        else "unknown",
                         "transport": str(row.get("upstream_transport", "")),
                         "session_id_masked": _short_id(str(row.get("session_id") or "")),
+                        "service_names": service_names,
+                        "service_count": len(service_names),
+                        "service_names_display": ", ".join(service_names) if service_names else "none",
                     }
-                    for row in active_snapshot[:16]
+                    for row in active_snapshot
+                    for service_names in [
+                        sorted(
+                            service_names_by_eventsub_key.get(
+                                (
+                                    str(row.get("broadcaster_user_id", "")).strip(),
+                                    str(row.get("event_type", "")).strip(),
+                                    str(row.get("bot_account_id", "")),
+                                ),
+                                set(),
+                            )
+                        )
+                    ]
                 ],
             },
             "services": {

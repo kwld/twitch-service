@@ -91,6 +91,19 @@ body {
   margin-bottom: 18px;
 }
 
+.mini-summary-grid {
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
+
+.mini-summary-grid .summary-card {
+  padding: 12px 14px;
+}
+
+.mini-summary-grid .summary-card .value {
+  margin-top: 8px;
+  font-size: 22px;
+}
+
 .summary-card {
   border-radius: 18px;
   padding: 16px;
@@ -220,6 +233,7 @@ th, td {
   padding: 10px 8px;
   border-bottom: 1px solid var(--line);
   vertical-align: top;
+  word-break: break-word;
 }
 
 th {

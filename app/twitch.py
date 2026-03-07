@@ -193,11 +193,17 @@ class TwitchClient:
         self._app_token_expiry = datetime.now(UTC) + timedelta(seconds=int(data["expires_in"]) - 60)
         return self._app_token
 
-    async def list_eventsub_subscriptions(self, access_token: str | None = None) -> list[dict[str, Any]]:
+    async def list_eventsub_subscriptions_with_meta(
+        self,
+        access_token: str | None = None,
+    ) -> dict[str, Any]:
         token = access_token or await self.app_access_token()
         headers = {"Authorization": f"Bearer {token}", "Client-Id": self.client_id}
         cursor = None
         out: list[dict[str, Any]] = []
+        total = 0
+        total_cost = 0
+        max_total_cost = 0
         while True:
             params = {"after": cursor} if cursor else None
             resp = await self._http_client.get(
@@ -209,10 +215,22 @@ class TwitchClient:
                 raise TwitchApiError(f"Failed listing subscriptions: {resp.text}")
             payload = resp.json()
             out.extend(payload.get("data", []))
+            total = int(payload.get("total", total) or 0)
+            total_cost = int(payload.get("total_cost", total_cost) or 0)
+            max_total_cost = int(payload.get("max_total_cost", max_total_cost) or 0)
             cursor = payload.get("pagination", {}).get("cursor")
             if not cursor:
                 break
-        return out
+        return {
+            "data": out,
+            "total": total,
+            "total_cost": total_cost,
+            "max_total_cost": max_total_cost,
+        }
+
+    async def list_eventsub_subscriptions(self, access_token: str | None = None) -> list[dict[str, Any]]:
+        payload = await self.list_eventsub_subscriptions_with_meta(access_token=access_token)
+        return list(payload.get("data", []))
 
     async def create_eventsub_subscription(
         self,
