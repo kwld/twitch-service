@@ -311,6 +311,7 @@ STATUS_HTML = """<!doctype html>
               <option value="">All transports</option>
               <option value="service_api">Service API</option>
               <option value="twitch_api">Twitch API</option>
+              <option value="cache">Cache</option>
               <option value="eventsub_action">EventSub action</option>
             </select>
             <select id="actions-filter-service" class="field-input">
@@ -828,7 +829,7 @@ def register_status_routes(
         raw_twitch_action_rows = []
         recent_twitch_action_rows = []
         for trace in traces[:160]:
-            if trace.local_transport in {"twitch_api", "service_api", "eventsub_action"}:
+            if trace.local_transport in {"twitch_api", "service_api", "eventsub_action", "cache"}:
                 payload = _safe_json_loads(trace.payload_json)
                 broadcaster_user_id = str(payload.get("broadcaster_user_id", "")).strip()
                 if not broadcaster_user_id:
@@ -840,6 +841,11 @@ def register_status_routes(
                         broadcaster_login = str(identity.broadcaster_display_name or "").strip() or str(identity.broadcaster_login or "").strip()
                 bot_account_id = str(payload.get("bot_account_id", "")).strip()
                 bot = bot_by_id.get(bot_account_id) if bot_account_id else None
+                if not bot and broadcaster_user_id:
+                    candidate_bot_ids = sorted(bot_ids_by_broadcaster.get(broadcaster_user_id, set()))
+                    if len(candidate_bot_ids) == 1:
+                        bot_account_id = candidate_bot_ids[0]
+                        bot = bot_by_id.get(bot_account_id)
                 raw_twitch_action_rows.append(
                     {
                         "id": str(trace.id),

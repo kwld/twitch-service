@@ -108,6 +108,8 @@ def register_twitch_routes(
         logins: str | None = None,
         service: ServiceAccount = Depends(service_auth),
     ):
+        started = time.perf_counter()
+        action_id = str(uuid.uuid4())
         ids = split_csv(user_ids)
         login_values = split_csv(logins)
         if not ids and not login_values:
@@ -131,6 +133,8 @@ def register_twitch_routes(
             event_type="service.twitch.profiles.lookup",
             target="/v1/twitch/profiles",
             payload={
+                "_action_id": action_id,
+                "_action_status": "pending",
                 "bot_account_id": str(bot_account_id),
                 "user_ids": ids,
                 "logins": login_values,
@@ -143,10 +147,13 @@ def register_twitch_routes(
             event_type="twitch.profiles.lookup",
             target="helix:/users",
             payload={
+                "_action_id": action_id,
+                "_action_status": "completed",
                 "bot_account_id": str(bot_account_id),
                 "user_ids": ids,
                 "logins": login_values,
                 "result_count": len(users),
+                "duration_ms": int((time.perf_counter() - started) * 1000),
             },
         )
         return {"data": users}
@@ -157,6 +164,8 @@ def register_twitch_routes(
         broadcaster_user_ids: str,
         service: ServiceAccount = Depends(service_auth),
     ):
+        started = time.perf_counter()
+        action_id = str(uuid.uuid4())
         ids = split_csv(broadcaster_user_ids)
         if not ids:
             raise HTTPException(status_code=422, detail="Provide broadcaster_user_ids")
@@ -179,6 +188,8 @@ def register_twitch_routes(
             event_type="service.twitch.streams.status",
             target="/v1/twitch/streams/status",
             payload={
+                "_action_id": action_id,
+                "_action_status": "pending",
                 "bot_account_id": str(bot_account_id),
                 "broadcaster_user_ids": ids,
             },
@@ -190,9 +201,12 @@ def register_twitch_routes(
             event_type="twitch.streams.status",
             target="helix:/streams",
             payload={
+                "_action_id": action_id,
+                "_action_status": "completed",
                 "bot_account_id": str(bot_account_id),
                 "broadcaster_user_ids": ids,
                 "result_count": len(streams),
+                "duration_ms": int((time.perf_counter() - started) * 1000),
             },
         )
         async with session_factory() as session:
@@ -498,6 +512,8 @@ def register_twitch_routes(
         refresh: bool = False,
         service: ServiceAccount = Depends(service_auth),
     ):
+        started = time.perf_counter()
+        action_id = str(uuid.uuid4())
         _ = service
         token = await twitch_client.app_access_token()
 
@@ -529,6 +545,8 @@ def register_twitch_routes(
             event_type="service.twitch.chat.assets",
             target="/v1/twitch/chat/assets",
             payload={
+                "_action_id": action_id,
+                "_action_status": "pending",
                 "broadcaster_user_id": broadcaster_user_id,
                 "broadcaster_login": broadcaster_login,
                 "refresh": bool(refresh),
@@ -537,13 +555,16 @@ def register_twitch_routes(
         await _record_twitch_action(
             service_account_id=service.id,
             direction="outgoing",
-            local_transport="twitch_api",
+            local_transport="cache",
             event_type="twitch.chat.assets",
             target="cache:/chat-assets",
             payload={
+                "_action_id": action_id,
+                "_action_status": "completed",
                 "broadcaster_user_id": broadcaster_user_id,
                 "broadcaster_login": broadcaster_login,
                 "refresh": bool(refresh),
+                "duration_ms": int((time.perf_counter() - started) * 1000),
             },
         )
 
