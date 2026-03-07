@@ -137,6 +137,9 @@ class EventSubSubscriptionMixin:
                         event_type="eventsub.subscription.delete_stale",
                         target="helix:/eventsub/subscriptions",
                         payload={
+                            "bot_account_id": str(bot.id),
+                            "broadcaster_user_id": str(broadcaster_user_id),
+                            "event_type": str(event_type),
                             "subscription_id": sub_id,
                             "status": sub_status,
                             "upstream_transport": method,
@@ -225,6 +228,9 @@ class EventSubSubscriptionMixin:
                     event_type="eventsub.subscription.delete_duplicate",
                     target="helix:/eventsub/subscriptions",
                     payload={
+                        "bot_account_id": str(duplicate["bot_account_id"]),
+                        "broadcaster_user_id": str(duplicate["broadcaster_user_id"]),
+                        "event_type": str(duplicate["event_type"]),
                         "subscription_id": duplicate_id,
                         "status": duplicate.get("status"),
                         "upstream_transport": duplicate.get("method"),
@@ -351,6 +357,9 @@ class EventSubSubscriptionMixin:
                                 event_type="eventsub.subscription.rotate_delete",
                                 target="helix:/eventsub/subscriptions",
                                 payload={
+                                    "bot_account_id": str(key.bot_account_id),
+                                    "broadcaster_user_id": str(key.broadcaster_user_id),
+                                    "event_type": str(key.event_type),
                                     "subscription_id": db_sub.twitch_subscription_id,
                                     "upstream_transport": upstream_transport,
                                 },
@@ -525,6 +534,9 @@ class EventSubSubscriptionMixin:
                         event_type="eventsub.subscription.create",
                         target="helix:/eventsub/subscriptions",
                         payload={
+                            "bot_account_id": str(key.bot_account_id),
+                            "broadcaster_user_id": str(key.broadcaster_user_id),
+                            "event_type": str(key.event_type),
                             "subscription_id": created["id"],
                             "status": created.get("status", "enabled"),
                             "upstream_transport": upstream_transport,
