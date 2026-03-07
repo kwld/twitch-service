@@ -29,6 +29,10 @@ Minimal API service that:
 - API for local services to register interest subscriptions.
 - API to list EventSub subscription catalog and transport recommendations.
 - API for services to list effective bot access (`GET /v1/bots/accessible`).
+- Public-safe runtime status dashboard:
+  - `GET /status` returns HTML dashboard,
+  - `POST /status` returns JSON snapshot,
+  - `WS /ws/status` streams live dashboard snapshots.
 - API for local services to fetch Twitch user profiles and stream status via bot accounts.
 - In-memory + database interest registry.
 - Startup reconciliation:
@@ -40,6 +44,13 @@ Minimal API service that:
 - Reconnect support for Twitch EventSub WebSocket.
 - Twitch webhook callback verification + HMAC signature validation.
 - Auto-prunes stale interests: if not heartbeated for 1 hour, interest/state is removed.
+- Status dashboard includes:
+  - startup/EventSub phase timeline,
+  - service account summary,
+  - bot account summary,
+  - masked broadcaster state with per-channel message counters,
+  - live traced event feed with filters/pagination,
+  - recent operational logs.
 
 For exact runtime flow and data model details, see `docs/ARCHITECTURE.md`.
 For 1:1 LLM integration behavior and endpoint contracts, see `docs/LLM_USAGE.md`.
@@ -123,6 +134,9 @@ bash ./scripts/run-dev.sh 8080
 
 ## Main Endpoints
 - `GET /health`
+- `GET /status` (HTML runtime dashboard)
+- `POST /status` (JSON runtime snapshot)
+- `WS /ws/status` (live dashboard feed)
 - `GET /oauth/callback` (OAuth redirect handler for bot setup + broadcaster channel authorization)
 - `POST /webhooks/twitch/eventsub` (Twitch webhook callback)
 - `GET /v1/bots` (admin)
@@ -130,6 +144,7 @@ bash ./scripts/run-dev.sh 8080
 - `GET /v1/admin/service-accounts` (admin)
 - `POST /v1/admin/service-accounts/{client_id}/regenerate` (admin)
 - `GET /v1/interests` (service)
+- `GET /v1/interests/retained-status?bot_account_id=...&broadcaster_user_ids=1,2,3` (service)
 - `GET /v1/bots/accessible` (service)
 - `POST /v1/broadcaster-authorizations/start` (service)
 - `POST /v1/broadcaster-authorizations/start-minimal` (service)
@@ -158,6 +173,28 @@ bash ./scripts/run-dev.sh 8080
 Note on live status:
 - `GET /v1/twitch/streams/status/interested` returns cached `ChannelState`.
 - Use `GET /v1/twitch/streams/status/interested?refresh=true` to force-refresh from Twitch Helix.
+
+### Runtime Status Dashboard
+Operator UI and machine-readable status are available on the same path:
+
+- `GET /status`
+  - HTML dashboard for operators
+  - live-updated over `WS /ws/status`
+  - masks broadcaster names/ids by default
+- `POST /status`
+  - JSON snapshot for tooling
+  - includes `schema_version`
+
+Dashboard sections currently include:
+- `Overview`: summary cards, startup timeline, service accounts, EventSub snapshot, bot accounts
+- `Broadcasters`: masked channel state, assigned bot account, message in/out counters, EventSub counts, modal with attached EventSub names
+- `Events`: traced incoming/outgoing feed with filters for direction, origin, service, bot account, text search, page size and pagination
+- `Logs`: recent operational logs with level coloring and optional bot-account filtering
+
+Notes:
+- `/status` is intended to be public-safe for internal ops use, not a raw debug dump.
+- secret material, raw OAuth tokens and raw webhook secrets are not exposed there.
+- some broadcaster labels may fall back to masked ids if no safe masked login/display alias is available.
 
 ### Service Event Envelope
 Events delivered via service websocket (`/ws/events`) and service webhooks include:
