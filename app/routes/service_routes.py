@@ -301,11 +301,22 @@ def register_service_routes(
     )
     async def list_active_twitch_subscriptions_for_service(
         refresh: bool = False,
+        broadcaster_user_id: str | None = None,
         service: ServiceAccount = Depends(service_auth),
     ):
-        snapshot, cached_at, from_cache = await eventsub_manager.get_active_subscriptions_snapshot(
-            force_refresh=refresh
-        )
+        if refresh:
+            snapshot, cached_at, from_cache = await eventsub_manager.get_active_subscriptions_snapshot(
+                force_refresh=True
+            )
+        else:
+            snapshot, cached_at = await eventsub_manager.get_db_active_subscriptions_snapshot()
+            from_cache = True
+        broadcaster_filter = str(broadcaster_user_id or "").strip()
+        if broadcaster_filter:
+            snapshot = [
+                row for row in snapshot
+                if str(row.get("broadcaster_user_id", "")).strip() == broadcaster_filter
+            ]
         async with session_factory() as session:
             allowed_ids = await service_allowed_bot_ids(session, service.id)
             interests = list(
@@ -318,6 +329,8 @@ def register_service_routes(
             interests = await filter_working_interests(session, interests)
         interest_ids_by_key: dict[tuple[str, str, str], list[uuid.UUID]] = {}
         for interest in interests:
+            if broadcaster_filter and interest.broadcaster_user_id != broadcaster_filter:
+                continue
             key = (
                 str(interest.bot_account_id),
                 interest.event_type,

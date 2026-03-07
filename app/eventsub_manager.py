@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
@@ -84,6 +85,7 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
         self._service_name_cache: dict[uuid.UUID, tuple[str, datetime]] = {}
         self._bot_name_cache: dict[uuid.UUID, tuple[str, datetime]] = {}
         self._broadcaster_name_cache: dict[str, tuple[str, datetime]] = {}
+        self._startup_refresh_deferred_to_session_welcome = False
 
     def _transport_for_event(self, event_type: str) -> Literal["websocket", "webhook"]:
         transport, _ = best_transport_for_service(
@@ -102,16 +104,46 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
         message = str(exc).lower()
         return "session does not exist" in message or "has already disconnected" in message
 
+    async def _timed_phase(self, label: str, func, *args, **kwargs):
+        started = time.perf_counter()
+        try:
+            return await func(*args, **kwargs)
+        finally:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            logger.info("EventSub phase %s completed in %dms", label, elapsed_ms)
+
     async def start(self) -> None:
-        await self._load_interests()
-        await self._sync_from_twitch_and_reconcile()
-        await self._ensure_authorization_revoke_subscription()
-        await self._ensure_webhook_subscriptions()
-        await self._refresh_stream_states_for_active_subscriptions()
-        await self._refresh_stream_states_for_interested_channels()
+        started = time.perf_counter()
+        await self._timed_phase("load_interests", self._load_interests)
+        await self._timed_phase("reconcile_from_twitch", self._sync_from_twitch_and_reconcile)
+        await self._timed_phase(
+            "ensure_authorization_revoke_webhook",
+            self._ensure_authorization_revoke_subscription,
+        )
+        await self._timed_phase("ensure_webhook_subscriptions", self._ensure_webhook_subscriptions)
+        if await self._has_websocket_interest():
+            self._startup_refresh_deferred_to_session_welcome = True
+            logger.info(
+                "Deferring startup stream-state refresh until EventSub websocket session_welcome "
+                "because websocket interests are present"
+            )
+        else:
+            self._startup_refresh_deferred_to_session_welcome = False
+            await self._timed_phase(
+                "refresh_stream_states_active_subscriptions",
+                self._refresh_stream_states_for_active_subscriptions,
+            )
+            await self._timed_phase(
+                "refresh_stream_states_interested_channels",
+                self._refresh_stream_states_for_interested_channels,
+            )
         self._task = asyncio.create_task(self._run(), name="eventsub-manager")
         self._cleanup_task = asyncio.create_task(
             self._cleanup_stale_interests_loop(), name="eventsub-interest-cleanup"
+        )
+        logger.info(
+            "EventSub manager startup finished in %dms",
+            int((time.perf_counter() - started) * 1000),
         )
 
     async def stop(self) -> None:
@@ -293,11 +325,24 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
                 payload = message.get("payload", {})
                 msg_type = metadata.get("message_type")
                 if msg_type == "session_welcome":
+                    started = time.perf_counter()
                     self._session_id = payload["session"]["id"]
-                    await self._sync_from_twitch_and_reconcile()
-                    await self._ensure_all_subscriptions()
-                    await self._refresh_stream_states_for_active_subscriptions()
-                    await self._refresh_stream_states_for_interested_channels()
+                    logger.info("EventSub websocket session_welcome received: session_id=%s", self._session_id)
+                    await self._timed_phase("session_welcome_ensure_all_subscriptions", self._ensure_all_subscriptions)
+                    if self._startup_refresh_deferred_to_session_welcome:
+                        await self._timed_phase(
+                            "session_welcome_refresh_active_subscriptions",
+                            self._refresh_stream_states_for_active_subscriptions,
+                        )
+                        await self._timed_phase(
+                            "session_welcome_refresh_interested_channels",
+                            self._refresh_stream_states_for_interested_channels,
+                        )
+                        self._startup_refresh_deferred_to_session_welcome = False
+                    logger.info(
+                        "EventSub session_welcome bootstrap finished in %dms",
+                        int((time.perf_counter() - started) * 1000),
+                    )
                     continue
                 if msg_type == "session_reconnect":
                     reconnect = payload.get("session", {}).get("reconnect_url")
@@ -363,6 +408,7 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
         return "not found" in message or "does not exist" in message
 
     async def _list_eventsub_subscriptions_all_tokens(self) -> list[dict]:
+        started = time.perf_counter()
         merged: dict[str, dict] = {}
         with suppress(TwitchApiError):
             for sub in await self.twitch.list_eventsub_subscriptions():
@@ -371,13 +417,38 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
                     merged[sub_id] = sub
         async with self.session_factory() as session:
             bots = list((await session.scalars(select(BotAccount).where(BotAccount.enabled.is_(True)))).all())
-            for bot in bots:
-                with suppress(Exception):
-                    token = await ensure_bot_access_token(session, self.twitch, bot)
-                    for sub in await self.twitch.list_eventsub_subscriptions(access_token=token):
-                        sub_id = str(sub.get("id", ""))
-                        if sub_id:
-                            merged[sub_id] = sub
+        semaphore = asyncio.Semaphore(4)
+
+        async def _fetch_bot_subscriptions(bot: BotAccount) -> list[dict]:
+            async with semaphore:
+                try:
+                    async with self.session_factory() as bot_session:
+                        bot_row = await bot_session.get(BotAccount, bot.id)
+                        if not bot_row or not bot_row.enabled:
+                            return []
+                        token = await ensure_bot_access_token(bot_session, self.twitch, bot_row)
+                    return await self.twitch.list_eventsub_subscriptions(access_token=token)
+                except Exception:
+                    return []
+
+        if bots:
+            results = await asyncio.gather(
+                *(_fetch_bot_subscriptions(bot) for bot in bots),
+                return_exceptions=True,
+            )
+            for result in results:
+                if isinstance(result, Exception):
+                    continue
+                for sub in result:
+                    sub_id = str(sub.get("id", ""))
+                    if sub_id:
+                        merged[sub_id] = sub
+        logger.info(
+            "Listed EventSub subscriptions across app+%d bots: unique=%d in %dms",
+            len(bots),
+            len(merged),
+            int((time.perf_counter() - started) * 1000),
+        )
         return list(merged.values())
 
     async def get_active_subscriptions_snapshot(
@@ -397,13 +468,18 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
                     True,
                 )
 
+            started = time.perf_counter()
             subs = await self._list_eventsub_subscriptions_all_tokens()
             snapshot: list[dict] = []
             async with self.session_factory() as session:
+                existing_rows = list((await session.scalars(select(TwitchSubscription))).all())
                 previous_sub_owner = {
                     row.twitch_subscription_id: row.bot_account_id
-                    for row in list((await session.scalars(select(TwitchSubscription))).all())
+                    for row in existing_rows
                 }
+                bots = list((await session.scalars(select(BotAccount))).all())
+                bots_by_id = {bot.id: bot for bot in bots}
+                bots_by_twitch_user_id = {str(bot.twitch_user_id): bot for bot in bots}
                 for sub in subs:
                     condition = sub.get("condition", {})
                     event_type = str(sub.get("type", "")).strip()
@@ -419,17 +495,13 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
                     if event_type.startswith("channel.chat."):
                         bot_user_id = str(condition.get("user_id", "")).strip()
                         if bot_user_id:
-                            bot = await session.scalar(
-                                select(BotAccount).where(BotAccount.twitch_user_id == bot_user_id)
-                            )
+                            bot = bots_by_twitch_user_id.get(bot_user_id)
                     else:
                         previous_bot_id = previous_sub_owner.get(sub_id)
                         if previous_bot_id:
-                            bot = await session.get(BotAccount, previous_bot_id)
+                            bot = bots_by_id.get(previous_bot_id)
                         if not bot:
-                            bot = await session.scalar(
-                                select(BotAccount).where(BotAccount.twitch_user_id == broadcaster_user_id)
-                            )
+                            bot = bots_by_twitch_user_id.get(broadcaster_user_id)
                     if not bot:
                         continue
                     snapshot.append(
@@ -447,5 +519,37 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
                     )
             self._active_subscriptions_cache = [dict(item) for item in snapshot]
             self._active_subscriptions_cached_at = now
+            logger.info(
+                "Built live EventSub subscription snapshot: upstream=%d matched=%d in %dms",
+                len(subs),
+                len(snapshot),
+                int((time.perf_counter() - started) * 1000),
+            )
             return [dict(item) for item in snapshot], now, False
+
+    async def get_db_active_subscriptions_snapshot(self) -> tuple[list[dict], datetime]:
+        now = datetime.now(UTC)
+        started = time.perf_counter()
+        async with self.session_factory() as session:
+            rows = list((await session.scalars(select(TwitchSubscription))).all())
+        snapshot = [
+            {
+                "twitch_subscription_id": row.twitch_subscription_id,
+                "status": row.status,
+                "event_type": row.event_type,
+                "broadcaster_user_id": row.broadcaster_user_id,
+                "upstream_transport": self._transport_for_event(row.event_type),
+                "bot_account_id": str(row.bot_account_id),
+                "session_id": row.session_id,
+                "connected_at": None,
+                "disconnected_at": None,
+            }
+            for row in rows
+        ]
+        logger.info(
+            "Built DB EventSub subscription snapshot: rows=%d in %dms",
+            len(snapshot),
+            int((time.perf_counter() - started) * 1000),
+        )
+        return snapshot, now
 

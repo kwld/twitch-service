@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -41,12 +42,17 @@ class EventSubSubscriptionMixin:
         }
 
     async def _sync_from_twitch_and_reconcile(self) -> None:
+        started = time.perf_counter()
         subs = await self._list_eventsub_subscriptions_all_tokens()
         async with self.session_factory() as session:
+            existing_rows = list((await session.scalars(select(TwitchSubscription))).all())
             previous_sub_owner = {
                 row.twitch_subscription_id: row.bot_account_id
-                for row in list((await session.scalars(select(TwitchSubscription))).all())
+                for row in existing_rows
             }
+            bots = list((await session.scalars(select(BotAccount))).all())
+            bots_by_id = {bot.id: bot for bot in bots}
+            bots_by_twitch_user_id = {str(bot.twitch_user_id): bot for bot in bots}
             await session.execute(delete(TwitchSubscription))
             deduped: dict[tuple[uuid.UUID, str, str], dict] = {}
             duplicates: list[dict] = []
@@ -70,16 +76,12 @@ class EventSubSubscriptionMixin:
                 if event_type.startswith("channel.chat."):
                     if not bot_user_id:
                         continue
-                    bot = await session.scalar(
-                        select(BotAccount).where(BotAccount.twitch_user_id == bot_user_id)
-                    )
+                    bot = bots_by_twitch_user_id.get(str(bot_user_id))
                 else:
                     previous_bot_id = previous_sub_owner.get(sub_id)
-                    bot = await session.get(BotAccount, previous_bot_id) if previous_bot_id else None
+                    bot = bots_by_id.get(previous_bot_id) if previous_bot_id else None
                     if not bot:
-                        bot = await session.scalar(
-                            select(BotAccount).where(BotAccount.twitch_user_id == broadcaster_user_id)
-                        )
+                        bot = bots_by_twitch_user_id.get(str(broadcaster_user_id))
                 if not bot:
                     continue
                 if (
@@ -154,7 +156,7 @@ class EventSubSubscriptionMixin:
                     continue
                 delete_access_token: str | None = None
                 if duplicate.get("method") == "websocket":
-                    duplicate_bot = await session.get(BotAccount, duplicate["bot_account_id"])
+                    duplicate_bot = bots_by_id.get(duplicate["bot_account_id"])
                     if duplicate_bot and duplicate_bot.enabled:
                         with suppress(Exception):
                             delete_access_token = await ensure_bot_access_token(
@@ -173,6 +175,12 @@ class EventSubSubscriptionMixin:
                     duplicate.get("event_type"),
                     duplicate.get("broadcaster_user_id"),
                 )
+        logger.info(
+            "EventSub reconcile persisted %d subscriptions, skipped/merged %d duplicates in %dms",
+            len(deduped),
+            len(duplicates),
+            int((time.perf_counter() - started) * 1000),
+        )
 
     async def _ensure_authorization_revoke_subscription(self) -> None:
         if not self.webhook_callback_url or not self.webhook_secret:

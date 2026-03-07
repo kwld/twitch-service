@@ -277,8 +277,10 @@ Purpose:
 
 Query:
 - `refresh` (optional bool, default `false`)
-  - `false`: returns cached Twitch snapshot when still fresh.
+  - `false`: returns the reconciled local DB snapshot without forcing a Twitch fetch.
   - `true`: forces a fresh fetch from Twitch before filtering for this service.
+- `broadcaster_user_id` (optional string)
+  - when provided, filters results server-side to one broadcaster before response serialization.
 
 Response:
 ```json
