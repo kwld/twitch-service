@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -20,6 +21,7 @@ from app.event_router import InterestKey
 from app.models import (
     BotAccount,
     BroadcasterAuthorization,
+    ServiceEventTrace,
     ServiceInterest,
     TwitchSubscription,
 )
@@ -29,6 +31,38 @@ logger = logging.getLogger(__name__)
 
 
 class EventSubSubscriptionMixin:
+    async def _record_service_actions_for_key(
+        self,
+        *,
+        key: InterestKey,
+        event_type: str,
+        target: str,
+        payload: dict,
+    ) -> None:
+        interested = await self.registry.interested(key)
+        service_ids = {interest.service_account_id for interest in interested}
+        if not service_ids:
+            return
+        try:
+            payload_json = json.dumps(payload, default=str)
+            if len(payload_json) > getattr(self, "_trace_payload_max_chars", 12000):
+                payload_json = payload_json[: getattr(self, "_trace_payload_max_chars", 12000)] + "... [truncated]"
+            async with self.session_factory() as session:
+                for service_id in service_ids:
+                    session.add(
+                        ServiceEventTrace(
+                            service_account_id=service_id,
+                            direction="outgoing",
+                            local_transport="eventsub_action",
+                            event_type=event_type,
+                            target=target,
+                            payload_json=payload_json,
+                        )
+                    )
+                await session.commit()
+        except Exception:
+            return
+
     @staticmethod
     def _is_subscription_reusable_status(status: str | None) -> bool:
         normalized = (status or "").strip().lower()
@@ -96,6 +130,16 @@ class EventSubSubscriptionMixin:
                             delete_access_token = await ensure_bot_access_token(session, self.twitch, bot)
                     with suppress(TwitchApiError):
                         await self.twitch.delete_eventsub_subscription(sub_id, access_token=delete_access_token)
+                    await self._record_service_actions_for_key(
+                        key=InterestKey(bot.id, event_type, broadcaster_user_id),
+                        event_type="eventsub.subscription.delete_stale",
+                        target="helix:/eventsub/subscriptions",
+                        payload={
+                            "subscription_id": sub_id,
+                            "status": sub_status,
+                            "upstream_transport": method,
+                        },
+                    )
                     logger.info(
                         "Removed stale websocket subscription %s type=%s status=%s for automatic recovery",
                         sub_id,
@@ -170,6 +214,20 @@ class EventSubSubscriptionMixin:
                         duplicate_id,
                         access_token=delete_access_token,
                     )
+                await self._record_service_actions_for_key(
+                    key=InterestKey(
+                        duplicate["bot_account_id"],
+                        duplicate["event_type"],
+                        duplicate["broadcaster_user_id"],
+                    ),
+                    event_type="eventsub.subscription.delete_duplicate",
+                    target="helix:/eventsub/subscriptions",
+                    payload={
+                        "subscription_id": duplicate_id,
+                        "status": duplicate.get("status"),
+                        "upstream_transport": duplicate.get("method"),
+                    },
+                )
                 logger.warning(
                     "Removed duplicate Twitch subscription during reconcile: id=%s type=%s broadcaster=%s",
                     duplicate_id,
@@ -285,6 +343,15 @@ class EventSubSubscriptionMixin:
                         try:
                             await self.twitch.delete_eventsub_subscription(
                                 db_sub.twitch_subscription_id, access_token=delete_access_token
+                            )
+                            await self._record_service_actions_for_key(
+                                key=key,
+                                event_type="eventsub.subscription.rotate_delete",
+                                target="helix:/eventsub/subscriptions",
+                                payload={
+                                    "subscription_id": db_sub.twitch_subscription_id,
+                                    "upstream_transport": upstream_transport,
+                                },
                             )
                         except TwitchApiError as exc:
                             if not self._is_subscription_not_found_error(exc):
@@ -451,6 +518,17 @@ class EventSubSubscriptionMixin:
                             reason=str(exc),
                         )
                         raise
+                    await self._record_service_actions_for_key(
+                        key=key,
+                        event_type="eventsub.subscription.create",
+                        target="helix:/eventsub/subscriptions",
+                        payload={
+                            "subscription_id": created["id"],
+                            "status": created.get("status", "enabled"),
+                            "upstream_transport": upstream_transport,
+                            "session_id": created.get("transport", {}).get("session_id"),
+                        },
+                    )
                     new_sub = TwitchSubscription(
                         bot_account_id=key.bot_account_id,
                         event_type=key.event_type,

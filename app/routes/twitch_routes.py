@@ -38,6 +38,8 @@ def register_twitch_routes(
     async def _record_twitch_action(
         *,
         service_account_id: uuid.UUID,
+        direction: str,
+        local_transport: str,
         event_type: str,
         target: str,
         payload: object,
@@ -53,8 +55,8 @@ def register_twitch_routes(
                 session.add(
                     ServiceEventTrace(
                         service_account_id=service_account_id,
-                        direction="outgoing",
-                        local_transport="twitch_api",
+                        direction=direction,
+                        local_transport=local_transport,
                         event_type=event_type,
                         target=target,
                         payload_json=payload_json,
@@ -123,6 +125,20 @@ def register_twitch_routes(
             users = await twitch_client.get_users_by_query(token, user_ids=ids, logins=login_values)
         await _record_twitch_action(
             service_account_id=service.id,
+            direction="incoming",
+            local_transport="service_api",
+            event_type="service.twitch.profiles.lookup",
+            target="/v1/twitch/profiles",
+            payload={
+                "bot_account_id": str(bot_account_id),
+                "user_ids": ids,
+                "logins": login_values,
+            },
+        )
+        await _record_twitch_action(
+            service_account_id=service.id,
+            direction="outgoing",
+            local_transport="twitch_api",
             event_type="twitch.profiles.lookup",
             target="helix:/users",
             payload={
@@ -157,6 +173,19 @@ def register_twitch_routes(
             streams = await twitch_client.get_streams_by_user_ids(token, ids)
         await _record_twitch_action(
             service_account_id=service.id,
+            direction="incoming",
+            local_transport="service_api",
+            event_type="service.twitch.streams.status",
+            target="/v1/twitch/streams/status",
+            payload={
+                "bot_account_id": str(bot_account_id),
+                "broadcaster_user_ids": ids,
+            },
+        )
+        await _record_twitch_action(
+            service_account_id=service.id,
+            direction="outgoing",
+            local_transport="twitch_api",
             event_type="twitch.streams.status",
             target="helix:/streams",
             payload={
@@ -494,6 +523,20 @@ def register_twitch_routes(
             chat_assets.prefetch(broadcaster_user_id)
         await _record_twitch_action(
             service_account_id=service.id,
+            direction="incoming",
+            local_transport="service_api",
+            event_type="service.twitch.chat.assets",
+            target="/v1/twitch/chat/assets",
+            payload={
+                "broadcaster_user_id": broadcaster_user_id,
+                "broadcaster_login": broadcaster_login,
+                "refresh": bool(refresh),
+            },
+        )
+        await _record_twitch_action(
+            service_account_id=service.id,
+            direction="outgoing",
+            local_transport="twitch_api",
             event_type="twitch.chat.assets",
             target="cache:/chat-assets",
             payload={
@@ -517,6 +560,19 @@ def register_twitch_routes(
     ):
         started = time.perf_counter()
         broadcaster_user_id = req.broadcaster_user_id.strip()
+        await _record_twitch_action(
+            service_account_id=service.id,
+            direction="incoming",
+            local_transport="service_api",
+            event_type="service.twitch.chat.send",
+            target="/v1/twitch/chat/messages",
+            payload={
+                "bot_account_id": str(req.bot_account_id),
+                "broadcaster_user_id": broadcaster_user_id,
+                "auth_mode_requested": req.auth_mode,
+                "reply_parent_message_id": req.reply_parent_message_id,
+            },
+        )
         async with session_factory() as session:
             await ensure_service_can_access_bot(session, service.id, req.bot_account_id)
             bot = await session.get(BotAccount, req.bot_account_id)
@@ -624,6 +680,8 @@ def register_twitch_routes(
         )
         await _record_twitch_action(
             service_account_id=service.id,
+            direction="outgoing",
+            local_transport="twitch_api",
             event_type="twitch.chat.send",
             target="helix:/chat/messages",
             payload={
@@ -645,6 +703,20 @@ def register_twitch_routes(
     ):
         started = time.perf_counter()
         broadcaster_user_id = req.broadcaster_user_id.strip()
+        await _record_twitch_action(
+            service_account_id=service.id,
+            direction="incoming",
+            local_transport="service_api",
+            event_type="service.twitch.clip.create",
+            target="/v1/twitch/clips",
+            payload={
+                "bot_account_id": str(req.bot_account_id),
+                "broadcaster_user_id": broadcaster_user_id,
+                "title": req.title,
+                "duration": req.duration,
+                "has_delay": req.has_delay,
+            },
+        )
         async with session_factory() as session:
             await ensure_service_can_access_bot(session, service.id, req.bot_account_id)
             bot = await session.get(BotAccount, req.bot_account_id)
@@ -709,6 +781,8 @@ def register_twitch_routes(
             )
             await _record_twitch_action(
                 service_account_id=service.id,
+                direction="outgoing",
+                local_transport="twitch_api",
                 event_type="twitch.clip.create",
                 target="helix:/clips",
                 payload={
@@ -743,6 +817,8 @@ def register_twitch_routes(
         )
         await _record_twitch_action(
             service_account_id=service.id,
+            direction="outgoing",
+            local_transport="twitch_api",
             event_type="twitch.clip.create",
             target="helix:/clips",
             payload={

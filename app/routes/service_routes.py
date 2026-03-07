@@ -149,6 +149,14 @@ def register_service_routes(
     @app.post("/v1/ws-token")
     async def create_service_ws_token(service: ServiceAccount = Depends(service_auth)):
         ws_token, expires_in_seconds = await issue_ws_token(service.id)
+        await record_service_trace(
+            service_account_id=service.id,
+            direction="incoming",
+            local_transport="service_api",
+            event_type="service.ws_token.request",
+            target="/v1/ws-token",
+            payload={},
+        )
         payload = {
             "ws_token": ws_token,
             "token": ws_token,
@@ -673,6 +681,20 @@ def register_service_routes(
         req: CreateInterestRequest,
         service: ServiceAccount = Depends(service_auth),
     ):
+        await record_service_trace(
+            service_account_id=service.id,
+            direction="incoming",
+            local_transport="service_api",
+            event_type="service.interest.create",
+            target="/v1/interests",
+            payload={
+                "bot_account_id": str(req.bot_account_id),
+                "event_type": req.event_type,
+                "broadcaster_user_id": req.broadcaster_user_id,
+                "transport": req.transport,
+                "webhook_url": str(req.webhook_url) if req.webhook_url else None,
+            },
+        )
         event_type = req.event_type.strip().lower()
         raw_broadcaster = normalize_broadcaster_id_or_login(req.broadcaster_user_id)
         if not raw_broadcaster:
@@ -881,6 +903,14 @@ def register_service_routes(
 
     @app.delete("/v1/interests/{interest_id}")
     async def delete_interest(interest_id: uuid.UUID, service: ServiceAccount = Depends(service_auth)):
+        await record_service_trace(
+            service_account_id=service.id,
+            direction="incoming",
+            local_transport="service_api",
+            event_type="service.interest.delete",
+            target=f"/v1/interests/{interest_id}",
+            payload={"interest_id": str(interest_id)},
+        )
         async with session_factory() as session:
             interest = await session.get(ServiceInterest, interest_id)
             if not interest or interest.service_account_id != service.id:
@@ -903,6 +933,14 @@ def register_service_routes(
 
     @app.post("/v1/interests/{interest_id}/heartbeat")
     async def heartbeat_interest(interest_id: uuid.UUID, service: ServiceAccount = Depends(service_auth)):
+        await record_service_trace(
+            service_account_id=service.id,
+            direction="incoming",
+            local_transport="service_api",
+            event_type="service.interest.heartbeat",
+            target=f"/v1/interests/{interest_id}/heartbeat",
+            payload={"interest_id": str(interest_id)},
+        )
         async with session_factory() as session:
             interest = await session.get(ServiceInterest, interest_id)
             if not interest or interest.service_account_id != service.id:
@@ -936,6 +974,14 @@ def register_service_routes(
 
     @app.post("/v1/interests/heartbeat")
     async def heartbeat_all_interests(service: ServiceAccount = Depends(service_auth)):
+        await record_service_trace(
+            service_account_id=service.id,
+            direction="incoming",
+            local_transport="service_api",
+            event_type="service.interests.heartbeat_all",
+            target="/v1/interests/heartbeat",
+            payload={},
+        )
         async with session_factory() as session:
             touch_targets = list(
                 (

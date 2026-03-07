@@ -62,6 +62,8 @@
     deliveriesList: document.getElementById("deliveries-list"),
     actionsMeta: document.getElementById("actions-meta"),
     actionsFilterText: document.getElementById("actions-filter-text"),
+    actionsFilterDirection: document.getElementById("actions-filter-direction"),
+    actionsFilterTransport: document.getElementById("actions-filter-transport"),
     actionsFilterService: document.getElementById("actions-filter-service"),
     actionsFilterEvent: document.getElementById("actions-filter-event"),
     actionsPageSize: document.getElementById("actions-page-size"),
@@ -501,9 +503,13 @@
 
   function getFilteredActions() {
     const text = (el.actionsFilterText.value || "").trim().toLowerCase();
+    const direction = el.actionsFilterDirection.value || "";
+    const transport = el.actionsFilterTransport.value || "";
     const service = el.actionsFilterService.value || "";
     const eventType = el.actionsFilterEvent.value || "";
     return allActions.filter((row) => {
+      if (direction && row.direction !== direction) return false;
+      if (transport && row.transport !== transport) return false;
       if (service && row.service_name !== service) return false;
       if (eventType && row.event_type !== eventType) return false;
       if (!text) return true;
@@ -535,7 +541,8 @@
       <details class="event-row" data-action-key="${escapeHtml(actionRowKey(row))}" ${openActionKeys.has(actionRowKey(row)) ? "open" : ""}>
         <summary class="event-summary">
           <div class="event-main">
-            <span class="badge badge-info">twitch</span>
+            <span class="badge ${row.direction === "incoming" ? "badge-good" : "badge-info"}">${row.direction}</span>
+            <span class="badge badge-warn">${row.transport}</span>
             <strong>${row.event_type}</strong>
             <span class="muted">${row.broadcaster_label}</span>
           </div>
@@ -822,6 +829,8 @@
   el.deliveriesFilterService.addEventListener("change", () => { deliveriesPage = 1; refreshDeliveries(); });
   el.deliveriesPageSize.addEventListener("change", () => { deliveriesPage = 1; refreshDeliveries(); });
   el.actionsFilterText.addEventListener("input", () => { actionsPage = 1; refreshActions(); });
+  el.actionsFilterDirection.addEventListener("change", () => { actionsPage = 1; refreshActions(); });
+  el.actionsFilterTransport.addEventListener("change", () => { actionsPage = 1; refreshActions(); });
   el.actionsFilterService.addEventListener("change", () => { actionsPage = 1; refreshActions(); });
   el.actionsFilterEvent.addEventListener("change", () => { actionsPage = 1; refreshActions(); });
   el.actionsPageSize.addEventListener("change", () => { actionsPage = 1; refreshActions(); });

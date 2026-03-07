@@ -294,6 +294,17 @@ STATUS_HTML = """<!doctype html>
           </div>
           <div class="event-toolbar">
             <input id="actions-filter-text" class="field-input" type="search" placeholder="Filter by event, service, broadcaster, target">
+            <select id="actions-filter-direction" class="field-input">
+              <option value="">All directions</option>
+              <option value="incoming">Incoming</option>
+              <option value="outgoing">Outgoing</option>
+            </select>
+            <select id="actions-filter-transport" class="field-input">
+              <option value="">All transports</option>
+              <option value="service_api">Service API</option>
+              <option value="twitch_api">Twitch API</option>
+              <option value="eventsub_action">EventSub action</option>
+            </select>
             <select id="actions-filter-service" class="field-input">
               <option value="">All services</option>
             </select>
@@ -789,9 +800,11 @@ def register_status_routes(
         recent_twitch_action_rows = []
         for trace in traces[:120]:
             if trace.direction != "outgoing":
-                if trace.local_transport == "twitch_api":
+                if trace.local_transport in {"twitch_api", "service_api", "eventsub_action"}:
                     payload = _safe_json_loads(trace.payload_json)
                     broadcaster_user_id = str(payload.get("broadcaster_user_id", "")).strip()
+                    if not broadcaster_user_id:
+                        broadcaster_user_id = _trace_broadcaster_user_id(trace) or ""
                     broadcaster_login = broadcaster_names.get(broadcaster_user_id)
                     if not broadcaster_login and broadcaster_user_id:
                         identity = identity_by_user_id.get(broadcaster_user_id)
@@ -802,6 +815,8 @@ def register_status_routes(
                             "timestamp": _fmt_dt(trace.created_at),
                             "service_name": service_name_by_id.get(str(trace.service_account_id), "unknown"),
                             "service_account_id_masked": _short_id(str(trace.service_account_id)),
+                            "direction": trace.direction,
+                            "transport": trace.local_transport,
                             "event_type": trace.event_type,
                             "target": trace.target or "-",
                             "broadcaster_label": f"chan:{_mask_name(broadcaster_login or broadcaster_user_id)}"
@@ -811,6 +826,33 @@ def register_status_routes(
                             "body_pretty": _format_trace_body(trace.payload_json),
                         }
                     )
+                continue
+            if trace.local_transport in {"twitch_api", "service_api", "eventsub_action"}:
+                payload = _safe_json_loads(trace.payload_json)
+                broadcaster_user_id = str(payload.get("broadcaster_user_id", "")).strip()
+                if not broadcaster_user_id:
+                    broadcaster_user_id = _trace_broadcaster_user_id(trace) or ""
+                broadcaster_login = broadcaster_names.get(broadcaster_user_id)
+                if not broadcaster_login and broadcaster_user_id:
+                    identity = identity_by_user_id.get(broadcaster_user_id)
+                    if identity:
+                        broadcaster_login = str(identity.broadcaster_display_name or "").strip() or str(identity.broadcaster_login or "").strip()
+                recent_twitch_action_rows.append(
+                    {
+                        "timestamp": _fmt_dt(trace.created_at),
+                        "service_name": service_name_by_id.get(str(trace.service_account_id), "unknown"),
+                        "service_account_id_masked": _short_id(str(trace.service_account_id)),
+                        "direction": trace.direction,
+                        "transport": trace.local_transport,
+                        "event_type": trace.event_type,
+                        "target": trace.target or "-",
+                        "broadcaster_label": f"chan:{_mask_name(broadcaster_login or broadcaster_user_id)}"
+                        if (broadcaster_login or broadcaster_user_id)
+                        else "chan:unknown",
+                        "broadcaster_user_id_masked": _mask_id(broadcaster_user_id),
+                        "body_pretty": _format_trace_body(trace.payload_json),
+                    }
+                )
                 continue
             payload = _safe_json_loads(trace.payload_json)
             delivery = payload.get("_delivery")
