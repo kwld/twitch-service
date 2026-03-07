@@ -13,14 +13,18 @@
     summaryCards: document.getElementById("summary-cards"),
     startupMeta: document.getElementById("startup-meta"),
     startupPhases: document.getElementById("startup-phases"),
+    botsMeta: document.getElementById("bots-meta"),
+    botsTable: document.getElementById("bots-table"),
     servicesMeta: document.getElementById("services-meta"),
     servicesTable: document.getElementById("services-table"),
     eventsubMeta: document.getElementById("eventsub-meta"),
     eventsubGroups: document.getElementById("eventsub-groups"),
     broadcasterMeta: document.getElementById("broadcaster-meta"),
     broadcasterTable: document.getElementById("broadcaster-table"),
+    broadcasterFilterBot: document.getElementById("broadcaster-filter-bot"),
     logsMeta: document.getElementById("logs-meta"),
     logsList: document.getElementById("logs-list"),
+    logsFilterBot: document.getElementById("logs-filter-bot"),
     eventsMeta: document.getElementById("events-meta"),
     eventsPagination: document.getElementById("events-pagination"),
     eventsList: document.getElementById("events-list"),
@@ -29,6 +33,7 @@
     eventsFilterDirection: document.getElementById("events-filter-direction"),
     eventsFilterOrigin: document.getElementById("events-filter-origin"),
     eventsFilterService: document.getElementById("events-filter-service"),
+    eventsFilterBot: document.getElementById("events-filter-bot"),
     eventsPageSize: document.getElementById("events-page-size"),
     eventsModal: document.getElementById("events-modal"),
     eventsModalBackdrop: document.getElementById("events-modal-backdrop"),
@@ -42,8 +47,11 @@
   let reconnectTimer = null;
   let socket = null;
   let currentBroadcasters = [];
+  let allBroadcasters = [];
   let eventsPaused = false;
   let allEvents = [];
+  let allLogs = [];
+  let allBots = [];
   let activeTab = "overview";
   let eventsPage = 1;
   let pendingSnapshot = null;
@@ -154,6 +162,34 @@
     `).join("") || `<tr><td colspan="7" class="muted">No service accounts found.</td></tr>`;
   }
 
+  function renderBots(rows) {
+    const items = Array.isArray(rows) ? rows : [];
+    allBots = items.slice();
+    el.botsMeta.textContent = `${items.length} bot accounts`;
+    el.botsTable.innerHTML = items.map((row) => `
+      <tr>
+        <td>
+          <strong>${row.bot_name_masked || row.bot_name}</strong>
+          <div class="muted mono">${row.twitch_login_masked} • ${row.bot_account_id}</div>
+        </td>
+        <td>${row.enabled ? '<span class="badge badge-good">enabled</span>' : '<span class="badge badge-bad">disabled</span>'}</td>
+        <td>${row.channel_count || 0}</td>
+        <td>${row.subscription_count || 0}</td>
+        <td>${row.enabled_subscription_count || 0}</td>
+      </tr>
+    `).join("") || `<tr><td colspan="5" class="muted">No bot accounts found.</td></tr>`;
+    const broadcasterSelected = el.broadcasterFilterBot.value;
+    const eventSelected = el.eventsFilterBot.value;
+    const logSelected = el.logsFilterBot.value;
+    const options = ['<option value="">All bot accounts</option>', ...items.map((row) => `<option value="${escapeHtml(row.bot_account_id)}">${escapeHtml(row.bot_name_masked || row.bot_name)}</option>`)];
+    el.broadcasterFilterBot.innerHTML = options.join("");
+    el.eventsFilterBot.innerHTML = options.join("");
+    el.logsFilterBot.innerHTML = options.join("");
+    if (items.some((row) => row.bot_account_id === broadcasterSelected)) el.broadcasterFilterBot.value = broadcasterSelected;
+    if (items.some((row) => row.bot_account_id === eventSelected)) el.eventsFilterBot.value = eventSelected;
+    if (items.some((row) => row.bot_account_id === logSelected)) el.logsFilterBot.value = logSelected;
+  }
+
   function renderEventSub(eventsub) {
     const transportRows = eventsub.active_snapshot_by_transport || [];
     const statusRows = eventsub.active_snapshot_by_status || [];
@@ -175,11 +211,14 @@
   }
 
   function renderBroadcasters(rows) {
-    currentBroadcasters = Array.isArray(rows) ? rows.slice() : [];
+    allBroadcasters = Array.isArray(rows) ? rows.slice() : [];
+    const selectedBot = el.broadcasterFilterBot.value || "";
+    currentBroadcasters = allBroadcasters.filter((row) => !selectedBot || row.bot_account_id === selectedBot);
     el.broadcasterMeta.textContent = `${currentBroadcasters.length} masked channels`;
     el.broadcasterTable.innerHTML = currentBroadcasters.map((row, idx) => `
       <tr>
         <td><strong>${row.broadcaster_label}</strong><div class="muted mono">${row.broadcaster_user_id_masked}</div></td>
+        <td><strong>${row.bot_name_masked}</strong><div class="muted mono">${row.bot_account_id_masked}</div></td>
         <td>${row.is_live ? '<span class="badge badge-good">live</span>' : '<span class="badge badge-info">idle</span>'}</td>
         <td><strong>${row.messages_received || 0}</strong></td>
         <td><strong>${row.messages_sent || 0}</strong></td>
@@ -193,11 +232,13 @@
         <td>${row.game_name}</td>
         <td>${row.last_checked_human}</td>
       </tr>
-    `).join("") || `<tr><td colspan="8" class="muted">No broadcaster state rows.</td></tr>`;
+    `).join("") || `<tr><td colspan="9" class="muted">No broadcaster state rows.</td></tr>`;
   }
 
   function renderLogs(logs) {
-    const rows = logs || [];
+    allLogs = Array.isArray(logs) ? logs.slice() : [];
+    const selectedBot = el.logsFilterBot.value || "";
+    const rows = allLogs.filter((row) => !selectedBot || row.bot_account_id === selectedBot);
     el.logsMeta.textContent = `${rows.length} buffered lines`;
     el.logsList.innerHTML = rows.slice().reverse().map((row) => `
       <div class="log-row log-${String(row.level || "INFO").toLowerCase()}">
@@ -205,7 +246,7 @@
           <strong>${row.level}</strong>
           <span class="muted">${fmtDate(row.timestamp)}</span>
         </div>
-        <div class="muted mono">${row.logger}</div>
+        <div class="muted mono">${row.logger} • ${row.bot_name_masked || "unknown"} • ${row.bot_account_id_masked || "n/a"}</div>
         <div class="message">${row.message}</div>
       </div>
     `).join("") || `<div class="log-row"><div class="muted">No logs buffered yet.</div></div>`;
@@ -225,9 +266,11 @@
     const direction = el.eventsFilterDirection.value || "";
     const origin = el.eventsFilterOrigin.value || "";
     const service = el.eventsFilterService.value || "";
+    const bot = el.eventsFilterBot.value || "";
     return allEvents.filter((row) => {
       if (direction && row.direction !== direction) return false;
       if (service && row.service_name !== service) return false;
+       if (bot && row.bot_account_id !== bot) return false;
       if (origin) {
         const rowOrigin = eventOrigin(row);
         if (origin === "service" && (rowOrigin === "twitch")) return false;
@@ -238,6 +281,7 @@
         row.event_type,
         row.service_name,
         row.broadcaster_label,
+        row.bot_name,
         row.target,
         row.transport,
         eventOrigin(row),
@@ -283,6 +327,7 @@
             <strong>${row.event_type}</strong>
             <span class="muted">${row.broadcaster_label}</span>
             <span class="badge badge-warn">${eventOrigin(row)}</span>
+            <span class="badge badge-info">${row.bot_name_masked || row.bot_name || "unknown"}</span>
           </div>
           <div class="event-side">
             <span class="muted">${row.service_name}</span>
@@ -291,7 +336,7 @@
         </summary>
         <div class="event-meta">
           <div class="muted mono">${row.broadcaster_user_id_masked} • ${row.transport} • ${row.target}</div>
-          <div class="muted mono">${row.service_account_id_masked}</div>
+          <div class="muted mono">${row.service_account_id_masked} • ${row.bot_account_id_masked || "n/a"}</div>
         </div>
         <pre class="event-body">${row.body_pretty}</pre>
       </details>
@@ -332,6 +377,7 @@
     el.generatedAt.textContent = `snapshot ${fmtDate(snapshot.generated_at)}`;
     renderSummary(snapshot.summary_cards || []);
     renderPhases(snapshot.eventsub || {});
+    renderBots(snapshot.bots || []);
     renderServices(snapshot.services || { rows: [] });
     renderEventSub(snapshot.eventsub || {});
     renderBroadcasters(snapshot.broadcasters || []);
@@ -458,7 +504,10 @@
   el.eventsFilterDirection.addEventListener("change", () => handleEventFilterChange(true));
   el.eventsFilterOrigin.addEventListener("change", () => handleEventFilterChange(true));
   el.eventsFilterService.addEventListener("change", () => handleEventFilterChange(true));
+  el.eventsFilterBot.addEventListener("change", () => handleEventFilterChange(true));
   el.eventsPageSize.addEventListener("change", () => handleEventFilterChange(true));
+  el.broadcasterFilterBot.addEventListener("change", () => renderBroadcasters(allBroadcasters));
+  el.logsFilterBot.addEventListener("change", () => renderLogs(allLogs));
   el.eventsPagination.addEventListener("click", (event) => {
     const button = event.target.closest("[data-page-nav]");
     if (!button) return;

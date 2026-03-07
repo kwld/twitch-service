@@ -94,6 +94,27 @@ STATUS_HTML = """<!doctype html>
             <div id="eventsub-groups" class="compact-list"></div>
           </section>
         </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Bot Accounts</h2>
+            <div id="bots-meta" class="panel-meta"></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Bot</th>
+                  <th>State</th>
+                  <th>Channels</th>
+                  <th>Subscriptions</th>
+                  <th>Enabled Subs</th>
+                </tr>
+              </thead>
+              <tbody id="bots-table"></tbody>
+            </table>
+          </div>
+        </section>
       </section>
 
       <section class="tab-panel" data-tab-panel="broadcasters">
@@ -102,11 +123,17 @@ STATUS_HTML = """<!doctype html>
             <h2>Broadcaster State</h2>
             <div id="broadcaster-meta" class="panel-meta"></div>
           </div>
+          <div class="event-toolbar">
+            <select id="broadcaster-filter-bot" class="field-input">
+              <option value="">All bot accounts</option>
+            </select>
+          </div>
           <div class="table-wrap">
             <table>
               <thead>
                 <tr>
                   <th>Broadcaster</th>
+                  <th>Bot</th>
                   <th>Live</th>
                   <th>In</th>
                   <th>Out</th>
@@ -148,6 +175,9 @@ STATUS_HTML = """<!doctype html>
             <select id="events-filter-service" class="field-input">
               <option value="">All services</option>
             </select>
+            <select id="events-filter-bot" class="field-input">
+              <option value="">All bot accounts</option>
+            </select>
             <select id="events-page-size" class="field-input">
               <option value="10">10 / page</option>
               <option value="25" selected>25 / page</option>
@@ -164,6 +194,11 @@ STATUS_HTML = """<!doctype html>
           <div class="panel-head">
             <h2>Recent Logs</h2>
             <div id="logs-meta" class="panel-meta"></div>
+          </div>
+          <div class="event-toolbar">
+            <select id="logs-filter-bot" class="field-input">
+              <option value="">All bot accounts</option>
+            </select>
           </div>
           <div id="logs-list" class="log-list"></div>
         </section>
@@ -310,6 +345,22 @@ def _group_counts(rows: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
     ]
 
 
+def _find_bot_for_message(message: str, bots: list[dict[str, str]]) -> dict[str, str] | None:
+    text = str(message or "")
+    lower = text.lower()
+    for bot in bots:
+        bot_id = bot.get("id", "")
+        bot_name = bot.get("name", "")
+        bot_login = bot.get("login", "")
+        if bot_id and bot_id in text:
+            return bot
+        if bot_name and bot_name.lower() in lower:
+            return bot
+        if bot_login and bot_login.lower() in lower:
+            return bot
+    return None
+
+
 def register_status_routes(
     app: FastAPI,
     *,
@@ -347,10 +398,25 @@ def register_status_routes(
 
         stats_by_service = {row.service_account_id: row for row in stats_rows}
         service_name_by_id = {str(service.id): service.name for service in services}
+        bot_by_id = {str(bot.id): bot for bot in bot_rows}
+        bot_meta_rows = [
+            {
+                "id": str(bot.id),
+                "name": bot.name,
+                "login": bot.twitch_login,
+                "name_masked": _mask_name(bot.name),
+                "login_masked": _mask_name(bot.twitch_login),
+                "twitch_user_id_masked": _mask_id(bot.twitch_user_id),
+                "enabled": bool(bot.enabled),
+            }
+            for bot in bot_rows
+        ]
         working_by_service: dict[str, int] = {}
         interests_by_service: dict[str, int] = {}
         access_by_service: dict[str, int] = {}
         subs_by_bot: dict[str, list[TwitchSubscription]] = {}
+        channel_count_by_bot: dict[str, int] = {}
+        bot_ids_by_broadcaster: dict[str, set[str]] = {}
 
         for row in interests:
             key = str(row.service_account_id)
@@ -364,6 +430,11 @@ def register_status_routes(
         for row in sub_rows:
             key = str(row.bot_account_id)
             subs_by_bot.setdefault(key, []).append(row)
+            bot_ids_by_broadcaster.setdefault(str(row.broadcaster_user_id), set()).add(key)
+        for state in channel_states:
+            key = str(state.bot_account_id)
+            channel_count_by_bot[key] = channel_count_by_bot.get(key, 0) + 1
+            bot_ids_by_broadcaster.setdefault(str(state.broadcaster_user_id), set()).add(key)
 
         active_snapshot, active_cached_at = await eventsub_manager.get_db_active_subscriptions_snapshot()
         eventsub_summary = await eventsub_manager.get_status_summary()
@@ -399,6 +470,7 @@ def register_status_routes(
             event_type = str(row.event_type).strip()
             if broadcaster_user_id and event_type:
                 eventsub_names_by_broadcaster.setdefault(broadcaster_user_id, set()).add(event_type)
+                bot_ids_by_broadcaster.setdefault(broadcaster_user_id, set()).add(str(row.bot_account_id))
 
         service_rows = []
         for service in services:
@@ -442,10 +514,16 @@ def register_status_routes(
                 broadcaster_user_id,
                 {"messages_received": 0, "messages_sent": 0},
             )
+            bot = bot_by_id.get(str(state.bot_account_id))
             broadcaster_rows.append(
                 {
                     "broadcaster_user_id_masked": _mask_id(broadcaster_user_id),
                     "broadcaster_label": f"chan:{_mask_name(broadcaster_login or broadcaster_user_id)}",
+                    "bot_account_id": str(state.bot_account_id),
+                    "bot_account_id_masked": _short_id(str(state.bot_account_id)),
+                    "bot_name": bot.name if bot else "unknown",
+                    "bot_name_masked": _mask_name(bot.name if bot else "unknown"),
+                    "bot_login_masked": _mask_name(bot.twitch_login if bot else "unknown"),
                     "is_live": bool(state.is_live),
                     "title_masked": _mask_title(state.title),
                     "game_name": state.game_name or "-",
@@ -475,6 +553,8 @@ def register_status_routes(
         for trace in traces[:80]:
             broadcaster_user_id = _trace_broadcaster_user_id(trace)
             broadcaster_login = _trace_broadcaster_login(trace)
+            candidate_bot_ids = sorted(bot_ids_by_broadcaster.get(str(broadcaster_user_id or ""), set()))
+            bot = bot_by_id.get(candidate_bot_ids[0]) if len(candidate_bot_ids) == 1 else None
             recent_event_rows.append(
                 {
                     "timestamp": _fmt_dt(trace.created_at),
@@ -488,6 +568,10 @@ def register_status_routes(
                     if (broadcaster_login or broadcaster_user_id)
                     else "chan:unknown",
                     "broadcaster_user_id_masked": _mask_id(broadcaster_user_id),
+                    "bot_account_id": str(bot.id) if bot else "",
+                    "bot_account_id_masked": _short_id(str(bot.id)) if bot else ("multiple" if len(candidate_bot_ids) > 1 else "n/a"),
+                    "bot_name": bot.name if bot else ("multiple" if len(candidate_bot_ids) > 1 else "unknown"),
+                    "bot_name_masked": _mask_name(bot.name) if bot else ("multiple" if len(candidate_bot_ids) > 1 else "unknown"),
                     "body_pretty": _format_trace_body(trace.payload_json),
                 }
             )
@@ -499,10 +583,28 @@ def register_status_routes(
                 {
                     "bot_account_id": str(bot.id),
                     "bot_name": bot.name,
+                    "bot_name_masked": _mask_name(bot.name),
                     "twitch_login_masked": _mask_name(bot.twitch_login),
                     "enabled": bot.enabled,
+                    "channel_count": channel_count_by_bot.get(str(bot.id), 0),
                     "subscription_count": len(bot_subs),
                     "enabled_subscription_count": sum(1 for row in bot_subs if str(row.status).startswith("enabled")),
+                }
+            )
+
+        recent_logs = []
+        for row in status_runtime.get_recent_logs(80):
+            bot_match = _find_bot_for_message(
+                str(row.get("message", "")),
+                bot_meta_rows,
+            )
+            recent_logs.append(
+                {
+                    **row,
+                    "bot_account_id": bot_match.get("id", "") if bot_match else "",
+                    "bot_account_id_masked": _short_id(bot_match.get("id", "")) if bot_match else "n/a",
+                    "bot_name": bot_match.get("name", "") if bot_match else "",
+                    "bot_name_masked": bot_match.get("name_masked", "unknown") if bot_match else "unknown",
                 }
             )
 
@@ -530,7 +632,7 @@ def register_status_routes(
             },
             {
                 "label": "Recent Logs",
-                "value": len(status_runtime.get_recent_logs(80)),
+                "value": len(recent_logs),
                 "tone": "neutral",
             },
         ]
@@ -570,7 +672,7 @@ def register_status_routes(
             "bots": bot_summary,
             "broadcasters": broadcaster_rows,
             "recent_events": recent_event_rows,
-            "logs": status_runtime.get_recent_logs(80),
+            "logs": recent_logs,
         }
 
     async def get_cached_snapshot(force: bool = False) -> dict[str, Any]:
