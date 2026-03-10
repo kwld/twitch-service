@@ -56,9 +56,20 @@ class EventSubNotificationMixin:
             await self._handle_user_authorization_revoke(event)
             return
 
-        broadcaster_user_id = event.get("broadcaster_user_id") or subscription.get("condition", {}).get(
-            "broadcaster_user_id"
-        )
+        condition = subscription.get("condition", {})
+        raid_direction = ""
+        broadcaster_user_id = event.get("broadcaster_user_id") or condition.get("broadcaster_user_id")
+        if event_type == "channel.raid":
+            from_id = event.get("from_broadcaster_user_id") or condition.get("from_broadcaster_user_id")
+            to_id = event.get("to_broadcaster_user_id") or condition.get("to_broadcaster_user_id")
+            if from_id:
+                raid_direction = "outgoing"
+                broadcaster_user_id = from_id
+            elif to_id:
+                raid_direction = "incoming"
+                broadcaster_user_id = to_id
+        if not broadcaster_user_id and event_type == "user.update":
+            broadcaster_user_id = event.get("user_id") or condition.get("user_id")
         if not event_type or not broadcaster_user_id:
             return
         async with self.session_factory() as session:
@@ -87,6 +98,7 @@ class EventSubNotificationMixin:
             bot_account_id=bot.id,
             event_type=event_type,
             broadcaster_user_id=broadcaster_user_id,
+            raid_direction=raid_direction,
         )
         interests = await self.registry.interested(key)
         if interests:

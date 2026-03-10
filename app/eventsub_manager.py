@@ -233,6 +233,7 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
                     TwitchSubscription.bot_account_id == key.bot_account_id,
                     TwitchSubscription.event_type == key.event_type,
                     TwitchSubscription.broadcaster_user_id == key.broadcaster_user_id,
+                    TwitchSubscription.raid_direction == (key.raid_direction or ""),
                 )
             )
             if db_sub:
@@ -575,7 +576,19 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
                     event_type = str(sub.get("type", "")).strip()
                     sub_id = str(sub.get("id", "")).strip()
                     status = str(sub.get("status", "unknown"))
+                    raid_direction = ""
                     broadcaster_user_id = str(condition.get("broadcaster_user_id", "")).strip()
+                    if event_type == "channel.raid":
+                        from_id = str(condition.get("from_broadcaster_user_id", "")).strip()
+                        to_id = str(condition.get("to_broadcaster_user_id", "")).strip()
+                        if from_id:
+                            raid_direction = "outgoing"
+                            broadcaster_user_id = from_id
+                        elif to_id:
+                            raid_direction = "incoming"
+                            broadcaster_user_id = to_id
+                    if not broadcaster_user_id and event_type == "user.update":
+                        broadcaster_user_id = str(condition.get("user_id", "")).strip()
                     method = str(sub.get("transport", {}).get("method", "")).strip()
                     if method not in {"websocket", "webhook"}:
                         continue
@@ -601,6 +614,7 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
                             "cost": int(sub.get("cost", 0) or 0),
                             "event_type": event_type,
                             "broadcaster_user_id": broadcaster_user_id,
+                            "raid_direction": raid_direction,
                             "upstream_transport": method,
                             "session_id": sub.get("transport", {}).get("session_id"),
                             "connected_at": sub.get("transport", {}).get("connected_at"),
@@ -640,6 +654,7 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
                 "cost": 0,
                 "event_type": row.event_type,
                 "broadcaster_user_id": row.broadcaster_user_id,
+                "raid_direction": row.raid_direction,
                 "upstream_transport": self._transport_for_event(row.event_type),
                 "bot_account_id": str(row.bot_account_id),
                 "session_id": row.session_id,

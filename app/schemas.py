@@ -13,6 +13,7 @@ class CreateInterestRequest(BaseModel):
     broadcaster_user_id: str = Field(min_length=1, max_length=64)
     transport: Literal["websocket", "webhook"] = "websocket"
     webhook_url: Optional[HttpUrl] = None
+    raid_direction: Optional[Literal["incoming", "outgoing"]] = None
 
 
 class InterestResponse(BaseModel):
@@ -21,6 +22,7 @@ class InterestResponse(BaseModel):
     bot_account_id: uuid.UUID
     event_type: str
     broadcaster_user_id: str
+    raid_direction: str | None = None
     transport: str
     webhook_url: str | None
     created_at: datetime
@@ -31,6 +33,7 @@ class ServiceSubscriptionItem(BaseModel):
     bot_account_id: uuid.UUID
     event_type: str
     broadcaster_user_id: str
+    raid_direction: str | None = None
     local_transport: Literal["websocket", "webhook"]
     webhook_url: str | None
     created_at: datetime
@@ -59,6 +62,7 @@ class ActiveTwitchSubscriptionItem(BaseModel):
     status: str
     event_type: str
     broadcaster_user_id: str
+    raid_direction: str | None = None
     upstream_transport: Literal["webhook", "websocket"]
     bot_account_id: uuid.UUID
     matched_interest_ids: list[uuid.UUID]

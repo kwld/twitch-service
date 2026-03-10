@@ -19,6 +19,7 @@ class InterestKey:
     bot_account_id: uuid.UUID
     event_type: str
     broadcaster_user_id: str
+    raid_direction: str = ""
 
 
 class InterestRegistry:
@@ -37,6 +38,7 @@ class InterestRegistry:
                     bot_account_id=interest.bot_account_id,
                     event_type=interest.event_type,
                     broadcaster_user_id=interest.broadcaster_user_id,
+                    raid_direction=interest.raid_direction or "",
                 )
                 self._by_key[key].add(interest.id)
 
@@ -45,6 +47,7 @@ class InterestRegistry:
             bot_account_id=interest.bot_account_id,
             event_type=interest.event_type,
             broadcaster_user_id=interest.broadcaster_user_id,
+            raid_direction=interest.raid_direction or "",
         )
         async with self._lock:
             self._interests[interest.id] = interest
@@ -56,6 +59,7 @@ class InterestRegistry:
             bot_account_id=interest.bot_account_id,
             event_type=interest.event_type,
             broadcaster_user_id=interest.broadcaster_user_id,
+            raid_direction=interest.raid_direction or "",
         )
         async with self._lock:
             self._interests.pop(interest.id, None)

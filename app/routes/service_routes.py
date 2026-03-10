@@ -122,6 +122,15 @@ def register_service_routes(
             )
         return requested
 
+    def _normalize_raid_direction(event_type: str, raid_direction: str | None) -> str:
+        normalized_event = event_type.strip().lower()
+        if normalized_event != "channel.raid":
+            return ""
+        direction = str(raid_direction or "").strip().lower()
+        if direction in {"incoming", "outgoing"}:
+            return direction
+        return str(getattr(eventsub_manager, "raid_direction", "incoming") or "incoming").strip().lower()
+
     def _resolve_scope_set(
         *,
         scope_mode: str,
@@ -344,6 +353,7 @@ def register_service_routes(
                 bot_account_id=interest.bot_account_id,
                 event_type=interest.event_type,
                 broadcaster_user_id=interest.broadcaster_user_id,
+                raid_direction=interest.raid_direction or None,
                 local_transport=interest.transport,
                 webhook_url=interest.webhook_url,
                 created_at=interest.created_at,
@@ -423,7 +433,7 @@ def register_service_routes(
                 ).all()
             )
             interests = await filter_working_interests(session, interests)
-        interest_ids_by_key: dict[tuple[str, str, str], list[uuid.UUID]] = {}
+        interest_ids_by_key: dict[tuple[str, str, str, str], list[uuid.UUID]] = {}
         for interest in interests:
             if broadcaster_filter and interest.broadcaster_user_id != broadcaster_filter:
                 continue
@@ -431,6 +441,7 @@ def register_service_routes(
                 str(interest.bot_account_id),
                 interest.event_type,
                 interest.broadcaster_user_id,
+                interest.raid_direction or "",
             )
             bucket = interest_ids_by_key.setdefault(key, [])
             bucket.append(interest.id)
@@ -457,6 +468,7 @@ def register_service_routes(
                 str(bot_uuid),
                 str(row.get("event_type", "")),
                 str(row.get("broadcaster_user_id", "")),
+                str(row.get("raid_direction", "") or ""),
             )
             matched_interest_ids = interest_ids_by_key.get(key, [])
             if not matched_interest_ids:
@@ -467,6 +479,7 @@ def register_service_routes(
                     status=status_value,
                     event_type=str(row.get("event_type", "")),
                     broadcaster_user_id=str(row.get("broadcaster_user_id", "")),
+                    raid_direction=str(row.get("raid_direction", "") or "") or None,
                     upstream_transport=str(row.get("upstream_transport", "websocket")),
                     bot_account_id=bot_uuid,
                     matched_interest_ids=matched_interest_ids,
@@ -706,6 +719,7 @@ def register_service_routes(
             },
         )
         event_type = req.event_type.strip().lower()
+        raid_direction = _normalize_raid_direction(event_type, req.raid_direction)
         raw_broadcaster = normalize_broadcaster_id_or_login(req.broadcaster_user_id)
         if not raw_broadcaster:
             raise HTTPException(
@@ -771,6 +785,7 @@ def register_service_routes(
                             ServiceInterest.broadcaster_user_id == broadcaster_user_id,
                             ServiceInterest.transport == legacy.transport,
                             ServiceInterest.webhook_url == legacy.webhook_url,
+                            ServiceInterest.raid_direction == legacy.raid_direction,
                         )
                     )
                     if dupe:
@@ -805,6 +820,7 @@ def register_service_routes(
                     ServiceInterest.broadcaster_user_id == broadcaster_user_id,
                     ServiceInterest.transport == req.transport,
                     ServiceInterest.webhook_url == webhook_url,
+                    ServiceInterest.raid_direction == raid_direction,
                 )
             )
             created_interest = False
@@ -826,6 +842,7 @@ def register_service_routes(
                     broadcaster_user_id=broadcaster_user_id,
                     transport=req.transport,
                     webhook_url=webhook_url,
+                    raid_direction=raid_direction,
                     last_heartbeat_at=now,
                 )
                 session.add(interest)
@@ -841,6 +858,7 @@ def register_service_routes(
                             ServiceInterest.broadcaster_user_id == broadcaster_user_id,
                             ServiceInterest.transport == req.transport,
                             ServiceInterest.webhook_url == webhook_url,
+                            ServiceInterest.raid_direction == raid_direction,
                         )
                     )
                     if interest is None:

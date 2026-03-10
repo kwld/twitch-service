@@ -43,6 +43,7 @@ class EventSubSubscriptionMixin:
         event_type: str,
         broadcaster_user_id: str,
         bot_user_id: str,
+        raid_direction: str | None = None,
     ) -> dict[str, str | bool]:
         normalized = event_type.strip().lower()
 
@@ -64,7 +65,7 @@ class EventSubSubscriptionMixin:
             return {"organization_id": str(self.drop_organization_id), "is_batching_enabled": True}
 
         if requires_raid_direction(normalized):
-            direction = str(getattr(self, "raid_direction", "incoming") or "incoming").strip().lower()
+            direction = str(raid_direction or getattr(self, "raid_direction", "incoming") or "incoming").strip().lower()
             if direction in {"outgoing", "from"}:
                 return {"from_broadcaster_user_id": broadcaster_user_id}
             return {"to_broadcaster_user_id": broadcaster_user_id}
@@ -148,14 +149,26 @@ class EventSubSubscriptionMixin:
             bots_by_id = {bot.id: bot for bot in bots}
             bots_by_twitch_user_id = {str(bot.twitch_user_id): bot for bot in bots}
             await session.execute(delete(TwitchSubscription))
-            deduped: dict[tuple[uuid.UUID, str, str], dict] = {}
+            deduped: dict[tuple[uuid.UUID, str, str, str], dict] = {}
             duplicates: list[dict] = []
             for sub in subs:
                 condition = sub.get("condition", {})
                 event_type = sub.get("type")
                 sub_id = str(sub.get("id", ""))
                 sub_status = str(sub.get("status", "unknown"))
+                raid_direction = ""
                 broadcaster_user_id = condition.get("broadcaster_user_id")
+                if str(event_type).strip().lower() == "channel.raid":
+                    from_id = condition.get("from_broadcaster_user_id")
+                    to_id = condition.get("to_broadcaster_user_id")
+                    if from_id:
+                        raid_direction = "outgoing"
+                        broadcaster_user_id = from_id
+                    elif to_id:
+                        raid_direction = "incoming"
+                        broadcaster_user_id = to_id
+                if not broadcaster_user_id and requires_user_id_condition(str(event_type)):
+                    broadcaster_user_id = condition.get("user_id")
                 bot_user_id = condition.get("user_id")
                 method = sub.get("transport", {}).get("method")
                 if method not in {"websocket", "webhook"}:
@@ -190,7 +203,12 @@ class EventSubSubscriptionMixin:
                     with suppress(TwitchApiError):
                         await self.twitch.delete_eventsub_subscription(sub_id, access_token=delete_access_token)
                     await self._record_service_actions_for_key(
-                        key=InterestKey(bot.id, event_type, broadcaster_user_id),
+                        key=InterestKey(
+                            bot.id,
+                            event_type,
+                            broadcaster_user_id,
+                            raid_direction,
+                        ),
                         event_type="eventsub.subscription.delete_stale",
                         target="helix:/eventsub/subscriptions",
                         payload={
@@ -209,7 +227,7 @@ class EventSubSubscriptionMixin:
                         sub_status,
                     )
                     continue
-                dedupe_key = (bot.id, event_type, broadcaster_user_id)
+                dedupe_key = (bot.id, event_type, broadcaster_user_id, raid_direction)
                 candidate = {
                     "bot_account_id": bot.id,
                     "event_type": event_type,
@@ -219,6 +237,7 @@ class EventSubSubscriptionMixin:
                     "session_id": sub.get("transport", {}).get("session_id"),
                     "connected_at": str(sub.get("transport", {}).get("connected_at", "")),
                     "method": method,
+                    "raid_direction": raid_direction,
                 }
                 existing = deduped.get(dedupe_key)
                 if not existing:
@@ -252,6 +271,7 @@ class EventSubSubscriptionMixin:
                         twitch_subscription_id=item["twitch_subscription_id"],
                         status=item["status"],
                         session_id=item["session_id"],
+                        raid_direction=item.get("raid_direction", ""),
                         last_seen_at=datetime.now(UTC),
                     )
                 )
@@ -281,6 +301,7 @@ class EventSubSubscriptionMixin:
                         duplicate["bot_account_id"],
                         duplicate["event_type"],
                         duplicate["broadcaster_user_id"],
+                        duplicate.get("raid_direction", ""),
                     ),
                     event_type="eventsub.subscription.delete_duplicate",
                     target="helix:/eventsub/subscriptions",
@@ -391,6 +412,7 @@ class EventSubSubscriptionMixin:
                             TwitchSubscription.bot_account_id == key.bot_account_id,
                             TwitchSubscription.event_type == key.event_type,
                             TwitchSubscription.broadcaster_user_id == key.broadcaster_user_id,
+                            TwitchSubscription.raid_direction == (key.raid_direction or ""),
                         )
                     )
                     if db_sub and self._is_subscription_reusable_status(db_sub):
@@ -479,6 +501,7 @@ class EventSubSubscriptionMixin:
                         event_type=key.event_type,
                         broadcaster_user_id=key.broadcaster_user_id,
                         bot_user_id=str(bot.twitch_user_id),
+                        raid_direction=key.raid_direction or None,
                     )
                     create_access_token: str | None = None
                     if not bot.enabled:
