@@ -51,6 +51,8 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
         webhook_event_types: set[str] | None = None,
         webhook_callback_url: str | None = None,
         webhook_secret: str | None = None,
+        extension_client_id: str | None = None,
+        drop_organization_id: str | None = None,
     ) -> None:
         self.twitch = twitch_client
         self.ws_url: str = getattr(self.twitch, "eventsub_ws_url", "wss://eventsub.wss.twitch.tv/ws")
@@ -61,6 +63,8 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
         self.webhook_event_types = {event.strip() for event in (webhook_event_types or set()) if event.strip()}
         self.webhook_callback_url = webhook_callback_url
         self.webhook_secret = webhook_secret
+        self.extension_client_id = extension_client_id
+        self.drop_organization_id = drop_organization_id
         self._task: asyncio.Task | None = None
         self._cleanup_task: asyncio.Task | None = None
         self._stop = asyncio.Event()

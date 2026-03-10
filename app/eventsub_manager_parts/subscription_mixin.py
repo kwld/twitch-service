@@ -16,6 +16,12 @@ from app.eventsub_catalog import (
     preferred_eventsub_version,
     required_scope_any_of_groups,
     requires_condition_user_id,
+    requires_client_id_condition,
+    requires_extension_client_id,
+    requires_moderator_user_id,
+    requires_organization_id,
+    requires_raid_direction,
+    requires_user_id_condition,
 )
 from app.event_router import InterestKey
 from app.models import (
@@ -31,6 +37,47 @@ logger = logging.getLogger(__name__)
 
 
 class EventSubSubscriptionMixin:
+    def _build_subscription_condition(
+        self,
+        *,
+        event_type: str,
+        broadcaster_user_id: str,
+        bot_user_id: str,
+    ) -> dict[str, str | bool]:
+        normalized = event_type.strip().lower()
+
+        if requires_client_id_condition(normalized):
+            return {"client_id": self.twitch.client_id}
+
+        if requires_extension_client_id(normalized):
+            if not self.extension_client_id:
+                raise RuntimeError(
+                    "Missing TWITCH_EXTENSION_CLIENT_ID for extension.bits_transaction.create subscriptions"
+                )
+            return {"extension_client_id": str(self.extension_client_id)}
+
+        if requires_organization_id(normalized):
+            if not self.drop_organization_id:
+                raise RuntimeError(
+                    "Missing TWITCH_DROP_ORGANIZATION_ID for drop.entitlement.grant subscriptions"
+                )
+            return {"organization_id": str(self.drop_organization_id), "is_batching_enabled": True}
+
+        if requires_raid_direction(normalized):
+            return {"to_broadcaster_user_id": broadcaster_user_id}
+
+        if requires_user_id_condition(normalized):
+            return {"user_id": broadcaster_user_id}
+
+        condition: dict[str, str | bool] = {"broadcaster_user_id": broadcaster_user_id}
+
+        if requires_moderator_user_id(normalized):
+            condition["moderator_user_id"] = broadcaster_user_id
+
+        if requires_condition_user_id(normalized):
+            condition["user_id"] = bot_user_id
+
+        return condition
     async def _record_service_actions_for_key(
         self,
         *,
@@ -416,8 +463,6 @@ class EventSubSubscriptionMixin:
                             )
                             return
                         transport = {"method": "websocket", "session_id": session_id_snapshot}
-                    condition: dict[str, str] = {"broadcaster_user_id": key.broadcaster_user_id}
-                    create_access_token: str | None = None
                     bot = await session.get(BotAccount, key.bot_account_id)
                     if not bot:
                         reason = f"Bot account missing for subscription: {key.bot_account_id}"
@@ -427,6 +472,12 @@ class EventSubSubscriptionMixin:
                             reason=reason,
                         )
                         raise RuntimeError(reason)
+                    condition = self._build_subscription_condition(
+                        event_type=key.event_type,
+                        broadcaster_user_id=key.broadcaster_user_id,
+                        bot_user_id=str(bot.twitch_user_id),
+                    )
+                    create_access_token: str | None = None
                     if not bot.enabled:
                         reason = f"Bot account disabled for subscription: {key.bot_account_id}"
                         await self._notify_subscription_failure(
@@ -437,9 +488,6 @@ class EventSubSubscriptionMixin:
                         raise RuntimeError(reason)
                     if upstream_transport == "websocket":
                         create_access_token = await ensure_bot_access_token(session, self.twitch, bot)
-                    if requires_condition_user_id(key.event_type):
-                        condition["user_id"] = bot.twitch_user_id
-
                     required_scope_groups = required_scope_any_of_groups(key.event_type)
                     if required_scope_groups:
                         def _has_required_scopes(scopes: set[str]) -> bool:

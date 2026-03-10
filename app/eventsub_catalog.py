@@ -737,9 +737,97 @@ def recommended_broadcaster_scopes(event_type: str) -> set[str]:
                     chosen = candidate
                     break
             selected.add(chosen or channel_candidates[0])
-        # No channel:* option in this group - this belongs to bot-token side.
-        # Do not include it in broadcaster authorization request.
+            continue
+        # No channel:* option in this group; allow moderator/user scopes for broadcaster grants.
+        chosen = None
+        for candidate in _READ_SCOPE_PRIORITY:
+            if candidate in group:
+                chosen = candidate
+                break
+        selected.add(chosen or sorted(group)[0])
     return selected
+
+
+EVENTSUB_REQUIRES_MODERATOR_USER_ID: frozenset[str] = frozenset(
+    {
+        "automod.message.hold",
+        "automod.message.update",
+        "automod.settings.update",
+        "automod.terms.update",
+        "channel.follow",
+        "channel.moderate",
+        "channel.shield_mode.begin",
+        "channel.shield_mode.end",
+        "channel.shoutout.create",
+        "channel.shoutout.receive",
+        "channel.suspicious_user.message",
+        "channel.suspicious_user.update",
+        "channel.unban_request.create",
+        "channel.unban_request.resolve",
+        "channel.warning.acknowledge",
+        "channel.warning.send",
+        "channel.guest_star_guest.update",
+        "channel.guest_star_session.begin",
+        "channel.guest_star_session.end",
+        "channel.guest_star_settings.update",
+    }
+)
+
+EVENTSUB_REQUIRES_CLIENT_ID: frozenset[str] = frozenset(
+    {
+        "user.authorization.grant",
+        "user.authorization.revoke",
+        "conduit.shard.disabled",
+    }
+)
+
+EVENTSUB_REQUIRES_EXTENSION_CLIENT_ID: frozenset[str] = frozenset(
+    {
+        "extension.bits_transaction.create",
+    }
+)
+
+EVENTSUB_REQUIRES_ORGANIZATION_ID: frozenset[str] = frozenset(
+    {
+        "drop.entitlement.grant",
+    }
+)
+
+EVENTSUB_REQUIRES_USER_ID: frozenset[str] = frozenset(
+    {
+        "user.update",
+    }
+)
+
+EVENTSUB_REQUIRES_RAID_DIRECTION: frozenset[str] = frozenset(
+    {
+        "channel.raid",
+    }
+)
+
+
+def requires_moderator_user_id(event_type: str) -> bool:
+    return event_type.strip().lower() in EVENTSUB_REQUIRES_MODERATOR_USER_ID
+
+
+def requires_client_id_condition(event_type: str) -> bool:
+    return event_type.strip().lower() in EVENTSUB_REQUIRES_CLIENT_ID
+
+
+def requires_extension_client_id(event_type: str) -> bool:
+    return event_type.strip().lower() in EVENTSUB_REQUIRES_EXTENSION_CLIENT_ID
+
+
+def requires_organization_id(event_type: str) -> bool:
+    return event_type.strip().lower() in EVENTSUB_REQUIRES_ORGANIZATION_ID
+
+
+def requires_user_id_condition(event_type: str) -> bool:
+    return event_type.strip().lower() in EVENTSUB_REQUIRES_USER_ID
+
+
+def requires_raid_direction(event_type: str) -> bool:
+    return event_type.strip().lower() in EVENTSUB_REQUIRES_RAID_DIRECTION
 
 
 def recommended_bot_scopes(event_type: str) -> set[str]:

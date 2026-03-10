@@ -57,6 +57,14 @@ class Settings(BaseSettings):
         default="stream.online,stream.offline",
         alias="TWITCH_EVENTSUB_WEBHOOK_EVENT_TYPES",
     )
+    twitch_extension_client_id: Optional[str] = Field(
+        default=None,
+        alias="TWITCH_EXTENSION_CLIENT_ID",
+    )
+    twitch_drop_organization_id: Optional[str] = Field(
+        default=None,
+        alias="TWITCH_DROP_ORGANIZATION_ID",
+    )
     twitch_scopes: str = Field(
         default=(
             "channel:bot user:bot user:read:chat user:write:chat clips:edit chat:read chat:edit "
