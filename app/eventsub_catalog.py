@@ -796,6 +796,7 @@ EVENTSUB_REQUIRES_ORGANIZATION_ID: frozenset[str] = frozenset(
 EVENTSUB_REQUIRES_USER_ID: frozenset[str] = frozenset(
     {
         "user.update",
+        "user.whisper.message",
     }
 )
 
