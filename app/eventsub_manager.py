@@ -53,6 +53,7 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
         webhook_secret: str | None = None,
         extension_client_id: str | None = None,
         drop_organization_id: str | None = None,
+        raid_direction: str = "incoming",
     ) -> None:
         self.twitch = twitch_client
         self.ws_url: str = getattr(self.twitch, "eventsub_ws_url", "wss://eventsub.wss.twitch.tv/ws")
@@ -65,6 +66,7 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
         self.webhook_secret = webhook_secret
         self.extension_client_id = extension_client_id
         self.drop_organization_id = drop_organization_id
+        self.raid_direction = raid_direction
         self._task: asyncio.Task | None = None
         self._cleanup_task: asyncio.Task | None = None
         self._stop = asyncio.Event()

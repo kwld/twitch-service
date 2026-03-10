@@ -64,6 +64,9 @@ class EventSubSubscriptionMixin:
             return {"organization_id": str(self.drop_organization_id), "is_batching_enabled": True}
 
         if requires_raid_direction(normalized):
+            direction = str(getattr(self, "raid_direction", "incoming") or "incoming").strip().lower()
+            if direction in {"outgoing", "from"}:
+                return {"from_broadcaster_user_id": broadcaster_user_id}
             return {"to_broadcaster_user_id": broadcaster_user_id}
 
         if requires_user_id_condition(normalized):

@@ -120,6 +120,7 @@ eventsub_manager = EventSubManager(
     webhook_secret=settings.twitch_eventsub_webhook_secret,
     extension_client_id=settings.twitch_extension_client_id,
     drop_organization_id=settings.twitch_drop_organization_id,
+    raid_direction=settings.twitch_eventsub_raid_direction,
 )
 runtime_state = RuntimeState(settings=settings)
 status_runtime = StatusRuntime()

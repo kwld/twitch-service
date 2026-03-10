@@ -57,6 +57,10 @@ class Settings(BaseSettings):
         default="stream.online,stream.offline",
         alias="TWITCH_EVENTSUB_WEBHOOK_EVENT_TYPES",
     )
+    twitch_eventsub_raid_direction: str = Field(
+        default="incoming",
+        alias="TWITCH_EVENTSUB_RAID_DIRECTION",
+    )
     twitch_extension_client_id: Optional[str] = Field(
         default=None,
         alias="TWITCH_EXTENSION_CLIENT_ID",
