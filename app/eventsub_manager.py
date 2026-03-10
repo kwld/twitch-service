@@ -69,6 +69,7 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
         self.raid_direction = raid_direction
         self._task: asyncio.Task | None = None
         self._cleanup_task: asyncio.Task | None = None
+        self._pending_retry_task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._session_id: str | None = None
         self._zero_listener_since: datetime | None = None
@@ -77,6 +78,12 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
         self._subscription_ensure_concurrency = 8
         self._subscription_error_cooldown = timedelta(minutes=1)
         self._pending_subscription_ttl = timedelta(minutes=10)
+        self._pending_retry_interval = timedelta(minutes=5)
+        self._pending_retry_max = 5
+        self._pending_retry_counts: dict[InterestKey, int] = {}
+        self._subscription_rate_limit_max_retries = 3
+        self._subscription_rate_limit_base_delay = 1.0
+        self._subscription_rate_limit_max_delay = 20.0
         self._subscription_error_last_sent: dict[
             tuple[uuid.UUID, uuid.UUID, str, str, str], datetime
         ] = {}
@@ -193,6 +200,9 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
         self._cleanup_task = asyncio.create_task(
             self._cleanup_stale_interests_loop(), name="eventsub-interest-cleanup"
         )
+        self._pending_retry_task = asyncio.create_task(
+            self._retry_pending_subscriptions_loop(), name="eventsub-pending-retry"
+        )
         async with self._status_lock:
             self._startup_state = "ready"
             self._startup_finished_at = datetime.now(UTC)
@@ -211,6 +221,10 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
             self._cleanup_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._cleanup_task
+        if self._pending_retry_task:
+            self._pending_retry_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._pending_retry_task
 
     async def on_interest_added(self, key: InterestKey) -> None:
         await self._ensure_subscription(key)
@@ -311,6 +325,81 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
             except Exception as exc:
                 logger.warning("Failed stale interest cleanup: %s", exc)
             await asyncio.sleep(INTEREST_CLEANUP_INTERVAL_SECONDS)
+
+    async def _retry_pending_subscriptions(self) -> None:
+        pending_statuses = {
+            "webhook_callback_verification_pending",
+            "websocket_callback_verification_pending",
+        }
+        now = datetime.now(UTC)
+        async with self.session_factory() as session:
+            rows = list((await session.scalars(select(TwitchSubscription))).all())
+
+        registry_keys = set(await self.registry.keys())
+        status_by_key: dict[InterestKey, str] = {}
+        for row in rows:
+            key = InterestKey(
+                row.bot_account_id,
+                row.event_type,
+                row.broadcaster_user_id,
+                row.raid_direction or "",
+            )
+            status_by_key[key] = str(row.status or "").strip().lower()
+
+        for key in list(self._pending_retry_counts):
+            if key not in registry_keys or status_by_key.get(key) not in pending_statuses:
+                self._pending_retry_counts.pop(key, None)
+
+        pending_keys: set[InterestKey] = set()
+        for row in rows:
+            status = str(row.status or "").strip().lower()
+            if status not in pending_statuses:
+                continue
+            key = InterestKey(
+                row.bot_account_id,
+                row.event_type,
+                row.broadcaster_user_id,
+                row.raid_direction or "",
+            )
+            if key not in registry_keys:
+                continue
+            created_at = row.created_at or row.last_seen_at
+            if not created_at:
+                continue
+            if now - created_at <= self._pending_subscription_ttl:
+                continue
+            attempts = self._pending_retry_counts.get(key, 0)
+            if attempts >= self._pending_retry_max:
+                reason = (
+                    f"EventSub subscription stayed in pending verification after {attempts} retries."
+                )
+                await self._notify_subscription_failure(
+                    key=key,
+                    upstream_transport=self._transport_for_event(key.event_type),
+                    reason=reason,
+                )
+                await self.reject_interests_for_key(
+                    key=key,
+                    reason=reason,
+                    upstream_transport=self._transport_for_event(key.event_type),
+                )
+                self._pending_retry_counts.pop(key, None)
+                continue
+            self._pending_retry_counts[key] = attempts + 1
+            pending_keys.add(key)
+
+        if pending_keys:
+            logger.info("Retrying %d pending EventSub subscriptions", len(pending_keys))
+        for key in pending_keys:
+            await self._ensure_subscription(key)
+
+    async def _retry_pending_subscriptions_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                await self._retry_pending_subscriptions()
+            except Exception as exc:
+                logger.warning("Failed pending subscription retry: %s", exc)
+            await asyncio.sleep(self._pending_retry_interval.total_seconds())
 
     async def _load_interests(self) -> None:
         async with self.session_factory() as session:

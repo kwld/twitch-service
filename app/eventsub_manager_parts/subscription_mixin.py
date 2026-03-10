@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import time
 import uuid
 from contextlib import suppress
@@ -37,6 +38,22 @@ logger = logging.getLogger(__name__)
 
 
 class EventSubSubscriptionMixin:
+    def _is_rate_limited_error(self, exc: Exception) -> bool:
+        message = str(exc).lower()
+        return (
+            "status\":429" in message
+            or "status\": 429" in message
+            or "too many requests" in message
+            or "rate limit" in message
+        )
+
+    def _rate_limit_backoff_delay(self, attempt: int) -> float:
+        base_delay = float(getattr(self, "_subscription_rate_limit_base_delay", 1.0))
+        max_delay = float(getattr(self, "_subscription_rate_limit_max_delay", 20.0))
+        delay = min(max_delay, base_delay * (2**attempt))
+        jitter = random.uniform(0, delay * 0.2)
+        return delay + jitter
+
     def _build_subscription_condition(
         self,
         *,
@@ -587,29 +604,42 @@ class EventSubSubscriptionMixin:
                                 reason=reason,
                             )
                             raise RuntimeError(reason)
-                    try:
-                        created = await self.twitch.create_eventsub_subscription(
-                            event_type=key.event_type,
-                            version=version,
-                            condition=condition,
-                            transport=transport,
-                            access_token=create_access_token,
-                        )
-                    except TwitchApiError as exc:
-                        if upstream_transport == "websocket" and self._is_stale_websocket_session_error(exc):
-                            logger.info(
-                                "EventSub websocket session became stale during create (%s); will retry on next welcome",
-                                session_id_snapshot,
+                    max_retries = int(getattr(self, "_subscription_rate_limit_max_retries", 3))
+                    created = None
+                    for attempt in range(max_retries + 1):
+                        try:
+                            created = await self.twitch.create_eventsub_subscription(
+                                event_type=key.event_type,
+                                version=version,
+                                condition=condition,
+                                transport=transport,
+                                access_token=create_access_token,
                             )
-                            if self._session_id == session_id_snapshot:
-                                self._session_id = None
-                            return
-                        await self._notify_subscription_failure(
-                            key=key,
-                            upstream_transport=upstream_transport,
-                            reason=str(exc),
-                        )
-                        raise
+                            break
+                        except TwitchApiError as exc:
+                            if upstream_transport == "websocket" and self._is_stale_websocket_session_error(exc):
+                                logger.info(
+                                    "EventSub websocket session became stale during create (%s); will retry on next welcome",
+                                    session_id_snapshot,
+                                )
+                                if self._session_id == session_id_snapshot:
+                                    self._session_id = None
+                                return
+                            if self._is_rate_limited_error(exc) and attempt < max_retries:
+                                delay = self._rate_limit_backoff_delay(attempt)
+                                logger.warning(
+                                    "Rate limited creating %s subscription; retrying in %.1fs",
+                                    key.event_type,
+                                    delay,
+                                )
+                                await asyncio.sleep(delay)
+                                continue
+                            await self._notify_subscription_failure(
+                                key=key,
+                                upstream_transport=upstream_transport,
+                                reason=str(exc),
+                            )
+                            raise
                     await self._record_service_actions_for_key(
                         key=key,
                         event_type="eventsub.subscription.create",
