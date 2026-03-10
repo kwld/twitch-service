@@ -6,7 +6,7 @@ import logging
 import time
 import uuid
 from contextlib import suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from sqlalchemy import delete, select
@@ -65,17 +65,24 @@ class EventSubSubscriptionMixin:
         except Exception:
             return
 
-    @staticmethod
-    def _is_subscription_reusable_status(status: str | None) -> bool:
-        normalized = (status or "").strip().lower()
+    def _is_subscription_reusable_status(self, db_sub: TwitchSubscription | None) -> bool:
+        if not db_sub:
+            return False
+        normalized = (db_sub.status or "").strip().lower()
         if not normalized:
             return False
         if normalized.startswith("enabled"):
             return True
-        return normalized in {
+        if normalized in {
             "webhook_callback_verification_pending",
             "websocket_callback_verification_pending",
-        }
+        }:
+            created_at = db_sub.created_at
+            if not created_at:
+                return False
+            age = datetime.now(UTC) - created_at
+            return age <= getattr(self, "_pending_subscription_ttl", timedelta(minutes=10))
+        return False
 
     async def _sync_from_twitch_and_reconcile(self) -> None:
         started = time.perf_counter()
@@ -336,7 +343,7 @@ class EventSubSubscriptionMixin:
                             TwitchSubscription.broadcaster_user_id == key.broadcaster_user_id,
                         )
                     )
-                    if db_sub and self._is_subscription_reusable_status(db_sub.status):
+                    if db_sub and self._is_subscription_reusable_status(db_sub):
                         if upstream_transport == "webhook":
                             return
                         if upstream_transport == "websocket" and db_sub.session_id == session_id_snapshot:

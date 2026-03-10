@@ -439,7 +439,13 @@ def register_service_routes(
         for row in snapshot:
             bot_account_id = row.get("bot_account_id", "")
             status_value = str(row.get("status", "unknown"))
-            if not status_value.startswith("enabled"):
+            if not (
+                status_value.startswith("enabled")
+                or status_value in {
+                    "webhook_callback_verification_pending",
+                    "websocket_callback_verification_pending",
+                }
+            ):
                 continue
             try:
                 bot_uuid = uuid.UUID(str(bot_account_id))

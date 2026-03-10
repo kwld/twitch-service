@@ -70,6 +70,7 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
         self._subscription_key_locks_guard = asyncio.Lock()
         self._subscription_ensure_concurrency = 8
         self._subscription_error_cooldown = timedelta(minutes=1)
+        self._pending_subscription_ttl = timedelta(minutes=10)
         self._subscription_error_last_sent: dict[
             tuple[uuid.UUID, uuid.UUID, str, str, str], datetime
         ] = {}
