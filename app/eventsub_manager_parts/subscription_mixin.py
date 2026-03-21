@@ -294,9 +294,6 @@ class EventSubSubscriptionMixin:
                     continue
                 if not event_type or not broadcaster_user_id:
                     continue
-                expected_method = self._transport_for_event(event_type)
-                if method != expected_method:
-                    continue
                 bot = None
                 if event_type.startswith("channel.chat."):
                     bot_user_id = str(condition.get("user_id", "")).strip()
@@ -330,6 +327,9 @@ class EventSubSubscriptionMixin:
                         authorization_source = "bot_moderator"
                     elif moderator_user_id and moderator_user_id == broadcaster_user_id:
                         authorization_source = "broadcaster"
+                expected_method = self._transport_for_event(event_type, authorization_source)
+                if method != expected_method:
+                    continue
                 if (
                     method == "websocket"
                     and expected_method == "websocket"
@@ -500,7 +500,7 @@ class EventSubSubscriptionMixin:
         semaphore = asyncio.Semaphore(concurrency)
 
         async def _ensure_key(key: InterestKey) -> None:
-            upstream_transport = self._transport_for_event(key.event_type)
+            upstream_transport = self._transport_for_event(key.event_type, key.authorization_source)
             if upstream_transport == "websocket" and not self._session_id:
                 logger.info(
                     "Skipping websocket subscription ensure for %s/%s; EventSub session is unavailable",
@@ -522,7 +522,7 @@ class EventSubSubscriptionMixin:
         await asyncio.gather(*(_ensure_key(key) for key in keys))
 
     async def _ensure_webhook_subscriptions(self) -> None:
-        keys = [key for key in await self.registry.keys() if self._transport_for_event(key.event_type) == "webhook"]
+        keys = [key for key in await self.registry.keys() if self._transport_for_event(key.event_type, key.authorization_source) == "webhook"]
         concurrency = max(1, int(getattr(self, "_subscription_ensure_concurrency", 1)))
         semaphore = asyncio.Semaphore(concurrency)
 
@@ -544,7 +544,7 @@ class EventSubSubscriptionMixin:
         lock = await self._acquire_subscription_key_lock(key)
         try:
             async with lock:
-                upstream_transport = self._transport_for_event(key.event_type)
+                upstream_transport = self._transport_for_event(key.event_type, key.authorization_source)
                 version = preferred_eventsub_version(key.event_type)
                 session_id_snapshot = self._session_id
                 if upstream_transport == "websocket" and not session_id_snapshot:
@@ -555,6 +555,7 @@ class EventSubSubscriptionMixin:
                             TwitchSubscription.bot_account_id == key.bot_account_id,
                             TwitchSubscription.event_type == key.event_type,
                             TwitchSubscription.broadcaster_user_id == key.broadcaster_user_id,
+                            TwitchSubscription.authorization_source == key.authorization_source,
                             TwitchSubscription.raid_direction == (key.raid_direction or ""),
                         )
                     )

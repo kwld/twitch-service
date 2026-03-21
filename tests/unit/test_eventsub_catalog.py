@@ -25,6 +25,16 @@ def test_best_transport_uses_webhook_when_available_for_non_chat():
     assert transport == "webhook"
 
 
+def test_best_transport_prefers_websocket_for_bot_moderator_events():
+    transport, reason = best_transport_for_service(
+        "channel.moderate",
+        webhook_available=True,
+        preferred_authorization_source="bot_moderator",
+    )
+    assert transport == "websocket"
+    assert "bot moderator authorization" in reason.lower()
+
+
 def test_best_transport_falls_back_to_websocket_when_no_webhook():
     transport, _ = best_transport_for_service("stream.online", webhook_available=False)
     assert transport == "websocket"

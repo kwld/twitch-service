@@ -361,15 +361,22 @@ def supported_twitch_transports(event_type: str) -> list[Literal["webhook", "web
 def best_transport_for_service(
     event_type: str,
     webhook_available: bool,
+    preferred_authorization_source: str | None = None,
 ) -> tuple[Literal["webhook", "websocket"], str]:
     transports = supported_twitch_transports(event_type)
     normalized = event_type.strip().lower()
+    normalized_source = str(preferred_authorization_source or "auto").strip().lower()
     if normalized == "user.authorization.revoke":
         return "webhook", "Webhook-only by Twitch; required for authorization revoke handling."
     if normalized.startswith("channel.chat.") and "websocket" in transports:
         return (
             "websocket",
             "Chat events prefer WebSocket: bot user-token flow with lower notification latency.",
+        )
+    if normalized_source == "bot_moderator" and "websocket" in transports:
+        return (
+            "websocket",
+            "Bot moderator authorization prefers WebSocket so Twitch can use the bot user token.",
         )
     if webhook_available and "webhook" in transports:
         return (

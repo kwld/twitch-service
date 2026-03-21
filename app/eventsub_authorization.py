@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from app.eventsub_catalog import requires_moderator_user_id
+from app.eventsub_catalog import required_scope_any_of_groups, supported_twitch_transports
 
 InterestAuthorizationSource = Literal["auto", "broadcaster", "bot_moderator"]
 PersistedAuthorizationSource = Literal["broadcaster", "bot_moderator"]
@@ -11,7 +11,7 @@ DEFAULT_AUTHORIZATION_SOURCE: PersistedAuthorizationSource = "broadcaster"
 
 
 def event_supports_authorization_source_selection(event_type: str) -> bool:
-    return requires_moderator_user_id(event_type)
+    return bool(required_scope_any_of_groups(event_type)) and "websocket" in supported_twitch_transports(event_type)
 
 
 def normalize_interest_authorization_source(

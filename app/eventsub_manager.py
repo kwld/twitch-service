@@ -119,10 +119,15 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
         self._run_loop_started_at: datetime | None = None
         self._connect_cycle_count = 0
 
-    def _transport_for_event(self, event_type: str) -> Literal["websocket", "webhook"]:
+    def _transport_for_event(
+        self,
+        event_type: str,
+        authorization_source: str | None = None,
+    ) -> Literal["websocket", "webhook"]:
         transport, _ = best_transport_for_service(
             event_type=event_type,
             webhook_available=bool(self.webhook_callback_url and self.webhook_secret),
+            preferred_authorization_source=authorization_source,
         )
         return transport
 
@@ -239,7 +244,7 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
             return
         async with self.session_factory() as session:
             delete_access_token: str | None = None
-            if self._transport_for_event(key.event_type) == "websocket":
+            if self._transport_for_event(key.event_type, key.authorization_source) == "websocket":
                 bot = await session.get(BotAccount, key.bot_account_id)
                 if bot and bot.enabled:
                     with suppress(Exception):
@@ -249,6 +254,7 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
                     TwitchSubscription.bot_account_id == key.bot_account_id,
                     TwitchSubscription.event_type == key.event_type,
                     TwitchSubscription.broadcaster_user_id == key.broadcaster_user_id,
+                    TwitchSubscription.authorization_source == key.authorization_source,
                     TwitchSubscription.raid_direction == (key.raid_direction or ""),
                 )
             )
@@ -379,13 +385,13 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
                 )
                 await self._notify_subscription_failure(
                     key=key,
-                    upstream_transport=self._transport_for_event(key.event_type),
+                    upstream_transport=self._transport_for_event(key.event_type, key.authorization_source),
                     reason=reason,
                 )
                 await self.reject_interests_for_key(
                     key=key,
                     reason=reason,
-                    upstream_transport=self._transport_for_event(key.event_type),
+                    upstream_transport=self._transport_for_event(key.event_type, key.authorization_source),
                 )
                 self._pending_retry_counts.pop(key, None)
                 continue
@@ -460,7 +466,7 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
 
     async def _has_websocket_interest(self) -> bool:
         keys = await self.registry.keys()
-        return any(self._transport_for_event(key.event_type) == "websocket" for key in keys)
+        return any(self._transport_for_event(key.event_type, key.authorization_source) == "websocket" for key in keys)
 
     async def _has_stream_state_interest(self) -> bool:
         # stream.online/offline are used to keep ChannelState accurate even when no
@@ -765,7 +771,7 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
                 "broadcaster_user_id": row.broadcaster_user_id,
                 "authorization_source": row.authorization_source or "broadcaster",
                 "raid_direction": row.raid_direction,
-                "upstream_transport": self._transport_for_event(row.event_type),
+                "upstream_transport": self._transport_for_event(row.event_type, row.authorization_source),
                 "bot_account_id": str(row.bot_account_id),
                 "session_id": row.session_id,
                 "connected_at": None,
@@ -816,7 +822,7 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
                     max(0, int(cooldown_remaining.total_seconds())) if cooldown_remaining is not None else None
                 ),
                 "has_websocket_interest": any(
-                    self._transport_for_event(key.event_type) == "websocket" for key in registry_keys
+                    self._transport_for_event(key.event_type, key.authorization_source) == "websocket" for key in registry_keys
                 ),
                 "has_stream_state_interest": any(
                     key.event_type in {"stream.online", "stream.offline"} for key in registry_keys

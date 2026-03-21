@@ -874,7 +874,10 @@ def register_service_routes(
             if not bot:
                 raise HTTPException(status_code=404, detail="Bot not found")
             await ensure_service_can_access_bot(session, service.id, req.bot_account_id)
-            upstream_transport = eventsub_manager._transport_for_event(event_type)
+            preferred_transport = eventsub_manager._transport_for_event(
+                event_type,
+                req.authorization_source,
+            )
             resolved_authorization_source = await _resolve_interest_authorization_source(
                 session=session,
                 service=service,
@@ -882,7 +885,11 @@ def register_service_routes(
                 event_type=event_type,
                 broadcaster_user_id=broadcaster_user_id,
                 requested_source=req.authorization_source,
-                upstream_transport=upstream_transport,
+                upstream_transport=preferred_transport,
+            )
+            upstream_transport = eventsub_manager._transport_for_event(
+                event_type,
+                resolved_authorization_source,
             )
 
             if raw_broadcaster != broadcaster_user_id:
