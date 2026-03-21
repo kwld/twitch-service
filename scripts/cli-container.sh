@@ -5,6 +5,11 @@ ENGINE="${1:-docker}"
 CONTAINER_NAME="twitch_eventsub_app_dev"
 COMPOSE_FILE="docker-compose.dev.yml"
 
+cat >&2 <<'EOF'
+[twitch-service] cli-container.sh uses docker-compose.dev.yml and the DEV database/containers.
+[twitch-service] For the production/live stack, use scripts/cli-live.sh instead.
+EOF
+
 if [[ ! -f .env ]]; then
   echo "Missing .env file. Copy .env.example to .env and configure values." >&2
   exit 1

@@ -5,6 +5,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+Write-Warning "cli-container.ps1 uses docker-compose.dev.yml and the DEV database/containers."
+Write-Warning "For the production/live stack, use scripts\\cli-live.ps1 instead."
+
 if (!(Test-Path ".env")) {
   Write-Error "Missing .env file. Copy .env.example to .env and configure values."
   exit 1
