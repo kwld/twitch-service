@@ -12,6 +12,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from sqlalchemy import select
 
 from app.event_router import InterestKey
+from app.eventsub_authorization import normalize_persisted_authorization_source
 from app.models import (
     BotAccount,
     BroadcasterIdentity,
@@ -27,6 +28,17 @@ eventsub_audit_logger = logging.getLogger("eventsub.audit")
 
 
 class EventSubNotificationMixin:
+    def _schedule_background_task(self, task: asyncio.Task) -> None:
+        tasks = getattr(self, "_background_tasks", None)
+        if tasks is None:
+            self._background_tasks = set()
+            tasks = self._background_tasks
+        limit = int(getattr(self, "_background_tasks_limit", 0) or 0)
+        if limit and len(tasks) >= limit:
+            return
+        tasks.add(task)
+        task.add_done_callback(lambda t: tasks.discard(t))
+
     async def handle_webhook_notification(self, payload: dict, message_id: str = "") -> None:
         await self._forward_notification_payload(payload, message_id, incoming_transport="twitch_webhook")
 
@@ -74,6 +86,7 @@ class EventSubNotificationMixin:
             return
         async with self.session_factory() as session:
             bot = None
+            authorization_source = "broadcaster"
             if subscription_id:
                 db_sub = await session.scalar(
                     select(TwitchSubscription).where(
@@ -82,6 +95,10 @@ class EventSubNotificationMixin:
                 )
                 if db_sub:
                     bot = await session.get(BotAccount, db_sub.bot_account_id)
+                    authorization_source = normalize_persisted_authorization_source(
+                        event_type,
+                        db_sub.authorization_source,
+                    )
             if not bot:
                 condition = subscription.get("condition", {})
                 bot_lookup_user_id = (
@@ -92,12 +109,16 @@ class EventSubNotificationMixin:
                 bot = await session.scalar(
                     select(BotAccount).where(BotAccount.twitch_user_id == str(bot_lookup_user_id))
                 )
+                moderator_user_id = str(condition.get("moderator_user_id", "")).strip()
+                if bot and moderator_user_id == str(bot.twitch_user_id):
+                    authorization_source = "bot_moderator"
             if not bot:
                 return
         key = InterestKey(
             bot_account_id=bot.id,
             event_type=event_type,
             broadcaster_user_id=broadcaster_user_id,
+            authorization_source=authorization_source,
             raid_direction=raid_direction,
         )
         interests = await self.registry.interested(key)
@@ -136,7 +157,8 @@ class EventSubNotificationMixin:
                 for service_id in {interest.service_account_id for interest in interests}
             ]
             if incoming_trace_tasks:
-                await asyncio.gather(*incoming_trace_tasks, return_exceptions=True)
+                for task in incoming_trace_tasks:
+                    self._schedule_background_task(task)
         envelope = self.event_hub.envelope(
             message_id=message_id,
             event_type=event_type,
@@ -171,7 +193,8 @@ class EventSubNotificationMixin:
             for interest in interests
         ]
         if outgoing_tasks:
-            await asyncio.gather(*outgoing_tasks, return_exceptions=True)
+            for task in outgoing_tasks:
+                self._schedule_background_task(task)
 
     async def reject_interests_for_key(
         self,
@@ -222,7 +245,8 @@ class EventSubNotificationMixin:
                 )
             )
         if notify_tasks:
-            await asyncio.gather(*notify_tasks, return_exceptions=True)
+            for task in notify_tasks:
+                self._schedule_background_task(task)
 
         interest_ids = [interest.id for interest in interests]
         async with self.session_factory() as session:

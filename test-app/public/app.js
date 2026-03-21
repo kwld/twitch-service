@@ -9,6 +9,7 @@ const broadcasterBio = document.getElementById("broadcasterBio");
 const grantUrl = document.getElementById("grantUrl");
 const eventTypeSelect = document.getElementById("eventTypeSelect");
 const transportSelect = document.getElementById("transportSelect");
+const authorizationSourceSelect = document.getElementById("authorizationSourceSelect");
 const webhookUrlInput = document.getElementById("webhookUrlInput");
 const interestList = document.getElementById("interestList");
 const eventsLog = document.getElementById("eventsLog");
@@ -135,7 +136,7 @@ async function refreshInterests() {
   interestList.innerHTML = "";
   for (const item of interests) {
     const li = document.createElement("li");
-    li.innerHTML = `<div><strong>${item.event_type}</strong> bot=${item.bot_account_id} broadcaster=${item.broadcaster_user_id} transport=${item.transport}</div>`;
+    li.innerHTML = `<div><strong>${item.event_type}</strong> bot=${item.bot_account_id} broadcaster=${item.broadcaster_user_id} auth_source=${item.authorization_source || "broadcaster"} transport=${item.transport}</div>`;
 
     const actions = document.createElement("div");
     actions.className = "row";
@@ -246,6 +247,7 @@ async function createInterest() {
     event_type: eventTypeSelect.value,
     broadcaster_user_id: broadcaster,
     transport,
+    authorization_source: authorizationSourceSelect.value,
   };
   if (transport === "webhook") {
     const url = webhookUrlInput.value.trim();
@@ -255,7 +257,7 @@ async function createInterest() {
     payload.webhook_url = url;
   }
   const result = await api("/api/interests", { method: "POST", body: payload });
-  appendLog(`created/reused interest ${result.id} (${result.event_type})`);
+  appendLog(`created/reused interest ${result.id} (${result.event_type}) auth_source=${result.authorization_source}`);
   await refreshInterests();
 }
 

@@ -10,6 +10,12 @@ from fastapi import Depends, FastAPI, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from app.bot_auth import ensure_bot_access_token
+from app.eventsub_authorization import (
+    DEFAULT_AUTHORIZATION_SOURCE,
+    normalize_interest_authorization_source,
+    normalize_persisted_authorization_source,
+)
 from app.eventsub_catalog import (
     EVENTSUB_CATALOG,
     KNOWN_EVENT_TYPES,
@@ -153,6 +159,98 @@ def register_service_routes(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Unsupported scope_mode '{scope_mode}'",
+        )
+
+    def _scopes_satisfy_required_groups(scopes: set[str], required_scope_groups: list[set[str]]) -> bool:
+        return all(any(item in scopes for item in group) for group in required_scope_groups)
+
+    async def _resolve_interest_authorization_source(
+        *,
+        session,
+        service: ServiceAccount,
+        bot: BotAccount,
+        event_type: str,
+        broadcaster_user_id: str,
+        requested_source: str,
+        upstream_transport: str,
+    ) -> str:
+        normalized_source = normalize_interest_authorization_source(event_type, requested_source)
+        if normalized_source == "auto" and not required_scope_any_of_groups(event_type):
+            return DEFAULT_AUTHORIZATION_SOURCE
+
+        required_scope_groups = required_scope_any_of_groups(event_type)
+        if not required_scope_groups:
+            return DEFAULT_AUTHORIZATION_SOURCE
+
+        auth_row = await session.scalar(
+            select(BroadcasterAuthorization).where(
+                BroadcasterAuthorization.service_account_id == service.id,
+                BroadcasterAuthorization.bot_account_id == bot.id,
+                BroadcasterAuthorization.broadcaster_user_id == broadcaster_user_id,
+            )
+        )
+        broadcaster_scopes = {
+            x.strip() for x in str(getattr(auth_row, "scopes_csv", "") or "").split(",") if x.strip()
+        }
+        broadcaster_ok = _scopes_satisfy_required_groups(broadcaster_scopes, required_scope_groups)
+
+        bot_scopes: set[str] = set()
+        should_check_bot_scopes = (
+            upstream_transport == "websocket"
+            or normalized_source == "bot_moderator"
+            or (normalized_source == "auto" and not broadcaster_ok)
+        )
+        if should_check_bot_scopes:
+            token = await ensure_bot_access_token(session, twitch_client, bot)
+            token_info = await twitch_client.validate_user_token(token)
+            bot_scopes = {x.strip() for x in token_info.get("scopes", []) if str(x).strip()}
+
+        bot_ok = _scopes_satisfy_required_groups(bot_scopes, required_scope_groups)
+
+        if upstream_transport == "websocket" and normalized_source == "broadcaster":
+            normalized_source = "bot_moderator"
+        if upstream_transport == "websocket" and normalized_source == "auto":
+            if bot_ok:
+                return "bot_moderator"
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "This subscription will use EventSub websocket transport, so it must use the bot moderator identity. "
+                    "Re-authorize the bot with the required moderator scopes."
+                ),
+            )
+
+        if normalized_source == "broadcaster":
+            if broadcaster_ok:
+                return "broadcaster"
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Broadcaster authorization is missing required scopes for this subscription type. "
+                    "Start a broadcaster grant for this channel or switch authorization_source to bot_moderator."
+                ),
+            )
+        if normalized_source == "bot_moderator":
+            if bot_ok:
+                return "bot_moderator"
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Bot token is missing required scopes for this subscription type. "
+                    "Re-authorize the bot with moderator scopes or use broadcaster authorization."
+                ),
+            )
+
+        if broadcaster_ok:
+            return "broadcaster"
+        if bot_ok:
+            return "bot_moderator"
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "No valid authorization source is available for this subscription type. "
+                "Either complete a broadcaster grant for this channel or re-authorize the bot with the required moderator scopes."
+            ),
         )
 
     @app.post("/v1/ws-token")
@@ -354,6 +452,10 @@ def register_service_routes(
                 event_type=interest.event_type,
                 broadcaster_user_id=interest.broadcaster_user_id,
                 raid_direction=interest.raid_direction or None,
+                authorization_source=normalize_persisted_authorization_source(
+                    interest.event_type,
+                    interest.authorization_source,
+                ),
                 local_transport=interest.transport,
                 webhook_url=interest.webhook_url,
                 created_at=interest.created_at,
@@ -433,7 +535,7 @@ def register_service_routes(
                 ).all()
             )
             interests = await filter_working_interests(session, interests)
-        interest_ids_by_key: dict[tuple[str, str, str, str], list[uuid.UUID]] = {}
+        interest_ids_by_key: dict[tuple[str, str, str, str, str], list[uuid.UUID]] = {}
         for interest in interests:
             if broadcaster_filter and interest.broadcaster_user_id != broadcaster_filter:
                 continue
@@ -441,6 +543,7 @@ def register_service_routes(
                 str(interest.bot_account_id),
                 interest.event_type,
                 interest.broadcaster_user_id,
+                normalize_persisted_authorization_source(interest.event_type, interest.authorization_source),
                 interest.raid_direction or "",
             )
             bucket = interest_ids_by_key.setdefault(key, [])
@@ -468,6 +571,10 @@ def register_service_routes(
                 str(bot_uuid),
                 str(row.get("event_type", "")),
                 str(row.get("broadcaster_user_id", "")),
+                normalize_persisted_authorization_source(
+                    str(row.get("event_type", "")),
+                    str(row.get("authorization_source", DEFAULT_AUTHORIZATION_SOURCE)),
+                ),
                 str(row.get("raid_direction", "") or ""),
             )
             matched_interest_ids = interest_ids_by_key.get(key, [])
@@ -479,6 +586,10 @@ def register_service_routes(
                     status=status_value,
                     event_type=str(row.get("event_type", "")),
                     broadcaster_user_id=str(row.get("broadcaster_user_id", "")),
+                    authorization_source=normalize_persisted_authorization_source(
+                        str(row.get("event_type", "")),
+                        str(row.get("authorization_source", DEFAULT_AUTHORIZATION_SOURCE)),
+                    ),
                     raid_direction=str(row.get("raid_direction", "") or "") or None,
                     upstream_transport=str(row.get("upstream_transport", "websocket")),
                     bot_account_id=bot_uuid,
@@ -714,6 +825,7 @@ def register_service_routes(
                 "bot_account_id": str(req.bot_account_id),
                 "event_type": req.event_type,
                 "broadcaster_user_id": req.broadcaster_user_id,
+                "authorization_source": req.authorization_source,
                 "transport": req.transport,
                 "webhook_url": str(req.webhook_url) if req.webhook_url else None,
             },
@@ -762,6 +874,16 @@ def register_service_routes(
             if not bot:
                 raise HTTPException(status_code=404, detail="Bot not found")
             await ensure_service_can_access_bot(session, service.id, req.bot_account_id)
+            upstream_transport = eventsub_manager._transport_for_event(event_type)
+            resolved_authorization_source = await _resolve_interest_authorization_source(
+                session=session,
+                service=service,
+                bot=bot,
+                event_type=event_type,
+                broadcaster_user_id=broadcaster_user_id,
+                requested_source=req.authorization_source,
+                upstream_transport=upstream_transport,
+            )
 
             if raw_broadcaster != broadcaster_user_id:
                 legacy_id = raw_broadcaster
@@ -783,6 +905,7 @@ def register_service_routes(
                             ServiceInterest.bot_account_id == legacy.bot_account_id,
                             ServiceInterest.event_type == legacy.event_type,
                             ServiceInterest.broadcaster_user_id == broadcaster_user_id,
+                            ServiceInterest.authorization_source == legacy.authorization_source,
                             ServiceInterest.transport == legacy.transport,
                             ServiceInterest.webhook_url == legacy.webhook_url,
                             ServiceInterest.raid_direction == legacy.raid_direction,
@@ -818,6 +941,7 @@ def register_service_routes(
                     ServiceInterest.bot_account_id == req.bot_account_id,
                     ServiceInterest.event_type == event_type,
                     ServiceInterest.broadcaster_user_id == broadcaster_user_id,
+                    ServiceInterest.authorization_source == resolved_authorization_source,
                     ServiceInterest.transport == req.transport,
                     ServiceInterest.webhook_url == webhook_url,
                     ServiceInterest.raid_direction == raid_direction,
@@ -840,6 +964,7 @@ def register_service_routes(
                     bot_account_id=req.bot_account_id,
                     event_type=event_type,
                     broadcaster_user_id=broadcaster_user_id,
+                    authorization_source=resolved_authorization_source,
                     transport=req.transport,
                     webhook_url=webhook_url,
                     raid_direction=raid_direction,
@@ -856,6 +981,7 @@ def register_service_routes(
                             ServiceInterest.bot_account_id == req.bot_account_id,
                             ServiceInterest.event_type == event_type,
                             ServiceInterest.broadcaster_user_id == broadcaster_user_id,
+                            ServiceInterest.authorization_source == resolved_authorization_source,
                             ServiceInterest.transport == req.transport,
                             ServiceInterest.webhook_url == webhook_url,
                             ServiceInterest.raid_direction == raid_direction,
@@ -870,26 +996,28 @@ def register_service_routes(
         key = await interest_registry.add(interest)
         if not created_interest:
             logger.info(
-                "Service interest refreshed: service=%s name=%s bot=%s broadcaster=%s event=%s downstream=%s upstream=%s target=%s",
+                "Service interest refreshed: service=%s name=%s bot=%s broadcaster=%s event=%s auth_source=%s downstream=%s upstream=%s target=%s",
                 service.id,
                 service.name,
                 req.bot_account_id,
                 broadcaster_user_id,
                 event_type,
+                resolved_authorization_source,
                 req.transport,
-                eventsub_manager._transport_for_event(event_type),
+                upstream_transport,
                 webhook_url or "/ws/events",
             )
             return interest
         logger.info(
-            "Service interest created: service=%s name=%s bot=%s broadcaster=%s event=%s downstream=%s upstream=%s target=%s",
+            "Service interest created: service=%s name=%s bot=%s broadcaster=%s event=%s auth_source=%s downstream=%s upstream=%s target=%s",
             service.id,
             service.name,
             req.bot_account_id,
             broadcaster_user_id,
             event_type,
+            resolved_authorization_source,
             req.transport,
-            eventsub_manager._transport_for_event(event_type),
+            upstream_transport,
             webhook_url or "/ws/events",
         )
         try:

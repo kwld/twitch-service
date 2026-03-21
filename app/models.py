@@ -84,6 +84,7 @@ class ServiceInterest(Base):
             "bot_account_id",
             "event_type",
             "broadcaster_user_id",
+            "authorization_source",
             "transport",
             "webhook_url",
             "raid_direction",
@@ -100,6 +101,7 @@ class ServiceInterest(Base):
     )
     event_type: Mapped[str] = mapped_column(String(120), nullable=False)
     broadcaster_user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    authorization_source: Mapped[str] = mapped_column(String(32), nullable=False, default="broadcaster")
     transport: Mapped[str] = mapped_column(String(24), nullable=False, default="websocket")
     webhook_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     raid_direction: Mapped[str] = mapped_column(String(16), nullable=False, default="")
@@ -125,6 +127,7 @@ class TwitchSubscription(Base):
             "bot_account_id",
             "event_type",
             "broadcaster_user_id",
+            "authorization_source",
             "raid_direction",
             name="uq_twitch_sub_dedupe",
         ),
@@ -136,6 +139,7 @@ class TwitchSubscription(Base):
     )
     event_type: Mapped[str] = mapped_column(String(120), nullable=False)
     broadcaster_user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    authorization_source: Mapped[str] = mapped_column(String(32), nullable=False, default="broadcaster")
     twitch_subscription_id: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
     status: Mapped[str] = mapped_column(String(80), nullable=False)
     session_id: Mapped[str | None] = mapped_column(String(128), nullable=True)

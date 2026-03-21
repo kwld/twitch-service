@@ -22,7 +22,10 @@ def render_eventsub_subscription_line(idx: int, sub: dict) -> str:
     condition = sub.get("condition", {})
     broadcaster = condition.get("broadcaster_user_id", "-")
     user_id = condition.get("user_id")
+    authorization_source = sub.get("authorization_source")
     suffix = f" user_id={user_id}" if user_id else ""
+    if authorization_source:
+        suffix += f" auth_source={authorization_source}"
     return (
         f"{idx}) id={sub.get('id')} type={event_type} status={status} "
         f"transport={transport} broadcaster={broadcaster}{suffix}"

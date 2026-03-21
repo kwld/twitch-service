@@ -20,6 +20,7 @@ def test_create_interest_request_accepts_valid_webhook_payload():
         webhook_url="https://example.com/hook",
     )
     assert model.transport == "webhook"
+    assert model.authorization_source == "auto"
     assert str(model.webhook_url) == "https://example.com/hook"
 
 

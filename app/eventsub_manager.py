@@ -90,6 +90,8 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
         self._subscription_error_lock = asyncio.Lock()
         self._fanout_concurrency = 32
         self._fanout_semaphore = asyncio.Semaphore(self._fanout_concurrency)
+        self._background_tasks: set[asyncio.Task] = set()
+        self._background_tasks_limit = 2000
         self._trace_payload_max_chars = 12000
         self._audit_payload_max_chars = 8000
         self._active_subscriptions_cache_ttl = timedelta(seconds=30)
@@ -342,6 +344,7 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
                 row.bot_account_id,
                 row.event_type,
                 row.broadcaster_user_id,
+                row.authorization_source or "broadcaster",
                 row.raid_direction or "",
             )
             status_by_key[key] = str(row.status or "").strip().lower()
@@ -359,6 +362,7 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
                 row.bot_account_id,
                 row.event_type,
                 row.broadcaster_user_id,
+                row.authorization_source or "broadcaster",
                 row.raid_direction or "",
             )
             if key not in registry_keys:
@@ -654,7 +658,7 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
             async with self.session_factory() as session:
                 existing_rows = list((await session.scalars(select(TwitchSubscription))).all())
                 previous_sub_owner = {
-                    row.twitch_subscription_id: row.bot_account_id
+                    row.twitch_subscription_id: row
                     for row in existing_rows
                 }
                 bots = list((await session.scalars(select(BotAccount))).all())
@@ -689,13 +693,28 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
                         if bot_user_id:
                             bot = bots_by_twitch_user_id.get(bot_user_id)
                     else:
-                        previous_bot_id = previous_sub_owner.get(sub_id)
-                        if previous_bot_id:
-                            bot = bots_by_id.get(previous_bot_id)
+                        moderator_user_id = str(condition.get("moderator_user_id", "")).strip()
+                        if moderator_user_id:
+                            bot = bots_by_twitch_user_id.get(moderator_user_id)
+                        previous_row = previous_sub_owner.get(sub_id)
+                        if not bot and previous_row:
+                            bot = bots_by_id.get(previous_row.bot_account_id)
                         if not bot:
                             bot = bots_by_twitch_user_id.get(broadcaster_user_id)
                     if not bot:
                         continue
+                    previous_row = previous_sub_owner.get(sub_id)
+                    authorization_source = (
+                        getattr(previous_row, "authorization_source", "broadcaster")
+                        if previous_row
+                        else "broadcaster"
+                    )
+                    moderator_user_id = str(condition.get("moderator_user_id", "")).strip()
+                    if moderator_user_id:
+                        if moderator_user_id == str(bot.twitch_user_id):
+                            authorization_source = "bot_moderator"
+                        elif moderator_user_id == broadcaster_user_id:
+                            authorization_source = "broadcaster"
                     snapshot.append(
                         {
                             "twitch_subscription_id": sub_id,
@@ -703,6 +722,7 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
                             "cost": int(sub.get("cost", 0) or 0),
                             "event_type": event_type,
                             "broadcaster_user_id": broadcaster_user_id,
+                            "authorization_source": authorization_source,
                             "raid_direction": raid_direction,
                             "upstream_transport": method,
                             "session_id": sub.get("transport", {}).get("session_id"),
@@ -743,6 +763,7 @@ class EventSubManager(EventSubNotificationMixin, EventSubSubscriptionMixin):
                 "cost": 0,
                 "event_type": row.event_type,
                 "broadcaster_user_id": row.broadcaster_user_id,
+                "authorization_source": row.authorization_source or "broadcaster",
                 "raid_direction": row.raid_direction,
                 "upstream_transport": self._transport_for_event(row.event_type),
                 "bot_account_id": str(row.bot_account_id),

@@ -123,6 +123,7 @@ def _make_interest(service_id: uuid.UUID, bot_id: uuid.UUID, event_type: str, br
         bot_account_id=bot_id,
         event_type=event_type,
         broadcaster_user_id=broadcaster_user_id,
+        authorization_source="broadcaster",
         transport="websocket",
         webhook_url=None,
         last_heartbeat_at=now,
@@ -143,6 +144,7 @@ def test_active_subscriptions_refresh_false_uses_db_snapshot_and_broadcaster_fil
                 "status": "enabled",
                 "event_type": "stream.online",
                 "broadcaster_user_id": "123",
+                "authorization_source": "broadcaster",
                 "upstream_transport": "websocket",
                 "bot_account_id": str(bot_id),
                 "session_id": "sess-1",
@@ -154,6 +156,7 @@ def test_active_subscriptions_refresh_false_uses_db_snapshot_and_broadcaster_fil
                 "status": "enabled",
                 "event_type": "stream.online",
                 "broadcaster_user_id": "999",
+                "authorization_source": "broadcaster",
                 "upstream_transport": "websocket",
                 "bot_account_id": str(bot_id),
                 "session_id": "sess-2",
@@ -194,6 +197,7 @@ def test_active_subscriptions_refresh_true_uses_live_snapshot_and_allowed_bot_fi
                 "status": "enabled",
                 "event_type": "stream.online",
                 "broadcaster_user_id": "123",
+                "authorization_source": "broadcaster",
                 "upstream_transport": "websocket",
                 "bot_account_id": str(allowed_bot_id),
                 "session_id": "sess-a",
@@ -205,6 +209,7 @@ def test_active_subscriptions_refresh_true_uses_live_snapshot_and_allowed_bot_fi
                 "status": "enabled",
                 "event_type": "stream.online",
                 "broadcaster_user_id": "456",
+                "authorization_source": "broadcaster",
                 "upstream_transport": "websocket",
                 "bot_account_id": str(blocked_bot_id),
                 "session_id": "sess-b",
@@ -226,3 +231,52 @@ def test_active_subscriptions_refresh_true_uses_live_snapshot_and_allowed_bot_fi
     assert [item["twitch_subscription_id"] for item in payload["items"]] == ["sub-allowed"]
     assert manager.db_calls == 0
     assert manager.live_calls == 1
+
+
+def test_active_subscriptions_match_authorization_source_distinctly():
+    service = _make_service()
+    bot_id = uuid.uuid4()
+    broadcaster_interest = _make_interest(service.id, bot_id, "channel.moderate", "123")
+    bot_interest = _make_interest(service.id, bot_id, "channel.moderate", "123")
+    bot_interest.id = uuid.uuid4()
+    bot_interest.authorization_source = "bot_moderator"
+    interests = [broadcaster_interest, bot_interest]
+    manager = DummyEventSubManager(
+        db_snapshot=[
+            {
+                "twitch_subscription_id": "sub-broadcaster",
+                "status": "enabled",
+                "event_type": "channel.moderate",
+                "broadcaster_user_id": "123",
+                "authorization_source": "broadcaster",
+                "upstream_transport": "webhook",
+                "bot_account_id": str(bot_id),
+                "session_id": None,
+                "connected_at": None,
+                "disconnected_at": None,
+            },
+            {
+                "twitch_subscription_id": "sub-bot",
+                "status": "enabled",
+                "event_type": "channel.moderate",
+                "broadcaster_user_id": "123",
+                "authorization_source": "bot_moderator",
+                "upstream_transport": "webhook",
+                "bot_account_id": str(bot_id),
+                "session_id": None,
+                "connected_at": None,
+                "disconnected_at": None,
+            },
+        ],
+        live_snapshot=[],
+    )
+
+    app = build_app(service=service, interests=interests, manager=manager)
+    client = TestClient(app)
+
+    resp = client.get("/v1/eventsub/subscriptions/active?refresh=false&broadcaster_user_id=123")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["matched_for_service"] == 2
+    assert [item["authorization_source"] for item in payload["items"]] == ["broadcaster", "bot_moderator"]

@@ -20,6 +20,13 @@ class DummyTwitchClient:
     async def close(self):
         return None
 
+    async def list_eventsub_subscriptions_with_meta(self, access_token=None):
+        return {
+            "data": await self.list_eventsub_subscriptions(access_token=access_token),
+            "total_cost": 0,
+            "max_total_cost": 0,
+        }
+
     async def list_eventsub_subscriptions(self, access_token=None):
         self.calls.append(access_token or "app")
         if access_token is None:
@@ -146,8 +153,10 @@ async def test_db_active_subscriptions_snapshot_uses_local_rows_only():
     assert isinstance(cached_at, datetime)
     assert len(snapshot) == 2
     assert snapshot[0]["twitch_subscription_id"] == "sub-1"
+    assert snapshot[0]["authorization_source"] == "broadcaster"
     assert snapshot[0]["upstream_transport"] == "websocket"
     assert snapshot[1]["twitch_subscription_id"] == "sub-2"
+    assert snapshot[1]["authorization_source"] == "broadcaster"
     assert snapshot[1]["bot_account_id"] == str(bot_id)
 
 
@@ -186,7 +195,7 @@ async def test_list_eventsub_subscriptions_all_tokens_dedupes_across_app_and_bot
 
     monkeypatch.setattr("app.eventsub_manager.ensure_bot_access_token", _fake_ensure)
 
-    subs = await manager._list_eventsub_subscriptions_all_tokens()
+    subs, _meta = await manager._list_eventsub_subscriptions_all_tokens()
 
     ids = sorted(sub["id"] for sub in subs)
     assert ids == ["app-only", "bot1-only", "bot2-only", "shared"]

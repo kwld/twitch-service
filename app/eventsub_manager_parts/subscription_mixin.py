@@ -13,6 +13,10 @@ from typing import Literal
 from sqlalchemy import delete, select
 
 from app.bot_auth import ensure_bot_access_token
+from app.eventsub_authorization import (
+    DEFAULT_AUTHORIZATION_SOURCE,
+    normalize_persisted_authorization_source,
+)
 from app.eventsub_catalog import (
     preferred_eventsub_version,
     required_scope_any_of_groups,
@@ -60,6 +64,7 @@ class EventSubSubscriptionMixin:
         event_type: str,
         broadcaster_user_id: str,
         bot_user_id: str,
+        authorization_source: str = DEFAULT_AUTHORIZATION_SOURCE,
         raid_direction: str | None = None,
     ) -> dict[str, str | bool]:
         normalized = event_type.strip().lower()
@@ -93,12 +98,107 @@ class EventSubSubscriptionMixin:
         condition: dict[str, str | bool] = {"broadcaster_user_id": broadcaster_user_id}
 
         if requires_moderator_user_id(normalized):
-            condition["moderator_user_id"] = broadcaster_user_id
+            condition["moderator_user_id"] = (
+                bot_user_id if authorization_source == "bot_moderator" else broadcaster_user_id
+            )
 
         if requires_condition_user_id(normalized):
             condition["user_id"] = bot_user_id
 
         return condition
+
+    @staticmethod
+    def _scopes_satisfy_required_groups(scopes: set[str], required_scope_groups: list[set[str]]) -> bool:
+        return all(any(item in scopes for item in group) for group in required_scope_groups)
+
+    async def _resolve_authorization_source(
+        self,
+        *,
+        session,
+        key: InterestKey,
+        bot,
+        upstream_transport: str,
+        create_access_token: str | None,
+        required_scope_groups: list[set[str]],
+    ) -> tuple[str, set[str], set[str], str | None]:
+        broadcaster_scopes: set[str] = set()
+        bot_scopes: set[str] = set()
+
+        service_ids = {interest.service_account_id for interest in await self.registry.interested(key)}
+        if service_ids:
+            auth_rows = list(
+                (
+                    await session.scalars(
+                        select(BroadcasterAuthorization).where(
+                            BroadcasterAuthorization.service_account_id.in_(service_ids),
+                            BroadcasterAuthorization.bot_account_id == key.bot_account_id,
+                            BroadcasterAuthorization.broadcaster_user_id == key.broadcaster_user_id,
+                        )
+                    )
+                ).all()
+            )
+        else:
+            auth_rows = list(
+                (
+                    await session.scalars(
+                        select(BroadcasterAuthorization).where(
+                            BroadcasterAuthorization.bot_account_id == key.bot_account_id,
+                            BroadcasterAuthorization.broadcaster_user_id == key.broadcaster_user_id,
+                        )
+                    )
+                ).all()
+            )
+        for row in auth_rows:
+            broadcaster_scopes.update({x.strip() for x in row.scopes_csv.split(",") if x.strip()})
+
+        bot_token_for_check = create_access_token
+        should_check_bot_scopes = (
+            upstream_transport == "websocket"
+            or key.authorization_source == "bot_moderator"
+            or key.broadcaster_user_id == bot.twitch_user_id
+        )
+        if should_check_bot_scopes:
+            token_for_check = bot_token_for_check or await ensure_bot_access_token(session, self.twitch, bot)
+            try:
+                token_info = await self.twitch.validate_user_token(token_for_check)
+            except TwitchApiError as exc:
+                message = str(exc).lower()
+                if "invalid access token" in message or "unauthorized" in message or "401" in message:
+                    logger.warning(
+                        "Token validation failed for bot %s; attempting refresh.",
+                        bot.id,
+                    )
+                    refreshed = await self.twitch.refresh_token(bot.refresh_token)
+                    bot.access_token = refreshed.access_token
+                    bot.refresh_token = refreshed.refresh_token
+                    bot.token_expires_at = refreshed.expires_at
+                    await session.commit()
+                    token_for_check = bot.access_token
+                    token_info = await self.twitch.validate_user_token(token_for_check)
+                else:
+                    raise
+            bot_scopes = {x.strip() for x in token_info.get("scopes", []) if str(x).strip()}
+            bot_token_for_check = token_for_check
+
+        if not required_scope_groups:
+            return key.authorization_source, broadcaster_scopes, bot_scopes, bot_token_for_check
+
+        broadcaster_ok = self._scopes_satisfy_required_groups(broadcaster_scopes, required_scope_groups)
+        bot_ok = self._scopes_satisfy_required_groups(bot_scopes, required_scope_groups)
+
+        requested_source = normalize_persisted_authorization_source(key.event_type, key.authorization_source)
+        if upstream_transport == "websocket" and requested_source == "broadcaster":
+            requested_source = "bot_moderator"
+
+        if requested_source == "broadcaster" and broadcaster_ok:
+            return "broadcaster", broadcaster_scopes, bot_scopes, bot_token_for_check
+        if requested_source == "bot_moderator" and bot_ok:
+            return "bot_moderator", broadcaster_scopes, bot_scopes, bot_token_for_check
+        if requested_source == "broadcaster" and not broadcaster_ok and bot_ok:
+            return "bot_moderator", broadcaster_scopes, bot_scopes, bot_token_for_check
+        if requested_source == "bot_moderator" and not bot_ok and broadcaster_ok:
+            return "broadcaster", broadcaster_scopes, bot_scopes, bot_token_for_check
+        return requested_source, broadcaster_scopes, bot_scopes, bot_token_for_check
     async def _record_service_actions_for_key(
         self,
         *,
@@ -158,8 +258,8 @@ class EventSubSubscriptionMixin:
         subs = listed[0] if isinstance(listed, tuple) else listed
         async with self.session_factory() as session:
             existing_rows = list((await session.scalars(select(TwitchSubscription))).all())
-            previous_sub_owner = {
-                row.twitch_subscription_id: row.bot_account_id
+            previous_subscriptions = {
+                row.twitch_subscription_id: row
                 for row in existing_rows
             }
             bots = list((await session.scalars(select(BotAccount))).all())
@@ -197,17 +297,39 @@ class EventSubSubscriptionMixin:
                 expected_method = self._transport_for_event(event_type)
                 if method != expected_method:
                     continue
+                bot = None
                 if event_type.startswith("channel.chat."):
+                    bot_user_id = str(condition.get("user_id", "")).strip()
                     if not bot_user_id:
                         continue
-                    bot = bots_by_twitch_user_id.get(str(bot_user_id))
+                    bot = bots_by_twitch_user_id.get(bot_user_id)
                 else:
-                    previous_bot_id = previous_sub_owner.get(sub_id)
-                    bot = bots_by_id.get(previous_bot_id) if previous_bot_id else None
+                    moderator_user_id = str(condition.get("moderator_user_id", "")).strip()
+                    if moderator_user_id:
+                        bot = bots_by_twitch_user_id.get(moderator_user_id)
+                    previous_row = previous_subscriptions.get(sub_id)
+                    previous_bot_id = previous_row.bot_account_id if previous_row else None
+                    if not bot and previous_bot_id:
+                        bot = bots_by_id.get(previous_bot_id)
                     if not bot:
                         bot = bots_by_twitch_user_id.get(str(broadcaster_user_id))
                 if not bot:
                     continue
+                previous_row = previous_subscriptions.get(sub_id)
+                authorization_source = (
+                    normalize_persisted_authorization_source(
+                        event_type,
+                        getattr(previous_row, "authorization_source", DEFAULT_AUTHORIZATION_SOURCE),
+                    )
+                    if previous_row
+                    else DEFAULT_AUTHORIZATION_SOURCE
+                )
+                moderator_user_id = str(condition.get("moderator_user_id", "")).strip()
+                if requires_moderator_user_id(event_type):
+                    if moderator_user_id and moderator_user_id == str(bot.twitch_user_id):
+                        authorization_source = "bot_moderator"
+                    elif moderator_user_id and moderator_user_id == broadcaster_user_id:
+                        authorization_source = "broadcaster"
                 if (
                     method == "websocket"
                     and expected_method == "websocket"
@@ -224,6 +346,7 @@ class EventSubSubscriptionMixin:
                             bot.id,
                             event_type,
                             broadcaster_user_id,
+                            authorization_source,
                             raid_direction,
                         ),
                         event_type="eventsub.subscription.delete_stale",
@@ -244,11 +367,12 @@ class EventSubSubscriptionMixin:
                         sub_status,
                     )
                     continue
-                dedupe_key = (bot.id, event_type, broadcaster_user_id, raid_direction)
+                dedupe_key = (bot.id, event_type, broadcaster_user_id, authorization_source, raid_direction)
                 candidate = {
                     "bot_account_id": bot.id,
                     "event_type": event_type,
                     "broadcaster_user_id": broadcaster_user_id,
+                    "authorization_source": authorization_source,
                     "twitch_subscription_id": sub_id,
                     "status": sub_status,
                     "session_id": sub.get("transport", {}).get("session_id"),
@@ -285,6 +409,7 @@ class EventSubSubscriptionMixin:
                         bot_account_id=item["bot_account_id"],
                         event_type=item["event_type"],
                         broadcaster_user_id=item["broadcaster_user_id"],
+                        authorization_source=item.get("authorization_source", DEFAULT_AUTHORIZATION_SOURCE),
                         twitch_subscription_id=item["twitch_subscription_id"],
                         status=item["status"],
                         session_id=item["session_id"],
@@ -318,6 +443,7 @@ class EventSubSubscriptionMixin:
                         duplicate["bot_account_id"],
                         duplicate["event_type"],
                         duplicate["broadcaster_user_id"],
+                        duplicate.get("authorization_source", DEFAULT_AUTHORIZATION_SOURCE),
                         duplicate.get("raid_direction", ""),
                     ),
                     event_type="eventsub.subscription.delete_duplicate",
@@ -518,6 +644,7 @@ class EventSubSubscriptionMixin:
                         event_type=key.event_type,
                         broadcaster_user_id=key.broadcaster_user_id,
                         bot_user_id=str(bot.twitch_user_id),
+                        authorization_source=key.authorization_source,
                         raid_direction=key.raid_direction or None,
                     )
                     create_access_token: str | None = None
@@ -533,62 +660,33 @@ class EventSubSubscriptionMixin:
                         create_access_token = await ensure_bot_access_token(session, self.twitch, bot)
                     required_scope_groups = required_scope_any_of_groups(key.event_type)
                     if required_scope_groups:
-                        def _has_required_scopes(scopes: set[str]) -> bool:
-                            return all(any(item in scopes for item in group) for group in required_scope_groups)
-
                         missing = " and ".join(["|".join(sorted(group)) for group in required_scope_groups])
-                        combined_scopes: set[str] = set()
-                        broadcaster_scopes: set[str] = set()
-                        bot_scopes: set[str] = set()
-
-                        service_ids = {interest.service_account_id for interest in await self.registry.interested(key)}
-                        if service_ids:
-                            auth_rows = list(
-                                (
-                                    await session.scalars(
-                                        select(BroadcasterAuthorization).where(
-                                            BroadcasterAuthorization.service_account_id.in_(service_ids),
-                                            BroadcasterAuthorization.broadcaster_user_id == key.broadcaster_user_id,
-                                        )
-                                    )
-                                ).all()
-                            )
-                        else:
-                            auth_rows = list(
-                                (
-                                    await session.scalars(
-                                        select(BroadcasterAuthorization).where(
-                                            BroadcasterAuthorization.broadcaster_user_id == key.broadcaster_user_id,
-                                        )
-                                    )
-                                ).all()
-                            )
-                        for row in auth_rows:
-                            broadcaster_scopes.update(
-                                {x.strip() for x in row.scopes_csv.split(",") if x.strip()}
-                            )
-                        combined_scopes.update(broadcaster_scopes)
-
-                        needs_bot_scope_check = (
-                            upstream_transport == "websocket"
-                            or key.broadcaster_user_id == bot.twitch_user_id
-                            or any(any(not scope.startswith("channel:") for scope in group) for group in required_scope_groups)
+                        (
+                            resolved_source,
+                            broadcaster_scopes,
+                            bot_scopes,
+                            resolved_bot_token,
+                        ) = await self._resolve_authorization_source(
+                            session=session,
+                            key=key,
+                            bot=bot,
+                            upstream_transport=upstream_transport,
+                            create_access_token=create_access_token,
+                            required_scope_groups=required_scope_groups,
                         )
-                        if needs_bot_scope_check:
-                            token_for_check = create_access_token or await ensure_bot_access_token(
-                                session, self.twitch, bot
-                            )
-                            token_info = await self.twitch.validate_user_token(token_for_check)
-                            bot_scopes = {x.strip() for x in token_info.get("scopes", []) if str(x).strip()}
-                            combined_scopes.update(bot_scopes)
+                        if resolved_source == "bot_moderator":
+                            create_access_token = resolved_bot_token or create_access_token
+                        condition = self._build_subscription_condition(
+                            event_type=key.event_type,
+                            broadcaster_user_id=key.broadcaster_user_id,
+                            bot_user_id=str(bot.twitch_user_id),
+                            authorization_source=resolved_source,
+                            raid_direction=key.raid_direction or None,
+                        )
 
-                        if not _has_required_scopes(combined_scopes):
-                            if key.broadcaster_user_id == bot.twitch_user_id:
-                                reason = (
-                                    "subscription missing proper authorization: "
-                                    f"bot token is missing required scope(s) ({missing})"
-                                )
-                            elif not broadcaster_scopes:
+                        selected_scopes = broadcaster_scopes if resolved_source == "broadcaster" else bot_scopes
+                        if not self._scopes_satisfy_required_groups(selected_scopes, required_scope_groups):
+                            if resolved_source == "broadcaster":
                                 reason = (
                                     "subscription missing proper authorization: "
                                     f"broadcaster grant is missing required scope(s) ({missing})"
@@ -596,7 +694,7 @@ class EventSubSubscriptionMixin:
                             else:
                                 reason = (
                                     "subscription missing proper authorization: "
-                                    f"bot token and broadcaster grant scopes do not satisfy required scope(s) ({missing})"
+                                    f"bot token is missing required scope(s) ({missing})"
                                 )
                             await self._notify_subscription_failure(
                                 key=key,
@@ -654,10 +752,16 @@ class EventSubSubscriptionMixin:
                             "session_id": created.get("transport", {}).get("session_id"),
                         },
                     )
+                    persisted_source = (
+                        "bot_moderator"
+                        if condition.get("moderator_user_id") == str(bot.twitch_user_id)
+                        else DEFAULT_AUTHORIZATION_SOURCE
+                    )
                     new_sub = TwitchSubscription(
                         bot_account_id=key.bot_account_id,
                         event_type=key.event_type,
                         broadcaster_user_id=key.broadcaster_user_id,
+                        authorization_source=persisted_source,
                         twitch_subscription_id=created["id"],
                         status=created.get("status", "enabled"),
                         session_id=created.get("transport", {}).get("session_id"),

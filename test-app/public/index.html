@@ -51,6 +51,7 @@
           <label>Event type
             <select id="eventTypeSelect">
               <option value="channel.chat.message">channel.chat.message</option>
+              <option value="channel.moderate">channel.moderate</option>
               <option value="stream.online">stream.online</option>
               <option value="stream.offline">stream.offline</option>
             </select>
@@ -62,6 +63,13 @@
             </select>
           </label>
         </div>
+        <label>Authorization source
+          <select id="authorizationSourceSelect">
+            <option value="auto">auto</option>
+            <option value="broadcaster">broadcaster user grant</option>
+            <option value="bot_moderator">bot moderator grant</option>
+          </select>
+        </label>
         <label>Webhook URL (required for webhook transport)
           <input id="webhookUrlInput" type="text" placeholder="https://example.ngrok-free.app/service-webhook" />
         </label>

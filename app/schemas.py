@@ -6,6 +6,8 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, HttpUrl
 
+from app.eventsub_authorization import InterestAuthorizationSource, PersistedAuthorizationSource
+
 
 class CreateInterestRequest(BaseModel):
     bot_account_id: uuid.UUID
@@ -14,6 +16,7 @@ class CreateInterestRequest(BaseModel):
     transport: Literal["websocket", "webhook"] = "websocket"
     webhook_url: Optional[HttpUrl] = None
     raid_direction: Optional[Literal["incoming", "outgoing"]] = None
+    authorization_source: InterestAuthorizationSource = "auto"
 
 
 class InterestResponse(BaseModel):
@@ -23,6 +26,7 @@ class InterestResponse(BaseModel):
     event_type: str
     broadcaster_user_id: str
     raid_direction: str | None = None
+    authorization_source: PersistedAuthorizationSource = "broadcaster"
     transport: str
     webhook_url: str | None
     created_at: datetime
@@ -34,6 +38,7 @@ class ServiceSubscriptionItem(BaseModel):
     event_type: str
     broadcaster_user_id: str
     raid_direction: str | None = None
+    authorization_source: PersistedAuthorizationSource = "broadcaster"
     local_transport: Literal["websocket", "webhook"]
     webhook_url: str | None
     created_at: datetime
@@ -63,6 +68,7 @@ class ActiveTwitchSubscriptionItem(BaseModel):
     event_type: str
     broadcaster_user_id: str
     raid_direction: str | None = None
+    authorization_source: PersistedAuthorizationSource = "broadcaster"
     upstream_transport: Literal["webhook", "websocket"]
     bot_account_id: uuid.UUID
     matched_interest_ids: list[uuid.UUID]
