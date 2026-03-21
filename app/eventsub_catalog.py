@@ -482,30 +482,14 @@ KNOWN_TWITCH_SCOPES: frozenset[str] = frozenset(
     }
 )
 
-_MODERATION_EVENT_SCOPE_ANY_OF: frozenset[str] = frozenset(
-    {
-        "moderator:manage:announcements",
-        "moderator:manage:automod",
-        "moderator:manage:banned_users",
-        "moderator:manage:blocked_terms",
-        "moderator:manage:chat_messages",
-        "moderator:manage:chat_settings",
-        "moderator:manage:shoutouts",
-        "moderator:manage:unban_requests",
-        "moderator:manage:warnings",
-        "moderator:read:automod_settings",
-        "moderator:read:banned_users",
-        "moderator:read:blocked_terms",
-        "moderator:read:chat_settings",
-        "moderator:read:chatters",
-        "moderator:read:followers",
-        "moderator:read:moderators",
-        "moderator:read:shoutouts",
-        "moderator:read:suspicious_users",
-        "moderator:read:unban_requests",
-        "moderator:read:vips",
-        "moderator:read:warnings",
-    }
+_CHANNEL_MODERATE_SCOPE_GROUPS: tuple[frozenset[str], ...] = (
+    frozenset({"moderator:read:blocked_terms", "moderator:manage:blocked_terms"}),
+    frozenset({"moderator:read:chat_settings", "moderator:manage:chat_settings"}),
+    frozenset({"moderator:read:unban_requests", "moderator:manage:unban_requests"}),
+    frozenset({"moderator:read:banned_users", "moderator:manage:banned_users"}),
+    frozenset({"moderator:read:chat_messages", "moderator:manage:chat_messages"}),
+    frozenset({"moderator:read:moderators"}),
+    frozenset({"moderator:read:vips"}),
 )
 
 # Scope matrix derived from Twitch OAuth scopes docs and EventSub subscription types docs.
@@ -627,7 +611,7 @@ _EVENTSUB_SCOPE_ANY_OF: dict[str, tuple[frozenset[str], ...]] = {
     "channel.hype_train.begin": (frozenset({"channel:read:hype_train"}),),
     "channel.hype_train.end": (frozenset({"channel:read:hype_train"}),),
     "channel.hype_train.progress": (frozenset({"channel:read:hype_train"}),),
-    "channel.moderate": (_MODERATION_EVENT_SCOPE_ANY_OF,),
+    "channel.moderate": _CHANNEL_MODERATE_SCOPE_GROUPS,
     "channel.moderator.add": (frozenset({"moderation:read"}),),
     "channel.moderator.remove": (frozenset({"moderation:read"}),),
     "channel.poll.begin": (frozenset({"channel:read:polls", "channel:manage:polls"}),),

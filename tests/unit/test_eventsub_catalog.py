@@ -55,6 +55,18 @@ def test_required_scope_groups_unknown_event_returns_empty():
     assert required_scope_any_of_groups("unknown.event") == []
 
 
+def test_channel_moderate_requires_full_moderation_scope_bundle():
+    assert required_scope_any_of_groups("channel.moderate") == [
+        {"moderator:read:blocked_terms", "moderator:manage:blocked_terms"},
+        {"moderator:read:chat_settings", "moderator:manage:chat_settings"},
+        {"moderator:read:unban_requests", "moderator:manage:unban_requests"},
+        {"moderator:read:banned_users", "moderator:manage:banned_users"},
+        {"moderator:read:chat_messages", "moderator:manage:chat_messages"},
+        {"moderator:read:moderators"},
+        {"moderator:read:vips"},
+    ]
+
+
 def test_recommended_scope_selection_for_chat_message():
     assert recommended_broadcaster_scopes("channel.chat.message") == {"channel:bot"}
     assert recommended_bot_scopes("channel.chat.message") == {"user:read:chat", "user:bot"}
