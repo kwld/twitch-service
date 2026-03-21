@@ -92,10 +92,10 @@ if (Test-LokiEnabled) {
   if (!(Test-Path "logs")) {
     New-Item -ItemType Directory -Path "logs" | Out-Null
   }
-  docker compose up -d db alloy
+  docker compose -f docker-compose.dev.yml up -d db alloy
 }
 else {
-  docker compose up -d db
+  docker compose -f docker-compose.dev.yml up -d db
 }
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

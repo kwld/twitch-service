@@ -85,9 +85,9 @@ fi
 
 if is_loki_enabled; then
   mkdir -p logs
-  docker compose up -d db alloy
+  docker compose -f docker-compose.dev.yml up -d db alloy
 else
-  docker compose up -d db
+  docker compose -f docker-compose.dev.yml up -d db
 fi
 
 if [[ -n "${ngrok_token}" ]]; then
