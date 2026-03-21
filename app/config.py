@@ -72,7 +72,12 @@ class Settings(BaseSettings):
     twitch_scopes: str = Field(
         default=(
             "channel:bot user:bot user:read:chat user:write:chat clips:edit chat:read chat:edit "
-            "moderator:read:followers moderator:manage:chat_messages"
+            "channel:moderate moderator:read:followers moderator:read:blocked_terms "
+            "moderator:read:chat_settings moderator:read:unban_requests moderator:read:banned_users "
+            "moderator:read:chat_messages moderator:read:moderators moderator:read:vips "
+            "moderator:read:warnings moderator:manage:banned_users moderator:manage:chat_messages "
+            "moderator:manage:blocked_terms moderator:manage:automod moderator:manage:warnings "
+            "moderator:manage:chat_settings"
         ),
         alias="TWITCH_DEFAULT_SCOPES",
     )

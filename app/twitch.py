@@ -367,6 +367,88 @@ class TwitchClient:
             raise TwitchApiError("Empty create clip response")
         return data[0]
 
+    async def moderate_user(
+        self,
+        access_token: str,
+        broadcaster_id: str,
+        moderator_id: str,
+        target_user_id: str,
+        *,
+        duration: int | None = None,
+        reason: str | None = None,
+    ) -> None:
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Client-Id": self.client_id,
+            "Content-Type": "application/json",
+        }
+        body: dict[str, Any] = {
+            "data": {
+                "user_id": target_user_id,
+            }
+        }
+        if duration is not None:
+            body["data"]["duration"] = int(duration)
+        if reason:
+            body["data"]["reason"] = str(reason)
+        resp = await self._http_client.post(
+            f"{HELIX_BASE}/moderation/bans",
+            headers=headers,
+            params={
+                "broadcaster_id": broadcaster_id,
+                "moderator_id": moderator_id,
+            },
+            json=body,
+        )
+        if resp.status_code >= 300:
+            raise TwitchApiError(f"Failed moderating user: {resp.text}")
+
+    async def unban_user(
+        self,
+        access_token: str,
+        broadcaster_id: str,
+        moderator_id: str,
+        target_user_id: str,
+    ) -> None:
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Client-Id": self.client_id,
+        }
+        resp = await self._http_client.delete(
+            f"{HELIX_BASE}/moderation/bans",
+            headers=headers,
+            params={
+                "broadcaster_id": broadcaster_id,
+                "moderator_id": moderator_id,
+                "user_id": target_user_id,
+            },
+        )
+        if resp.status_code >= 300:
+            raise TwitchApiError(f"Failed unbanning user: {resp.text}")
+
+    async def delete_chat_message(
+        self,
+        access_token: str,
+        broadcaster_id: str,
+        moderator_id: str,
+        message_id: str,
+    ) -> None:
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Client-Id": self.client_id,
+        }
+        resp = await self._http_client.delete(
+            f"{HELIX_BASE}/moderation/chat",
+            headers=headers,
+            params={
+                "broadcaster_id": broadcaster_id,
+                "moderator_id": moderator_id,
+                "message_id": message_id,
+            },
+        )
+        if resp.status_code >= 300:
+            raise TwitchApiError(f"Failed deleting chat message: {resp.text}")
+
     async def get_clips(
         self,
         access_token: str,

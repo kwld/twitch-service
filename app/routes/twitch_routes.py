@@ -13,7 +13,17 @@ from sqlalchemy import select
 
 from app.bot_auth import ensure_bot_access_token
 from app.models import BotAccount, ChannelState, ServiceAccount, ServiceEventTrace, ServiceInterest
-from app.schemas import CreateClipRequest, CreateClipResponse, SendChatMessageRequest, SendChatMessageResponse
+from app.schemas import (
+    CreateClipRequest,
+    CreateClipResponse,
+    DeleteChatMessageRequest,
+    DeleteChatMessageResponse,
+    ModerateUserRequest,
+    ModerateUserResponse,
+    SendChatMessageRequest,
+    SendChatMessageResponse,
+)
+from app.twitch import TwitchApiError
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +44,19 @@ def register_twitch_routes(
     login_cache: dict[str, tuple[str, str, datetime]] = {}
     login_cache_guard = asyncio.Lock()
     login_lookup_locks: dict[str, asyncio.Lock] = {}
+    trace_tasks: set[asyncio.Task] = set()
+    trace_task_limit = 2000
+    token_info_cache_ttl = timedelta(minutes=5)
+    token_info_cache: dict[uuid.UUID, tuple[str, set[str], str, datetime]] = {}
+    token_info_cache_lock = asyncio.Lock()
 
-    async def _record_twitch_action(
+    def _schedule_trace(task: asyncio.Task) -> None:
+        if trace_task_limit and len(trace_tasks) >= trace_task_limit:
+            return
+        trace_tasks.add(task)
+        task.add_done_callback(lambda t: trace_tasks.discard(t))
+
+    async def _write_twitch_action(
         *,
         service_account_id: uuid.UUID,
         direction: str,
@@ -66,6 +87,74 @@ def register_twitch_routes(
                 await session.commit()
         except Exception:
             return
+
+    async def _record_twitch_action(
+        *,
+        service_account_id: uuid.UUID,
+        direction: str,
+        local_transport: str,
+        event_type: str,
+        target: str,
+        payload: object,
+    ) -> None:
+        try:
+            task = asyncio.create_task(
+                _write_twitch_action(
+                    service_account_id=service_account_id,
+                    direction=direction,
+                    local_transport=local_transport,
+                    event_type=event_type,
+                    target=target,
+                    payload=payload,
+                )
+            )
+            _schedule_trace(task)
+        except Exception:
+            return
+
+    async def _get_cached_token_info(
+        session,
+        bot: BotAccount,
+        access_token: str,
+    ) -> tuple[set[str], str]:
+        if not access_token:
+            return set(), ""
+        now = datetime.now(UTC)
+        async with token_info_cache_lock:
+            cached = token_info_cache.get(bot.id)
+            if cached and cached[0] == access_token and cached[3] > now:
+                return set(cached[1]), cached[2]
+        try:
+            token_info = await twitch_client.validate_user_token(access_token)
+        except TwitchApiError as exc:
+            message = str(exc).lower()
+            if "invalid access token" in message or "unauthorized" in message or "401" in message:
+                logger.warning(
+                    "Token validation failed for bot %s; attempting refresh.",
+                    bot.id,
+                )
+                try:
+                    refreshed = await twitch_client.refresh_token(bot.refresh_token)
+                except TwitchApiError as refresh_exc:
+                    raise HTTPException(
+                        status_code=502,
+                        detail=(
+                            "Bot token invalid or expired; re-run Guided bot setup to refresh OAuth tokens."
+                        ),
+                    ) from refresh_exc
+                bot.access_token = refreshed.access_token
+                bot.refresh_token = refreshed.refresh_token
+                bot.token_expires_at = refreshed.expires_at
+                await session.commit()
+                access_token = bot.access_token
+                token_info = await twitch_client.validate_user_token(access_token)
+            else:
+                raise
+        scopes = set(token_info.get("scopes", []))
+        user_id = str(token_info.get("user_id", "")).strip()
+        async with token_info_cache_lock:
+            token_info_cache[bot.id] = (access_token, scopes, user_id, now + token_info_cache_ttl)
+        return scopes, user_id
 
     async def _resolve_login_with_cache(token: str, login: str) -> tuple[str, str]:
         normalized = login.strip().lower()
@@ -606,8 +695,8 @@ def register_twitch_routes(
             if not bot.enabled:
                 raise HTTPException(status_code=409, detail="Bot is disabled")
             token = await ensure_bot_access_token(session, twitch_client, bot)
-            token_info = await twitch_client.validate_user_token(token)
-            scopes = set(token_info.get("scopes", []))
+            scopes, token_user_id = await _get_cached_token_info(session, bot, token)
+            token = bot.access_token
             if "user:write:chat" not in scopes:
                 raise HTTPException(
                     status_code=409,
@@ -624,7 +713,7 @@ def register_twitch_routes(
                         "Re-run Guided bot setup to refresh OAuth scopes."
                     ),
                 )
-            if str(token_info.get("user_id", "")) != bot.twitch_user_id:
+            if token_user_id and token_user_id != bot.twitch_user_id:
                 raise HTTPException(
                     status_code=409,
                     detail=(
@@ -740,6 +829,399 @@ def register_twitch_routes(
         )
         return response
 
+    @app.post("/v1/twitch/moderation/timeout", response_model=ModerateUserResponse)
+    async def timeout_twitch_user(
+        req: ModerateUserRequest,
+        service: ServiceAccount = Depends(service_auth),
+    ):
+        started = time.perf_counter()
+        action_id = str(uuid.uuid4())
+        broadcaster_user_id = req.broadcaster_user_id.strip()
+        target_user_id = req.target_user_id.strip()
+        await _record_twitch_action(
+            service_account_id=service.id,
+            direction="incoming",
+            local_transport="service_api",
+            event_type="service.twitch.moderation.timeout",
+            target="/v1/twitch/moderation/timeout",
+            payload={
+                "_action_id": action_id,
+                "_action_status": "pending",
+                "bot_account_id": str(req.bot_account_id),
+                "broadcaster_user_id": broadcaster_user_id,
+                "target_user_id": target_user_id,
+                "duration": req.duration,
+                "reason": req.reason,
+            },
+        )
+        async with session_factory() as session:
+            await ensure_service_can_access_bot(session, service.id, req.bot_account_id)
+            bot = await session.get(BotAccount, req.bot_account_id)
+            if not bot:
+                raise HTTPException(status_code=404, detail="Bot not found")
+            if not bot.enabled:
+                raise HTTPException(status_code=409, detail="Bot is disabled")
+            token = await ensure_bot_access_token(session, twitch_client, bot)
+            scopes, token_user_id = await _get_cached_token_info(session, bot, token)
+            token = bot.access_token
+            if "moderator:manage:banned_users" not in scopes:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Bot token missing required scope 'moderator:manage:banned_users'. "
+                        "Re-run Guided bot setup to refresh OAuth scopes."
+                    ),
+                )
+            if token_user_id and token_user_id != bot.twitch_user_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Stored bot token does not belong to this bot account. "
+                        "Re-run Guided bot setup and update the bot credentials."
+                    ),
+                )
+        try:
+            await twitch_client.moderate_user(
+                access_token=token,
+                broadcaster_id=broadcaster_user_id,
+                moderator_id=bot.twitch_user_id,
+                target_user_id=target_user_id,
+                duration=req.duration,
+                reason=req.reason,
+            )
+        except Exception as exc:
+            await _record_twitch_action(
+                service_account_id=service.id,
+                direction="outgoing",
+                local_transport="twitch_api",
+                event_type="twitch.moderation.timeout",
+                target="helix:/moderation/bans",
+                payload={
+                    "_action_id": action_id,
+                    "_action_status": "failed",
+                    "bot_account_id": str(req.bot_account_id),
+                    "broadcaster_user_id": broadcaster_user_id,
+                    "target_user_id": target_user_id,
+                    "duration_ms": int((time.perf_counter() - started) * 1000),
+                    "error": str(exc),
+                },
+            )
+            raise HTTPException(status_code=502, detail=f"Failed timing out user: {exc}") from exc
+        await _record_twitch_action(
+            service_account_id=service.id,
+            direction="outgoing",
+            local_transport="twitch_api",
+            event_type="twitch.moderation.timeout",
+            target="helix:/moderation/bans",
+            payload={
+                "_action_id": action_id,
+                "_action_status": "completed",
+                "bot_account_id": str(req.bot_account_id),
+                "broadcaster_user_id": broadcaster_user_id,
+                "target_user_id": target_user_id,
+                "duration_ms": int((time.perf_counter() - started) * 1000),
+            },
+        )
+        return ModerateUserResponse(
+            broadcaster_user_id=broadcaster_user_id,
+            moderator_user_id=bot.twitch_user_id,
+            target_user_id=target_user_id,
+            action="timeout",
+            duration=req.duration,
+            reason=req.reason,
+        )
+
+    @app.post("/v1/twitch/moderation/ban", response_model=ModerateUserResponse)
+    async def ban_twitch_user(
+        req: ModerateUserRequest,
+        service: ServiceAccount = Depends(service_auth),
+    ):
+        started = time.perf_counter()
+        action_id = str(uuid.uuid4())
+        broadcaster_user_id = req.broadcaster_user_id.strip()
+        target_user_id = req.target_user_id.strip()
+        await _record_twitch_action(
+            service_account_id=service.id,
+            direction="incoming",
+            local_transport="service_api",
+            event_type="service.twitch.moderation.ban",
+            target="/v1/twitch/moderation/ban",
+            payload={
+                "_action_id": action_id,
+                "_action_status": "pending",
+                "bot_account_id": str(req.bot_account_id),
+                "broadcaster_user_id": broadcaster_user_id,
+                "target_user_id": target_user_id,
+                "reason": req.reason,
+            },
+        )
+        async with session_factory() as session:
+            await ensure_service_can_access_bot(session, service.id, req.bot_account_id)
+            bot = await session.get(BotAccount, req.bot_account_id)
+            if not bot:
+                raise HTTPException(status_code=404, detail="Bot not found")
+            if not bot.enabled:
+                raise HTTPException(status_code=409, detail="Bot is disabled")
+            token = await ensure_bot_access_token(session, twitch_client, bot)
+            scopes, token_user_id = await _get_cached_token_info(session, bot, token)
+            token = bot.access_token
+            if "moderator:manage:banned_users" not in scopes:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Bot token missing required scope 'moderator:manage:banned_users'. "
+                        "Re-run Guided bot setup to refresh OAuth scopes."
+                    ),
+                )
+            if token_user_id and token_user_id != bot.twitch_user_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Stored bot token does not belong to this bot account. "
+                        "Re-run Guided bot setup and update the bot credentials."
+                    ),
+                )
+        try:
+            await twitch_client.moderate_user(
+                access_token=token,
+                broadcaster_id=broadcaster_user_id,
+                moderator_id=bot.twitch_user_id,
+                target_user_id=target_user_id,
+                duration=None,
+                reason=req.reason,
+            )
+        except Exception as exc:
+            await _record_twitch_action(
+                service_account_id=service.id,
+                direction="outgoing",
+                local_transport="twitch_api",
+                event_type="twitch.moderation.ban",
+                target="helix:/moderation/bans",
+                payload={
+                    "_action_id": action_id,
+                    "_action_status": "failed",
+                    "bot_account_id": str(req.bot_account_id),
+                    "broadcaster_user_id": broadcaster_user_id,
+                    "target_user_id": target_user_id,
+                    "duration_ms": int((time.perf_counter() - started) * 1000),
+                    "error": str(exc),
+                },
+            )
+            raise HTTPException(status_code=502, detail=f"Failed banning user: {exc}") from exc
+        await _record_twitch_action(
+            service_account_id=service.id,
+            direction="outgoing",
+            local_transport="twitch_api",
+            event_type="twitch.moderation.ban",
+            target="helix:/moderation/bans",
+            payload={
+                "_action_id": action_id,
+                "_action_status": "completed",
+                "bot_account_id": str(req.bot_account_id),
+                "broadcaster_user_id": broadcaster_user_id,
+                "target_user_id": target_user_id,
+                "duration_ms": int((time.perf_counter() - started) * 1000),
+            },
+        )
+        return ModerateUserResponse(
+            broadcaster_user_id=broadcaster_user_id,
+            moderator_user_id=bot.twitch_user_id,
+            target_user_id=target_user_id,
+            action="ban",
+            reason=req.reason,
+        )
+
+    @app.post("/v1/twitch/moderation/unban", response_model=ModerateUserResponse)
+    async def unban_twitch_user(
+        req: ModerateUserRequest,
+        service: ServiceAccount = Depends(service_auth),
+    ):
+        started = time.perf_counter()
+        action_id = str(uuid.uuid4())
+        broadcaster_user_id = req.broadcaster_user_id.strip()
+        target_user_id = req.target_user_id.strip()
+        await _record_twitch_action(
+            service_account_id=service.id,
+            direction="incoming",
+            local_transport="service_api",
+            event_type="service.twitch.moderation.unban",
+            target="/v1/twitch/moderation/unban",
+            payload={
+                "_action_id": action_id,
+                "_action_status": "pending",
+                "bot_account_id": str(req.bot_account_id),
+                "broadcaster_user_id": broadcaster_user_id,
+                "target_user_id": target_user_id,
+            },
+        )
+        async with session_factory() as session:
+            await ensure_service_can_access_bot(session, service.id, req.bot_account_id)
+            bot = await session.get(BotAccount, req.bot_account_id)
+            if not bot:
+                raise HTTPException(status_code=404, detail="Bot not found")
+            if not bot.enabled:
+                raise HTTPException(status_code=409, detail="Bot is disabled")
+            token = await ensure_bot_access_token(session, twitch_client, bot)
+            scopes, token_user_id = await _get_cached_token_info(session, bot, token)
+            token = bot.access_token
+            if "moderator:manage:banned_users" not in scopes:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Bot token missing required scope 'moderator:manage:banned_users'. "
+                        "Re-run Guided bot setup to refresh OAuth scopes."
+                    ),
+                )
+            if token_user_id and token_user_id != bot.twitch_user_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Stored bot token does not belong to this bot account. "
+                        "Re-run Guided bot setup and update the bot credentials."
+                    ),
+                )
+        try:
+            await twitch_client.unban_user(
+                access_token=token,
+                broadcaster_id=broadcaster_user_id,
+                moderator_id=bot.twitch_user_id,
+                target_user_id=target_user_id,
+            )
+        except Exception as exc:
+            await _record_twitch_action(
+                service_account_id=service.id,
+                direction="outgoing",
+                local_transport="twitch_api",
+                event_type="twitch.moderation.unban",
+                target="helix:/moderation/bans",
+                payload={
+                    "_action_id": action_id,
+                    "_action_status": "failed",
+                    "bot_account_id": str(req.bot_account_id),
+                    "broadcaster_user_id": broadcaster_user_id,
+                    "target_user_id": target_user_id,
+                    "duration_ms": int((time.perf_counter() - started) * 1000),
+                    "error": str(exc),
+                },
+            )
+            raise HTTPException(status_code=502, detail=f"Failed unbanning user: {exc}") from exc
+        await _record_twitch_action(
+            service_account_id=service.id,
+            direction="outgoing",
+            local_transport="twitch_api",
+            event_type="twitch.moderation.unban",
+            target="helix:/moderation/bans",
+            payload={
+                "_action_id": action_id,
+                "_action_status": "completed",
+                "bot_account_id": str(req.bot_account_id),
+                "broadcaster_user_id": broadcaster_user_id,
+                "target_user_id": target_user_id,
+                "duration_ms": int((time.perf_counter() - started) * 1000),
+            },
+        )
+        return ModerateUserResponse(
+            broadcaster_user_id=broadcaster_user_id,
+            moderator_user_id=bot.twitch_user_id,
+            target_user_id=target_user_id,
+            action="unban",
+        )
+
+    @app.post("/v1/twitch/moderation/delete", response_model=DeleteChatMessageResponse)
+    async def delete_twitch_chat_message(
+        req: DeleteChatMessageRequest,
+        service: ServiceAccount = Depends(service_auth),
+    ):
+        started = time.perf_counter()
+        action_id = str(uuid.uuid4())
+        broadcaster_user_id = req.broadcaster_user_id.strip()
+        message_id = req.message_id.strip()
+        await _record_twitch_action(
+            service_account_id=service.id,
+            direction="incoming",
+            local_transport="service_api",
+            event_type="service.twitch.moderation.delete",
+            target="/v1/twitch/moderation/delete",
+            payload={
+                "_action_id": action_id,
+                "_action_status": "pending",
+                "bot_account_id": str(req.bot_account_id),
+                "broadcaster_user_id": broadcaster_user_id,
+                "message_id": message_id,
+            },
+        )
+        async with session_factory() as session:
+            await ensure_service_can_access_bot(session, service.id, req.bot_account_id)
+            bot = await session.get(BotAccount, req.bot_account_id)
+            if not bot:
+                raise HTTPException(status_code=404, detail="Bot not found")
+            if not bot.enabled:
+                raise HTTPException(status_code=409, detail="Bot is disabled")
+            token = await ensure_bot_access_token(session, twitch_client, bot)
+            scopes, token_user_id = await _get_cached_token_info(session, bot, token)
+            token = bot.access_token
+            if "moderator:manage:chat_messages" not in scopes:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Bot token missing required scope 'moderator:manage:chat_messages'. "
+                        "Re-run Guided bot setup to refresh OAuth scopes."
+                    ),
+                )
+            if token_user_id and token_user_id != bot.twitch_user_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Stored bot token does not belong to this bot account. "
+                        "Re-run Guided bot setup and update the bot credentials."
+                    ),
+                )
+        try:
+            await twitch_client.delete_chat_message(
+                access_token=token,
+                broadcaster_id=broadcaster_user_id,
+                moderator_id=bot.twitch_user_id,
+                message_id=message_id,
+            )
+        except Exception as exc:
+            await _record_twitch_action(
+                service_account_id=service.id,
+                direction="outgoing",
+                local_transport="twitch_api",
+                event_type="twitch.moderation.delete",
+                target="helix:/moderation/chat",
+                payload={
+                    "_action_id": action_id,
+                    "_action_status": "failed",
+                    "bot_account_id": str(req.bot_account_id),
+                    "broadcaster_user_id": broadcaster_user_id,
+                    "message_id": message_id,
+                    "duration_ms": int((time.perf_counter() - started) * 1000),
+                    "error": str(exc),
+                },
+            )
+            raise HTTPException(status_code=502, detail=f"Failed deleting chat message: {exc}") from exc
+        await _record_twitch_action(
+            service_account_id=service.id,
+            direction="outgoing",
+            local_transport="twitch_api",
+            event_type="twitch.moderation.delete",
+            target="helix:/moderation/chat",
+            payload={
+                "_action_id": action_id,
+                "_action_status": "completed",
+                "bot_account_id": str(req.bot_account_id),
+                "broadcaster_user_id": broadcaster_user_id,
+                "message_id": message_id,
+                "duration_ms": int((time.perf_counter() - started) * 1000),
+            },
+        )
+        return DeleteChatMessageResponse(
+            broadcaster_user_id=broadcaster_user_id,
+            moderator_user_id=bot.twitch_user_id,
+            message_id=message_id,
+        )
+
     @app.post("/v1/twitch/clips", response_model=CreateClipResponse)
     async def create_twitch_clip(
         req: CreateClipRequest,
@@ -772,8 +1254,8 @@ def register_twitch_routes(
             if not bot.enabled:
                 raise HTTPException(status_code=409, detail="Bot is disabled")
             token = await ensure_bot_access_token(session, twitch_client, bot)
-            token_info = await twitch_client.validate_user_token(token)
-            scopes = set(token_info.get("scopes", []))
+            scopes, token_user_id = await _get_cached_token_info(session, bot, token)
+            token = bot.access_token
             if "clips:edit" not in scopes:
                 raise HTTPException(
                     status_code=409,

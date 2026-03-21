@@ -173,6 +173,36 @@ class CreateClipResponse(BaseModel):
     thumbnail_url: str | None = None
 
 
+class ModerateUserRequest(BaseModel):
+    bot_account_id: uuid.UUID
+    broadcaster_user_id: str = Field(min_length=1, max_length=64)
+    target_user_id: str = Field(min_length=1, max_length=64)
+    duration: int | None = Field(default=None, ge=1, le=1209600)
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class ModerateUserResponse(BaseModel):
+    broadcaster_user_id: str
+    moderator_user_id: str
+    target_user_id: str
+    action: Literal["timeout", "ban", "unban"]
+    duration: int | None = None
+    reason: str | None = None
+
+
+class DeleteChatMessageRequest(BaseModel):
+    bot_account_id: uuid.UUID
+    broadcaster_user_id: str = Field(min_length=1, max_length=64)
+    message_id: str = Field(min_length=1, max_length=128)
+
+
+class DeleteChatMessageResponse(BaseModel):
+    broadcaster_user_id: str
+    moderator_user_id: str
+    message_id: str
+    action: Literal["delete"] = "delete"
+
+
 class StartBroadcasterAuthorizationRequest(BaseModel):
     bot_account_id: uuid.UUID
     redirect_url: HttpUrl | None = None
