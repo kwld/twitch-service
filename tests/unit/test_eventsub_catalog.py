@@ -1,3 +1,7 @@
+from app.eventsub_authorization import (
+    normalize_interest_authorization_source,
+    normalize_persisted_authorization_source,
+)
 from app.eventsub_catalog import (
     best_transport_for_service,
     preferred_eventsub_version,
@@ -33,6 +37,16 @@ def test_best_transport_prefers_websocket_for_bot_moderator_events():
     )
     assert transport == "websocket"
     assert "bot moderator authorization" in reason.lower()
+
+
+def test_best_transport_does_not_force_websocket_for_channel_unban_bot_moderator():
+    transport, reason = best_transport_for_service(
+        "channel.unban",
+        webhook_available=True,
+        preferred_authorization_source="bot_moderator",
+    )
+    assert transport == "webhook"
+    assert "Webhook preferred" in reason
 
 
 def test_best_transport_falls_back_to_websocket_when_no_webhook():
@@ -75,3 +89,13 @@ def test_recommended_scope_selection_for_chat_message():
 def test_recommended_scope_selection_prefers_read_scope_order():
     assert recommended_broadcaster_scopes("channel.poll.begin") == {"channel:read:polls"}
     assert recommended_bot_scopes("channel.poll.begin") == set()
+
+
+def test_channel_unban_does_not_support_bot_moderator_selection():
+    assert normalize_interest_authorization_source("channel.unban", "bot_moderator") == "broadcaster"
+    assert normalize_persisted_authorization_source("channel.unban", "bot_moderator") == "broadcaster"
+
+
+def test_channel_moderate_still_supports_bot_moderator_selection():
+    assert normalize_interest_authorization_source("channel.moderate", "bot_moderator") == "bot_moderator"
+    assert normalize_persisted_authorization_source("channel.moderate", "bot_moderator") == "bot_moderator"

@@ -26,6 +26,7 @@ from app.eventsub_catalog import (
     recommended_bot_scopes,
     recommended_broadcaster_scopes,
     required_scope_any_of_groups,
+    requires_moderator_user_id,
     supported_twitch_transports,
 )
 from app.models import (
@@ -207,9 +208,11 @@ def register_service_routes(
 
         bot_ok = _scopes_satisfy_required_groups(bot_scopes, required_scope_groups)
 
-        if upstream_transport == "websocket" and normalized_source == "broadcaster":
+        moderator_bound_event = requires_moderator_user_id(event_type)
+
+        if moderator_bound_event and upstream_transport == "websocket" and normalized_source == "broadcaster":
             normalized_source = "bot_moderator"
-        if upstream_transport == "websocket" and normalized_source == "auto":
+        if moderator_bound_event and upstream_transport == "websocket" and normalized_source == "auto":
             if bot_ok:
                 return "bot_moderator"
             raise HTTPException(

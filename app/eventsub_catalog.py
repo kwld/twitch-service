@@ -373,7 +373,7 @@ def best_transport_for_service(
             "websocket",
             "Chat events prefer WebSocket: bot user-token flow with lower notification latency.",
         )
-    if normalized_source == "bot_moderator" and "websocket" in transports:
+    if normalized_source == "bot_moderator" and requires_moderator_user_id(normalized) and "websocket" in transports:
         return (
             "websocket",
             "Bot moderator authorization prefers WebSocket so Twitch can use the bot user token.",

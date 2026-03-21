@@ -187,16 +187,17 @@ class EventSubSubscriptionMixin:
         bot_ok = self._scopes_satisfy_required_groups(bot_scopes, required_scope_groups)
 
         requested_source = normalize_persisted_authorization_source(key.event_type, key.authorization_source)
-        if upstream_transport == "websocket" and requested_source == "broadcaster":
+        moderator_bound_event = requires_moderator_user_id(key.event_type)
+        if moderator_bound_event and upstream_transport == "websocket" and requested_source == "broadcaster":
             requested_source = "bot_moderator"
 
         if requested_source == "broadcaster" and broadcaster_ok:
             return "broadcaster", broadcaster_scopes, bot_scopes, bot_token_for_check
         if requested_source == "bot_moderator" and bot_ok:
             return "bot_moderator", broadcaster_scopes, bot_scopes, bot_token_for_check
-        if requested_source == "broadcaster" and not broadcaster_ok and bot_ok:
+        if moderator_bound_event and requested_source == "broadcaster" and not broadcaster_ok and bot_ok:
             return "bot_moderator", broadcaster_scopes, bot_scopes, bot_token_for_check
-        if requested_source == "bot_moderator" and not bot_ok and broadcaster_ok:
+        if moderator_bound_event and requested_source == "bot_moderator" and not bot_ok and broadcaster_ok:
             return "broadcaster", broadcaster_scopes, bot_scopes, bot_token_for_check
         return requested_source, broadcaster_scopes, bot_scopes, bot_token_for_check
     async def _record_service_actions_for_key(
