@@ -370,6 +370,27 @@ def _split_csv(values: str | None) -> list[str]:
     return [v.strip() for v in values.split(",") if v.strip()]
 
 
+def _is_working_subscription_status(row: TwitchSubscription) -> bool:
+    status = str(getattr(row, "status", "") or "").strip().lower()
+    if not status:
+        return False
+    if status.startswith("enabled"):
+        return True
+    if status in {
+        "webhook_callback_verification_pending",
+        "websocket_callback_verification_pending",
+    }:
+        created_at = (
+            getattr(row, "created_at", None)
+            or getattr(row, "updated_at", None)
+            or getattr(row, "last_seen_at", None)
+        )
+        if not created_at:
+            return False
+        return (datetime.now(UTC) - created_at) <= timedelta(minutes=10)
+    return False
+
+
 def _append_query(url: str, params: dict[str, str]) -> str:
     split = urlsplit(url)
     query = dict(parse_qsl(split.query, keep_blank_values=True))
@@ -416,7 +437,7 @@ async def _filter_working_interests(session, interests: list[ServiceInterest]) -
     active_subs = list(
         (
             await session.scalars(
-                select(TwitchSubscription).where(TwitchSubscription.status.startswith("enabled"))
+                select(TwitchSubscription)
             )
         ).all()
     )
@@ -429,6 +450,7 @@ async def _filter_working_interests(session, interests: list[ServiceInterest]) -
             row.raid_direction or "",
         )
         for row in active_subs
+        if _is_working_subscription_status(row)
     }
     return [
         interest

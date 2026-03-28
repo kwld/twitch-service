@@ -259,10 +259,25 @@ class EventSubSubscriptionMixin:
         subs = listed[0] if isinstance(listed, tuple) else listed
         async with self.session_factory() as session:
             existing_rows = list((await session.scalars(select(TwitchSubscription))).all())
+            interest_rows = list((await session.scalars(select(ServiceInterest))).all())
             previous_subscriptions = {
                 row.twitch_subscription_id: row
                 for row in existing_rows
             }
+            interest_sources_by_key: dict[tuple[uuid.UUID, str, str, str], set[str]] = {}
+            for interest in interest_rows:
+                lookup_key = (
+                    interest.bot_account_id,
+                    interest.event_type,
+                    interest.broadcaster_user_id,
+                    interest.raid_direction or "",
+                )
+                interest_sources_by_key.setdefault(lookup_key, set()).add(
+                    normalize_persisted_authorization_source(
+                        interest.event_type,
+                        interest.authorization_source,
+                    )
+                )
             bots = list((await session.scalars(select(BotAccount))).all())
             bots_by_id = {bot.id: bot for bot in bots}
             bots_by_twitch_user_id = {str(bot.twitch_user_id): bot for bot in bots}
@@ -314,14 +329,19 @@ class EventSubSubscriptionMixin:
                 if not bot:
                     continue
                 previous_row = previous_subscriptions.get(sub_id)
-                authorization_source = (
-                    normalize_persisted_authorization_source(
+                authorization_source = DEFAULT_AUTHORIZATION_SOURCE
+                if previous_row:
+                    authorization_source = normalize_persisted_authorization_source(
                         event_type,
                         getattr(previous_row, "authorization_source", DEFAULT_AUTHORIZATION_SOURCE),
                     )
-                    if previous_row
-                    else DEFAULT_AUTHORIZATION_SOURCE
-                )
+                else:
+                    interest_sources = interest_sources_by_key.get(
+                        (bot.id, event_type, str(broadcaster_user_id), raid_direction),
+                        set(),
+                    )
+                    if len(interest_sources) == 1:
+                        authorization_source = next(iter(interest_sources))
                 moderator_user_id = str(condition.get("moderator_user_id", "")).strip()
                 if requires_moderator_user_id(event_type):
                     if moderator_user_id and moderator_user_id == str(bot.twitch_user_id):
@@ -768,6 +788,10 @@ class EventSubSubscriptionMixin:
                         raise RuntimeError(reason)
                     if upstream_transport == "websocket":
                         create_access_token = await ensure_bot_access_token(session, self.twitch, bot)
+                    persisted_authorization_source = normalize_persisted_authorization_source(
+                        key.event_type,
+                        key.authorization_source,
+                    )
                     required_scope_groups = required_scope_any_of_groups(key.event_type)
                     if required_scope_groups:
                         missing = " and ".join(["|".join(sorted(group)) for group in required_scope_groups])
@@ -786,6 +810,10 @@ class EventSubSubscriptionMixin:
                         )
                         if resolved_source == "bot_moderator":
                             create_access_token = resolved_bot_token or create_access_token
+                        persisted_authorization_source = normalize_persisted_authorization_source(
+                            key.event_type,
+                            resolved_source,
+                        )
                         condition = self._build_subscription_condition(
                             event_type=key.event_type,
                             broadcaster_user_id=key.broadcaster_user_id,
@@ -862,16 +890,11 @@ class EventSubSubscriptionMixin:
                             "session_id": created.get("transport", {}).get("session_id"),
                         },
                     )
-                    persisted_source = (
-                        "bot_moderator"
-                        if condition.get("moderator_user_id") == str(bot.twitch_user_id)
-                        else DEFAULT_AUTHORIZATION_SOURCE
-                    )
                     new_sub = TwitchSubscription(
                         bot_account_id=key.bot_account_id,
                         event_type=key.event_type,
                         broadcaster_user_id=key.broadcaster_user_id,
-                        authorization_source=persisted_source,
+                        authorization_source=persisted_authorization_source,
                         twitch_subscription_id=created["id"],
                         status=created.get("status", "enabled"),
                         session_id=created.get("transport", {}).get("session_id"),
@@ -993,3 +1016,4 @@ class EventSubSubscriptionMixin:
             )
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+
