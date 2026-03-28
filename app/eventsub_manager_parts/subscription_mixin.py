@@ -541,6 +541,114 @@ class EventSubSubscriptionMixin:
 
         await asyncio.gather(*(_ensure_key(key) for key in keys))
 
+    async def resubscribe_broadcaster(
+        self,
+        *,
+        broadcaster_user_id: str,
+        service_account_id: uuid.UUID | None = None,
+        allowed_bot_ids: set[uuid.UUID] | None = None,
+        bot_account_id: uuid.UUID | None = None,
+        force: bool = False,
+    ) -> dict:
+        broadcaster = str(broadcaster_user_id or "").strip()
+        if not broadcaster:
+            raise ValueError("broadcaster_user_id is required")
+
+        allowed_ids = set(allowed_bot_ids or set())
+        if bot_account_id is not None:
+            if allowed_ids and bot_account_id not in allowed_ids:
+                raise ValueError("bot_account_id is not allowed for this service")
+            allowed_ids = {bot_account_id}
+
+        # Start from a fresh Twitch snapshot so we do not trust stale DB rows.
+        await self._sync_from_twitch_and_reconcile()
+
+        async with self.session_factory() as session:
+            interests = list(
+                (
+                    await session.scalars(
+                        select(ServiceInterest).where(
+                            ServiceInterest.broadcaster_user_id == broadcaster,
+                        )
+                    )
+                ).all()
+            )
+            if service_account_id is not None:
+                interests = [row for row in interests if row.service_account_id == service_account_id]
+            if allowed_ids:
+                interests = [row for row in interests if row.bot_account_id in allowed_ids]
+
+            db_rows = list(
+                (
+                    await session.scalars(
+                        select(TwitchSubscription).where(
+                            TwitchSubscription.broadcaster_user_id == broadcaster,
+                        )
+                    )
+                ).all()
+            )
+            if allowed_ids:
+                db_rows = [row for row in db_rows if row.bot_account_id in allowed_ids]
+
+            rows_to_remove = list(db_rows) if force else []
+            removed_subscription_count = 0
+            for row in rows_to_remove:
+                delete_access_token: str | None = None
+                if self._transport_for_event(row.event_type, row.authorization_source) == "websocket":
+                    bot = await session.get(BotAccount, row.bot_account_id)
+                    if bot and bot.enabled:
+                        with suppress(Exception):
+                            delete_access_token = await ensure_bot_access_token(session, self.twitch, bot)
+                try:
+                    await self.twitch.delete_eventsub_subscription(
+                        row.twitch_subscription_id,
+                        access_token=delete_access_token,
+                    )
+                    removed_subscription_count += 1
+                except TwitchApiError as exc:
+                    if not self._is_subscription_not_found_error(exc):
+                        raise
+                await session.delete(row)
+            if rows_to_remove:
+                await session.commit()
+
+        keys = sorted(
+            {
+                InterestKey(
+                    interest.bot_account_id,
+                    interest.event_type,
+                    interest.broadcaster_user_id,
+                    normalize_persisted_authorization_source(
+                        interest.event_type,
+                        interest.authorization_source,
+                    ),
+                    interest.raid_direction or "",
+                )
+                for interest in interests
+            },
+            key=lambda item: (
+                str(item.bot_account_id),
+                str(item.event_type),
+                str(item.broadcaster_user_id),
+                str(item.authorization_source),
+                str(item.raid_direction or ""),
+            ),
+        )
+
+        for key in keys:
+            await self._ensure_subscription(key)
+
+        await self._sync_from_twitch_and_reconcile()
+        return {
+            "broadcaster_user_id": broadcaster,
+            "bot_account_id": str(bot_account_id) if bot_account_id else None,
+            "force": bool(force),
+            "matched_interest_count": len(interests),
+            "ensured_interest_count": len(keys),
+            "removed_subscription_count": removed_subscription_count,
+            "event_types": sorted({interest.event_type for interest in interests}),
+        }
+
     async def _ensure_subscription(self, key: InterestKey) -> None:
         lock = await self._acquire_subscription_key_lock(key)
         try:

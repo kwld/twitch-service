@@ -30,6 +30,7 @@ from sqlalchemy.exc import IntegrityError
 from app.auth import authenticate_service
 from app.bot_auth import ensure_bot_access_token
 from app.config import RuntimeState, load_settings
+from app.eventsub_authorization import normalize_persisted_authorization_source
 from app.core.network_security import (
     WebhookTargetValidator,
     is_ip_allowed,
@@ -420,13 +421,25 @@ async def _filter_working_interests(session, interests: list[ServiceInterest]) -
         ).all()
     )
     active_keys = {
-        (row.bot_account_id, row.event_type, row.broadcaster_user_id)
+        (
+            row.bot_account_id,
+            row.event_type,
+            row.broadcaster_user_id,
+            normalize_persisted_authorization_source(row.event_type, row.authorization_source),
+            row.raid_direction or "",
+        )
         for row in active_subs
     }
     return [
         interest
         for interest in interests
-        if (interest.bot_account_id, interest.event_type, interest.broadcaster_user_id) in active_keys
+        if (
+            interest.bot_account_id,
+            interest.event_type,
+            interest.broadcaster_user_id,
+            normalize_persisted_authorization_source(interest.event_type, interest.authorization_source),
+            interest.raid_direction or "",
+        ) in active_keys
     ]
 
 

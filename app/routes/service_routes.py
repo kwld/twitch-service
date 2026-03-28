@@ -47,6 +47,8 @@ from app.schemas import (
     EventSubCatalogResponse,
     EventSubScopeRequirement,
     InterestResponse,
+    ResubscribeBroadcasterRequest,
+    ResubscribeBroadcasterResponse,
     RetainedInterestStatusItem,
     RetainedInterestStatusResponse,
     ResolveEventSubScopesRequest,
@@ -609,6 +611,46 @@ def register_service_routes(
             total_from_twitch=len(snapshot),
             matched_for_service=len(items),
             items=items,
+        )
+
+    @app.post(
+        "/v1/eventsub/subscriptions/resubscribe",
+        response_model=ResubscribeBroadcasterResponse,
+    )
+    async def resubscribe_broadcaster_eventsub(
+        req: ResubscribeBroadcasterRequest,
+        service: ServiceAccount = Depends(service_auth),
+    ):
+        async with session_factory() as session:
+            allowed_ids = await service_allowed_bot_ids(session, service.id)
+            if req.bot_account_id is not None:
+                await ensure_service_can_access_bot(session, service.id, req.bot_account_id)
+
+        result = await eventsub_manager.resubscribe_broadcaster(
+            broadcaster_user_id=str(req.broadcaster_user_id),
+            service_account_id=service.id,
+            allowed_bot_ids=allowed_ids,
+            bot_account_id=req.bot_account_id,
+            force=bool(req.force),
+        )
+        return ResubscribeBroadcasterResponse(
+            broadcaster_user_id=str(result.get("broadcaster_user_id", "")),
+            bot_account_id=(
+                uuid.UUID(str(result["bot_account_id"]))
+                if result.get("bot_account_id")
+                else None
+            ),
+            force=bool(result.get("force")),
+            matched_interest_count=int(result.get("matched_interest_count", 0) or 0),
+            ensured_interest_count=int(result.get("ensured_interest_count", 0) or 0),
+            removed_subscription_count=int(result.get("removed_subscription_count", 0) or 0),
+            event_types=sorted(
+                {
+                    str(event_type).strip()
+                    for event_type in (result.get("event_types") or [])
+                    if str(event_type).strip()
+                }
+            ),
         )
 
     async def _start_broadcaster_authorization_for_scopes(

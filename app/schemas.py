@@ -85,6 +85,22 @@ class ActiveTwitchSubscriptionsResponse(BaseModel):
     items: list[ActiveTwitchSubscriptionItem]
 
 
+class ResubscribeBroadcasterRequest(BaseModel):
+    broadcaster_user_id: str = Field(min_length=1, max_length=64)
+    bot_account_id: uuid.UUID | None = None
+    force: bool = False
+
+
+class ResubscribeBroadcasterResponse(BaseModel):
+    broadcaster_user_id: str
+    bot_account_id: uuid.UUID | None = None
+    force: bool
+    matched_interest_count: int
+    ensured_interest_count: int
+    removed_subscription_count: int
+    event_types: list[str]
+
+
 class RetainedInterestStatusItem(BaseModel):
     bot_account_id: uuid.UUID
     broadcaster_user_id: str
